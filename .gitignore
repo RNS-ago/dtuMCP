@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# The session cookies live in ~/.config/dtumcp/ and downloads in
+# ~/Downloads/dtulearn/, both outside the repo. Ignore them here too in case
+# DTU_COOKIE_FILE or DTU_DOWNLOADS is ever pointed at the working directory.
+cookie
+downloads/
