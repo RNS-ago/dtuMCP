@@ -14,7 +14,7 @@ from pathlib import Path
 # Load the functions under test without importing the mcp dependency.
 tree = ast.parse(open("server.py").read())
 wanted = {"_flatten", "_firefox_profile", "_term", "_pdf_text", "_TextExtractor",
-          "_html_text", "_urn_kind", "_ooxml_text"}
+          "_html_text", "_urn_kind", "_ooxml_text", "_description"}
 constants_extra = {"OOXML_MEMBERS"}
 constants = {"SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
 
@@ -45,10 +45,13 @@ exec(
 # --- _flatten -------------------------------------------------------------
 toc = [
     {
+        "ModuleId": 1,
         "Title": "Week 1",
+        "Description": {"Text": "Tuesday 1/09", "Html": ""},
         "Topics": [{"TopicId": 11, "Title": "Slides", "TypeIdentifier": "File"}],
         "Modules": [
             {
+                "ModuleId": 2,
                 "Title": "Exercises",
                 "Topics": [
                     # An internal quicklink is relative and stays hidden.
@@ -69,17 +72,22 @@ toc = [
             }
         ],
     },
-    {"Title": "Empty"},
+    {"ModuleId": 3, "Title": "Empty"},
 ]
 assert mod._flatten(toc) == [
-    "# Week 1",
+    "# [1] Week 1 (info)",
     "  - [11] Slides (File)",
-    "  # Exercises",
+    "  # [2] Exercises",
     "    - [12] Sheet (Link)",
     "    - [13] Notes (Link) https://courses.compute.dtu.dk/02242/",
-    "# Empty",
+    "# [3] Empty",
 ], mod._flatten(toc)
 assert mod._flatten(None) == []
+
+# A unit's own text prefers the plain rendition and falls back to the HTML one.
+assert mod._description({"Description": {"Text": " Tuesday ", "Html": "<p>x</p>"}}) == "Tuesday"
+assert mod._description({"Description": {"Text": "", "Html": "<p>Week <b>1</b></p>"}}) == "Week 1"
+assert mod._description({}) == ""
 
 # --- _ooxml_text ----------------------------------------------------------
 with tempfile.TemporaryDirectory() as tmp:

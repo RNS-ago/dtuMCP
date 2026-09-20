@@ -28,10 +28,15 @@ teachers actually handed me this term.
 
 - `list_courses` — my enrolments, grouped by term, newest first. Each line reads
   `[<org unit id>] <course number> <name>, <term>`.
-- `course_contents(org_unit_id)` — the module and topic tree for one course. Each
-  topic line reads `- [<topic id>] <title> (<type>)`, where the type is `File`,
-  `Link` or `video`. A line ending in an `http` URL is a link out to a public
-  page; fetch that with your web tools.
+- `course_contents(org_unit_id)` — the unit and topic tree for one course. A
+  `#` line is a unit and reads `# [<unit id>] <title>`, with `(info)` when that
+  unit has text of its own. A topic line reads `- [<topic id>] <title> (<type>)`,
+  where the type is `File`, `Link` or `video`. A line ending in an `http` URL is
+  a link out to a public page; fetch that with your web tools.
+- `unit_info(org_unit_id, unit_id)` — one unit's own text and its contents. This
+  is where a week's schedule, its reading, and the instructions for its exercises
+  live, so read the unit before its files when I ask what a week covers or what I
+  am supposed to do. Only units marked `(info)` have any.
 - `get_file(org_unit_id, topic_id)` — one topic, whatever kind it is.
   - A **PDF**, **Word**, **PowerPoint**, **Excel** or plain-text file comes
     back as text. Work from that text.

@@ -102,7 +102,8 @@ Paste its contents into:
 | Tool | What it returns |
 | --- | --- |
 | `list_courses` | Enrolled courses grouped by term, newest first |
-| `course_contents(org_unit_id)` | Module/topic tree, with topic IDs and any external links |
+| `course_contents(org_unit_id)` | Unit/topic tree, with their IDs and any external links |
+| `unit_info(org_unit_id, unit_id)` | One unit's own text, plus its contents |
 | `get_file(org_unit_id, topic_id)` | A topic's content, whatever kind it is (see below) |
 | `list_assignments(org_unit_id)` | Assignment folders and due dates |
 | `list_announcements(org_unit_id)` | Course announcements |
@@ -113,6 +114,12 @@ number offered in more than one term is ambiguous, so the error lists the
 offerings and their ids instead of picking one.
 
 Binary downloads land in `~/Downloads/dtulearn` (override with `DTU_DOWNLOADS`).
+A unit (D2L calls it a module) is one of the `#` groups in a course tree. Most
+carry text of their own — a week's schedule, instructions for the exercises, a
+welcome message — which `course_contents` marks with `(info)` and `unit_info`
+returns in full. Announcements are separate and belong to the course rather than
+the unit; `list_announcements` has those.
+
 `get_file` looks the topic up in the table of contents first and answers by
 kind: a **file** is downloaded, an **HTML page** comes back as stripped text, a
 **link** returns its target URL for you to fetch yourself, and a **video** in

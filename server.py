@@ -329,20 +329,29 @@ def _html_text(html: str) -> str:
 
 
 @lru_cache(maxsize=None)
-def _topics(ou: int) -> dict:
-    """Map topic id to its table-of-contents entry, so get_file knows what kind
-    of thing it has been asked for before fetching anything. The single-topic
-    endpoint does not answer consistently across courses; the toc does."""
-    found = {}
+def _toc_index(ou: int) -> tuple:
+    """Index one fetch of the table of contents by topic id and by module id.
+    get_file needs to know what kind of thing a topic is before fetching it, and
+    the single-topic endpoint does not answer consistently across courses."""
+    topics, units = {}, {}
 
     def walk(modules):
         for m in modules or []:
+            units[m["ModuleId"]] = m
             for t in m.get("Topics") or []:
-                found[t["TopicId"]] = t
+                topics[t["TopicId"]] = t
             walk(m.get("Modules"))
 
     walk(_get(f"/d2l/api/le/{LE}/{ou}/content/toc").get("Modules"))
-    return found
+    return topics, units
+
+
+def _description(node) -> str:
+    """Modules and topics carry a Description in both a plain and an HTML
+    rendition. Text is already clean; fall back to stripping the HTML for the
+    ones where D2L only filled that in."""
+    desc = node.get("Description") or {}
+    return (desc.get("Text") or "").strip() or _html_text(desc.get("Html") or "")
 
 
 def _urn_kind(url: str) -> str:
@@ -359,7 +368,8 @@ def _flatten(modules, depth=0):
     """TOC modules nest arbitrarily; flatten to one line per module and topic."""
     out = []
     for m in modules or []:
-        out.append("  " * depth + f"# {m.get('Title', '?')}")
+        info = " (info)" if _description(m) else ""
+        out.append("  " * depth + f"# [{m['ModuleId']}] {m.get('Title', '?')}{info}")
         for t in m.get("Topics") or []:
             kind = t.get("TypeIdentifier", "?")
             # Link topics point either inside D2L (a relative quicklink, no use
@@ -439,6 +449,27 @@ def course_contents(org_unit_id: int) -> str:
 
 
 @mcp.tool()
+def unit_info(org_unit_id: int, unit_id: int) -> str:
+    """Show a unit's own text: its schedule, instructions and notes, plus its topics.
+
+    Unit ids are the bracketed numbers on the `#` lines of course_contents. Only
+    units marked `(info)` there have any text of their own.
+    """
+    unit = _toc_index(_resolve(org_unit_id))[1].get(unit_id)
+    if unit is None:
+        raise RuntimeError(
+            f"No unit {unit_id} in that course. Run course_contents; unit ids are "
+            "the bracketed numbers on the lines beginning with #."
+        )
+    out = [f"# {unit.get('Title', '?')}", ""]
+    out.append(_description(unit) or "(This unit has no text of its own.)")
+    topics = _flatten([unit])[1:]  # drop the heading _flatten repeats
+    if topics:
+        out += ["", "Contents:", *topics]
+    return "\n".join(out)
+
+
+@mcp.tool()
 def get_file(org_unit_id: int, topic_id: int) -> str:
     """Fetch one content topic: a file's text, an HTML page's text, or a link's target.
 
@@ -446,7 +477,7 @@ def get_file(org_unit_id: int, topic_id: int) -> str:
     the saved file's path; other binaries are saved and only the path returned.
     """
     ou = _resolve(org_unit_id)
-    topic = _topics(ou).get(topic_id)
+    topic = _toc_index(ou)[0].get(topic_id)
     if topic is None:
         raise RuntimeError(
             f"No topic {topic_id} in that course. Run course_contents to see the "
@@ -564,6 +595,7 @@ COMMANDS = {
         login,
         list_courses,
         course_contents,
+        unit_info,
         get_file,
         list_assignments,
         list_announcements,
