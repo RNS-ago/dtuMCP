@@ -25,11 +25,7 @@ again.
 That file is your DTU session: anyone who reads it is logged in as you. Keep it
 off shared machines and out of git.
 
-Then register the server once:
-
-```bash
-claude mcp add --scope user dtu-learn -- uv run --script /home/ago/repos/dtuMCP/server.py
-```
+One `login` covers every client: they all read the same file.
 
 Sessions expire after a few hours of inactivity or at logout. When a tool says
 the session was rejected, run `login` again.
@@ -37,8 +33,53 @@ the session was rejected, run `login` again.
 Firefox only. It reads the profile named by the `[Install...]` section of
 `profiles.ini`, not the `Default=1` flag — those can point at different
 profiles, and the `[Install...]` one is what Firefox actually launches. Set
-`DTU_FIREFOX_PROFILE` if yours lives elsewhere (snap and flatpak Firefox do). `DTU_COOKIE` still overrides everything if you would
-rather paste a Cookie header from devtools.
+`DTU_FIREFOX_PROFILE` if yours lives elsewhere (snap and flatpak Firefox do).
+`DTU_COOKIE` still overrides everything if you would rather paste a Cookie
+header from devtools.
+
+## Registering it with a client
+
+Each of these starts the server over stdio, as a child process on your own
+machine. Nothing listens on a port and nothing is exposed to the network.
+
+Use the **absolute path to `uv`**. Anything launched from a desktop icon or a
+`.desktop` entry does not inherit your shell's `PATH`, so a bare `uv` fails with
+`spawn uv ENOENT`. `which uv` gives you the path to use.
+
+**Claude Code** — registers for the CLI and the VS Code extension at once:
+
+```bash
+claude mcp add --scope user dtu-learn -- ~/.local/bin/uv run --script ~/repos/dtuMCP/server.py
+```
+
+**Cursor** — `~/.cursor/mcp.json` for every project, or `.cursor/mcp.json` in
+one project. Then Customize → MCP and toggle `dtu-learn` on.
+
+```json
+{
+  "mcpServers": {
+    "dtu-learn": {
+      "command": "/home/you/.local/bin/uv",
+      "args": ["run", "--script", "/home/you/repos/dtuMCP/server.py"]
+    }
+  }
+}
+```
+
+**Claude Desktop** — same `mcpServers` block, merged into the existing config
+rather than replacing it, since that file also holds your preferences:
+
+- Linux: `~/.config/Claude/claude_desktop_config.json`
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+**Quit the client fully and reopen it after any change** — to the config or to
+`server.py`. An MCP server is spawned once at startup and held for the life of
+the client, so a running one keeps executing the copy of `server.py` it loaded
+when it started. Editing the file changes nothing until the client restarts.
+
+Claude Desktop also rewrites its config file when preferences change, so edit it
+while the app is closed or your `mcpServers` block can be overwritten.
 
 ## Tools
 
