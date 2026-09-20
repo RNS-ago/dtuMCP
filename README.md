@@ -81,6 +81,22 @@ when it started. Editing the file changes nothing until the client restarts.
 Claude Desktop also rewrites its config file when preferences change, so edit it
 while the app is closed or your `mcpServers` block can be overwritten.
 
+## Telling your agent to use it
+
+`dtu-learn-prompt.md` is a set of instructions to give whatever agent you point
+at your coursework. Having the tools available is not the same as an agent
+reaching for them: without this it will answer course questions from memory,
+invent org unit ids, or report material as unreachable because a reply mentioned
+a file path. The file also covers the public course websites, which need no
+login and are fetched with ordinary web tools rather than these.
+
+Paste its contents into:
+
+- **Claude Code** — `~/.claude/CLAUDE.md` for every session, or a project
+  `CLAUDE.md`.
+- **Cursor** — `~/.cursor/rules/dtu-learn.mdc`, or Settings → Rules.
+- **Claude Desktop** — a Project's custom instructions.
+
 ## Tools
 
 | Tool | What it returns |
