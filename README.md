@@ -11,8 +11,9 @@ authenticates with your own browser session cookies instead.
 uv run --script server.py login
 ```
 
-That opens DTU Learn in Firefox. Sign in, press Enter in the terminal, and the
-session cookies land in `~/.config/dtumcp/cookie` (mode 600). It prints your
+That lists the Firefox and LibreWolf profiles it finds (regular, snap and
+flatpak installs), your default browser first, and asks which one to use. It opens DTU Learn in that
+profile. Sign in, press Enter in the terminal, and the session cookies land in `~/.config/dtumcp/cookie` (mode 600). It prints your
 course list to confirm.
 
 `d2lSessionVal` is a session cookie, and Firefox never writes those to
@@ -30,10 +31,12 @@ One `login` covers every client: they all read the same file.
 Sessions expire after a few hours of inactivity or at logout. When a tool says
 the session was rejected, run `login` again.
 
-Firefox only. It reads the profile named by the `[Install...]` section of
-`profiles.ini`, not the `Default=1` flag — those can point at different
-profiles, and the `[Install...]` one is what Firefox actually launches. Set
-`DTU_FIREFOX_PROFILE` if yours lives elsewhere (snap and flatpak Firefox do).
+Firefox-family browsers only: Chromium browsers (Chrome, Brave, Edge) encrypt
+their cookies with a key kept in the desktop keyring. The list puts each
+browser's `[Install...]` profile from `profiles.ini` first and marks it
+`(default)` — that is the one the browser actually launches, while the
+`Default=1` flag often points at a stale older profile. Set
+`DTU_FIREFOX_PROFILE` to a profile directory to skip the scan.
 `DTU_COOKIE` still overrides everything if you would rather paste a Cookie
 header from devtools.
 

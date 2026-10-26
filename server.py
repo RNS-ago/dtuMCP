@@ -4,9 +4,10 @@
 # ///
 """MCP server for DTU Learn (D2L Brightspace) course material.
 
-Auth: run `uv run --script server.py login`. That opens DTU Learn in Firefox,
-waits for you to sign in, lifts the session cookies out of the Firefox cookie
-database and saves them to ~/.config/dtumcp/cookie.
+Auth: run `uv run --script server.py login`. That lists the Firefox and
+LibreWolf profiles it finds, opens DTU Learn in the one you pick, waits for you
+to sign in, lifts the session cookies out of that profile's cookie database and
+saves them to ~/.config/dtumcp/cookie.
 
 DTU_COOKIE still overrides the saved file if you would rather paste a Cookie
 header from devtools yourself.
@@ -47,26 +48,92 @@ mcp = MCPServer("dtu-learn")
 logging.getLogger("httpx").setLevel(logging.WARNING)  # one INFO line per request
 
 
-def _firefox_profile() -> Path:
+# Firefox and its forks share one profile layout and cookie format, so one
+# reader covers them all. Chromium browsers (Chrome, Brave, Edge) encrypt their
+# cookies with a key in the desktop keyring, so they are not listed here.
+BROWSERS = {
+    "LibreWolf": (["librewolf"], "~/.librewolf"),
+    "LibreWolf (flatpak)": (
+        ["flatpak", "run", "io.gitlab.librewolf-community"],
+        "~/.var/app/io.gitlab.librewolf-community/.librewolf",
+    ),
+    "Firefox": (["firefox"], "~/.mozilla/firefox"),
+    "Firefox (snap)": (["firefox"], "~/snap/firefox/common/.mozilla/firefox"),
+    "Firefox (flatpak)": (
+        ["flatpak", "run", "org.mozilla.firefox"],
+        "~/.var/app/org.mozilla.firefox/.mozilla/firefox",
+    ),
+}
+
+
+def _default_browser() -> str:
+    """The default browser's desktop entry, such as librewolf.desktop or
+    firefox_firefox.desktop, or an empty string when xdg-settings is missing."""
+    try:
+        done = subprocess.run(
+            ["xdg-settings", "get", "default-web-browser"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    return done.stdout.strip().lower()
+
+
+def _profiles() -> list[tuple[str, list[str], Path]]:
+    """Every browser profile on this machine that holds a cookie database, as
+    (label, launch command, profile directory). Each browser's own default
+    comes first, and the default browser's profiles lead the list, so the
+    first entry is the best guess."""
     override = os.environ.get("DTU_FIREFOX_PROFILE")
     if override:
-        return Path(override).expanduser()
-    root = Path("~/.mozilla/firefox").expanduser()
-    ini = configparser.ConfigParser()
-    ini.read(root / "profiles.ini")
-    # The [InstallXXXX] section names the profile Firefox actually launches. The
-    # Default=1 flag under a [ProfileN] section is often a stale older profile,
-    # so only fall back to it when there is no install section.
-    for section in ini.sections():
-        if section.startswith("Install") and ini[section].get("Default"):
-            return root / ini[section]["Default"]
-    for section in ini.sections():
-        if section.startswith("Profile") and ini[section].get("Default") == "1":
-            return root / ini[section]["Path"]
-    raise RuntimeError(
-        f"No Firefox profile found in {root}. Set DTU_FIREFOX_PROFILE to your "
-        "profile directory (a snap or flatpak Firefox keeps it elsewhere)."
-    )
+        return [("DTU_FIREFOX_PROFILE", [], Path(override).expanduser())]
+    default = _default_browser()
+    found = []
+    for browser, (command, root) in BROWSERS.items():
+        root = Path(root).expanduser()
+        ini = configparser.ConfigParser()
+        ini.read(root / "profiles.ini")
+        # The [InstallXXXX] section names the profile the browser actually
+        # launches. The Default=1 flag under a [ProfileN] section is often a
+        # stale older profile, so it only ranks second.
+        launched = {ini[s]["Default"] for s in ini.sections()
+                    if s.startswith("Install") and ini[s].get("Default")}
+        ranked = []
+        for s in ini.sections():
+            if not s.startswith("Profile") or "Path" not in ini[s]:
+                continue
+            path = ini[s]["Path"]
+            if not (root / path / "cookies.sqlite").exists():
+                continue
+            rank = 0 if path in launched else 1 if ini[s].get("Default") == "1" else 2
+            name = ini[s].get("Name", path) + (" (default)" if rank == 0 else "")
+            ranked.append((rank, f"{browser}: {name}", command, root / path))
+        # "LibreWolf (flatpak)" matches io.gitlab.librewolf-community.desktop
+        # on its first word, as each Firefox install matches its own entry.
+        is_default = browser.split()[0].lower() in default
+        found += [(not is_default, *e[1:]) for e in sorted(ranked, key=lambda e: e[0])]
+    return [e[1:] for e in sorted(found, key=lambda e: e[0])]
+
+
+def _pick_profile() -> tuple[str, list[str], Path]:
+    found = _profiles()
+    if not found:
+        raise RuntimeError(
+            "No Firefox or LibreWolf profile found. Set DTU_FIREFOX_PROFILE to "
+            "your profile directory."
+        )
+    if len(found) == 1:
+        return found[0]
+    print("Browsers found:")
+    for i, (label, _, path) in enumerate(found, 1):
+        print(f"  {i}. {label}  [{path}]")
+    while True:
+        choice = input("Sign in with which one? [1]: ").strip() or "1"
+        if choice.isdigit() and 1 <= int(choice) <= len(found):
+            return found[int(choice) - 1]
+        print(f"Enter a number from 1 to {len(found)}.")
 
 
 TEXT_LIMIT = 100_000  # ponytail: ~25k tokens; raise it if a real course file is cut
@@ -171,9 +238,8 @@ def _session_cookies(profile: Path, host: str) -> dict[str, str]:
     }
 
 
-def _cookies_from_firefox() -> str:
+def _cookies_from_firefox(profile: Path) -> str:
     host = urlparse(BASE).hostname
-    profile = _firefox_profile()
     db = profile / "cookies.sqlite"
     if not db.exists():
         raise RuntimeError(f"No cookie database at {db}.")
@@ -197,18 +263,29 @@ def _cookies_from_firefox() -> str:
 
 def login() -> None:
     """Open DTU Learn, wait for you to sign in, then save the session cookies."""
+    label, command, profile = _pick_profile()
     url = f"{BASE}/d2l/home"
-    print(f"Opening {url}. Sign in there, then return to this terminal.")
-    webbrowser.open(url)
+    print(f"Opening {url} in {label}. Sign in there, then return to this terminal.")
+    if command and shutil.which(command[0]):
+        # Naming the profile makes the browser open the URL in that profile,
+        # handing it to the running window if there is one.
+        subprocess.Popen(
+            [*command, "--profile", str(profile), url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    else:
+        webbrowser.open(url)
     input("Press Enter once you are logged in: ")
 
-    cookie = _cookies_from_firefox()
+    cookie = _cookies_from_firefox(profile)
     if "d2lSessionVal" not in cookie:
         raise SystemExit(
-            "No DTU Learn session cookie in Firefox. Check that you signed in with "
-            "Firefox (not another browser) and that the login finished. Firefox "
-            "rewrites its session-restore file every ~15 seconds, so if the login "
-            "just completed, wait a moment and run login again."
+            f"No DTU Learn session cookie in {label}. Check that you signed in "
+            "there and that the login finished. The browser rewrites its "
+            "session-restore file every ~15 seconds, so if the login just "
+            "completed, wait a moment and run login again."
         )
     COOKIE_FILE.parent.mkdir(parents=True, exist_ok=True)
     COOKIE_FILE.parent.chmod(0o700)
@@ -860,7 +937,7 @@ def _usage() -> str:
         f"  DTU_COOKIE_FILE      Where the session is stored [{COOKIE_FILE}]",
         f"  DTU_DOWNLOADS        Where get_file saves binaries [{DOWNLOADS}]",
         f"  DTU_BASE             Brightspace instance [{BASE}]",
-        "  DTU_FIREFOX_PROFILE  Firefox profile to read cookies from",
+        "  DTU_FIREFOX_PROFILE  Profile directory to read cookies from; skips the scan",
         "  DTU_MCP_PATH         Serve over HTTP at this path instead of stdio.",
         "                       Needs DTU_ALLOWED_HOST. Exposes your session to",
         "                       anyone who has the URL, so keep the path secret.",

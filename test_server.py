@@ -15,11 +15,11 @@ from pathlib import Path
 
 # Load the functions under test without importing the mcp dependency.
 tree = ast.parse(open("server.py").read())
-wanted = {"_flatten", "_firefox_profile", "_term", "_pdf_text", "_TextExtractor",
+wanted = {"_flatten", "_profiles", "_default_browser", "_term", "_pdf_text", "_TextExtractor",
           "_html_text", "_urn_kind", "_ooxml_text", "_description",
           "_calendar_lines", "_local", "_safe", "_file_topics"}
 constants_extra = {"OOXML_MEMBERS"}
-constants = {"SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
+constants = {"BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
 
 
 def needed(node):
@@ -180,10 +180,15 @@ assert sorted([(2025, 1), (2026, 3), (0, -1), (2026, 0)], reverse=True) == [
     (0, -1),
 ]
 
-# --- _firefox_profile -----------------------------------------------------
+# --- _profiles ------------------------------------------------------------
 INI = """[Install4F96D1932A9F858E]
 Default=t8zsz31d.default-release
 Locked=1
+
+[Profile2]
+Name=never-used
+IsRelative=1
+Path=zzzzzzzz.never-used
 
 [Profile1]
 Name=default
@@ -198,31 +203,47 @@ Path=t8zsz31d.default-release
 """
 
 with tempfile.TemporaryDirectory() as tmp:
-    root = Path(tmp) / ".mozilla" / "firefox"
-    root.mkdir(parents=True)
-    (root / "profiles.ini").write_text(INI)
+    firefox = Path(tmp) / ".mozilla" / "firefox"
+    librewolf = Path(tmp) / ".librewolf"
+    for root, profiles in ((firefox, ("t8zsz31d.default-release", "prxr6jl6.default")),
+                           (librewolf, ("ab12cd34.default-default",))):
+        for profile in profiles:
+            (root / profile).mkdir(parents=True)
+            (root / profile / "cookies.sqlite").touch()
+    (firefox / "profiles.ini").write_text(INI)
+    (librewolf / "profiles.ini").write_text(
+        "[Profile0]\nName=default-default\nIsRelative=1\nPath=ab12cd34.default-default\n")
     os.environ["HOME"] = tmp
     os.environ.pop("DTU_FIREFOX_PROFILE", None)
+    real_default_browser = mod._default_browser
+    mod._default_browser = lambda: ""
 
-    # The Install section wins over the stale Default=1 profile.
-    assert mod._firefox_profile() == root / "t8zsz31d.default-release", mod._firefox_profile()
+    # The Install section's profile leads, then Default=1; a profile with no
+    # cookie database is left out. LibreWolf lists before Firefox.
+    assert [(label, path) for label, _, path in mod._profiles()] == [
+        ("LibreWolf: default-default", librewolf / "ab12cd34.default-default"),
+        ("Firefox: default-release (default)", firefox / "t8zsz31d.default-release"),
+        ("Firefox: default", firefox / "prxr6jl6.default"),
+    ], mod._profiles()
 
-    # With no Install section, fall back to Default=1.
-    (root / "profiles.ini").write_text("[Profile1]" + INI.split("[Profile1]", 1)[1])
-    assert mod._firefox_profile() == root / "prxr6jl6.default", mod._firefox_profile()
+    # The default browser's profiles move to the top, in their own order.
+    mod._default_browser = lambda: "firefox_firefox.desktop"
+    assert [label for label, _, _ in mod._profiles()] == [
+        "Firefox: default-release (default)",
+        "Firefox: default",
+        "LibreWolf: default-default",
+    ], mod._profiles()
+    mod._default_browser = real_default_browser
 
-    # The override wins over everything.
+    # The override skips the scan.
     os.environ["DTU_FIREFOX_PROFILE"] = "/somewhere/else"
-    assert mod._firefox_profile() == Path("/somewhere/else")
+    assert mod._profiles() == [("DTU_FIREFOX_PROFILE", [], Path("/somewhere/else"))]
     os.environ.pop("DTU_FIREFOX_PROFILE")
 
-    # A missing profiles.ini is an actionable error, not a crash.
-    (root / "profiles.ini").unlink()
-    try:
-        mod._firefox_profile()
-        raise AssertionError("expected RuntimeError")
-    except RuntimeError as e:
-        assert "DTU_FIREFOX_PROFILE" in str(e)
+    # No profiles.ini anywhere means nothing found, not a crash.
+    (firefox / "profiles.ini").unlink()
+    (librewolf / "profiles.ini").unlink()
+    assert mod._profiles() == []
 
 # --- _calendar_lines ------------------------------------------------------
 os.environ["TZ"] = "Europe/Copenhagen"
