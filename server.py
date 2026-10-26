@@ -504,10 +504,14 @@ def _topic_fetch(ou: int, topic, client=None):
         raise RuntimeError(f"'{topic.get('Title', topic_id)}' {why}.")
     r.raise_for_status()
 
+    return r, _filename(r, f"topic-{topic_id}")
+
+
+def _filename(r: httpx.Response, fallback: str) -> str:
     disp = r.headers.get("content-disposition", "")
     match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)', disp)
     # D2L percent-encodes the filename, so a space arrives as %20.
-    return r, unquote(match.group(1)) if match else f"topic-{topic_id}"
+    return unquote(match.group(1)) if match else fallback
 
 
 @mcp.tool()
@@ -542,6 +546,13 @@ def get_file(org_unit_id: int, topic_id: int) -> str:
         )
 
     r, name = _topic_fetch(ou, topic)
+    return _file_text(r, name, title)
+
+
+def _file_text(r: httpx.Response, name: str, title) -> str:
+    """Turn a fetched file into text for the caller, saving it to disk when the
+    bytes are not text themselves. Shared by content topics and announcement
+    attachments, which arrive the same way."""
     ctype = r.headers.get("content-type", "")
 
     if "html" in ctype:
@@ -689,11 +700,48 @@ def list_assignments(org_unit_id: int) -> str:
 
 @mcp.tool()
 def list_announcements(org_unit_id: int) -> str:
-    """List course announcements (news items), newest first."""
+    """List course announcements (news items), newest first.
+
+    Each one's heading carries its id, and any attached files are listed under
+    it with their file ids; get_announcement_attachment takes both.
+    """
     lines = []
     for n in _get(f"/d2l/api/le/{LE}/{_resolve(org_unit_id)}/news/"):
-        lines.append(f"## {n['Title']} ({(n.get('StartDate') or '')[:10]})\n{n['Body']['Text']}")
+        lines.append(
+            f"## [{n['Id']}] {n['Title']} ({(n.get('StartDate') or '')[:10]})\n"
+            f"{n['Body']['Text']}"
+        )
+        lines[-1] += "".join(
+            f"\nAttachment [{a['FileId']}] {a['FileName']} ({a.get('Size', '?')} bytes)"
+            for a in n.get("Attachments") or []
+        )
     return "\n\n".join(lines) or "No announcements."
+
+
+@mcp.tool()
+def get_announcement_attachment(org_unit_id: int, news_id: int, file_id: int) -> str:
+    """Fetch a file attached to an announcement: its text, or where it was saved.
+
+    The ids come from list_announcements: news_id from the heading, file_id
+    from the Attachment line. Handled like get_file handles a content file.
+    """
+    ou = _resolve(org_unit_id)
+    with _client() as c:
+        r = c.get(f"/d2l/api/le/{LE}/{ou}/news/{news_id}/attachments/{file_id}")
+    if r.status_code in (401, 403):
+        raise RuntimeError(
+            "Session rejected (HTTP %d). Run 'uv run --script server.py login' again."
+            % r.status_code
+        )
+    if r.status_code == 404:
+        raise RuntimeError(
+            f"No attachment {file_id} on announcement {news_id}. Run "
+            "list_announcements for the ids it does have."
+        )
+    r.raise_for_status()
+    name = _filename(r, f"attachment-{file_id}")
+    return _file_text(r, name, name)
+
 
 def _current_term_ids() -> list[int]:
     """Org unit ids of the courses in the newest term I am enrolled in. A

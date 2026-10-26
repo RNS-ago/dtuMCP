@@ -107,6 +107,7 @@ Paste its contents into:
 | `get_file(org_unit_id, topic_id)` | A topic's content, whatever kind it is (see below) |
 | `list_assignments(org_unit_id)` | Assignment folders and due dates |
 | `list_announcements(org_unit_id)` | Course announcements |
+| `get_announcement_attachment(org_unit_id, news_id, file_id)` | A file attached to an announcement, read like `get_file` |
 | `calendar(days=7, org_unit_id=0)` | What is scheduled in the next `days` days |
 | `download_course(org_unit_id)` | Every file in a course, saved to disk |
 
@@ -120,7 +121,7 @@ A unit (D2L calls it a module) is one of the `#` groups in a course tree. Most
 carry text of their own — a week's schedule, instructions for the exercises, a
 welcome message — which `course_contents` marks with `(info)` and `unit_info`
 returns in full. Announcements are separate and belong to the course rather than
-the unit; `list_announcements` has those.
+the unit; `list_announcements` has those, with the ids of any attached files.
 
 `download_course` walks the whole content tree and saves every file under
 `~/Downloads/dtulearn/<course>/<unit>/`, eight at a time, naming each file

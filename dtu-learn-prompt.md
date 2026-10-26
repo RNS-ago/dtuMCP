@@ -59,7 +59,11 @@ teachers actually handed me this term.
   itself rather than to read a course. Broken topics, links and videos have
   no file and are only counted.
 - `list_assignments(org_unit_id)` — assignment folders with due and closing dates.
-- `list_announcements(org_unit_id)` — course announcements, newest first.
+- `list_announcements(org_unit_id)` — course announcements, newest first,
+  each headed by its id and followed by `Attachment [file_id]` lines for any
+  attached files.
+- `get_announcement_attachment(org_unit_id, news_id, file_id)` — one of those
+  attached files, returned as text the same way `get_file` returns a topic.
 - `calendar(days, org_unit_id)` — my schedule in local time for the next
   `days` days (7 by default), grouped under a heading per day. A line with a
   time range is a lecture or an exercise session and usually names its room;
