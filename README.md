@@ -107,6 +107,8 @@ Paste its contents into:
 | `get_file(org_unit_id, topic_id)` | A topic's content, whatever kind it is (see below) |
 | `list_assignments(org_unit_id)` | Assignment folders and due dates |
 | `list_announcements(org_unit_id)` | Course announcements |
+| `calendar(days=7, org_unit_id=0)` | What is scheduled in the next `days` days |
+| `download_course(org_unit_id)` | Every file in a course, saved to disk |
 
 Anywhere an `org_unit_id` is asked for, the DTU course number works too:
 `course_contents 02231` is the same as `course_contents 326352`. A course
@@ -119,6 +121,21 @@ carry text of their own — a week's schedule, instructions for the exercises, a
 welcome message — which `course_contents` marks with `(info)` and `unit_info`
 returns in full. Announcements are separate and belong to the course rather than
 the unit; `list_announcements` has those.
+
+`download_course` walks the whole content tree and saves every file under
+`~/Downloads/dtulearn/<course>/<unit>/`, eight at a time, naming each file
+after its topic so a second run overwrites instead of piling up copies. It
+returns a count, not text — use `get_file` for the content of one topic.
+Links and videos hold no file, and neither do broken topics: a course copied
+from an earlier offering keeps entries whose file did not come along, which
+D2L flags and `course_contents` prints as `(File, broken)`.
+
+`calendar` reads the Brightspace calendar in local time: lectures and
+exercise sessions with their rooms, hand-in deadlines, and the dates material
+is released. With no `org_unit_id` it covers every course of the newest term
+you are enrolled in; give one to ask about a single course. D2L answers with
+at most 100 events and offers no way to page past them, so a long window is
+reported as capped rather than silently cut.
 
 `get_file` looks the topic up in the table of contents first and answers by
 kind: a **file** is downloaded, an **HTML page** comes back as stripped text, a

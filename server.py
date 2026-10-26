@@ -25,6 +25,9 @@ import sys
 import tempfile
 import webbrowser
 import zipfile
+from datetime import datetime, timedelta, timezone
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from html import unescape
 from html.parser import HTMLParser
@@ -236,8 +239,10 @@ def _get(path: str, **params):
         r = c.get(path, params=params)
     if r.status_code in (401, 403):
         raise RuntimeError(
-            "DTU Learn rejected the session (HTTP %d). It has expired: run "
-            "'uv run --script server.py login' again." % r.status_code
+            "DTU Learn refused that (HTTP %d). Either the session has expired — "
+            "run 'uv run --script server.py login' again — or this is one of the "
+            "things it keeps from students, such as an old course's calendar."
+            % r.status_code
         )
     if r.status_code == 404:
         raise RuntimeError(
@@ -379,6 +384,10 @@ def _flatten(modules, depth=0):
             external = f" {url}" if url.startswith("http") else ""
             if kind == "ContentService":
                 kind = _urn_kind(url)  # "video" reads better than "ContentService"
+            # A course copied from last year keeps topics whose file did not
+            # come with it. D2L flags them and answers 404 for their content.
+            if t.get("IsBroken"):
+                kind += ", broken"
             out.append(
                 "  " * (depth + 1)
                 + f"- [{t['TopicId']}] {t.get('Title', '?')} ({kind}){external}"
@@ -469,6 +478,38 @@ def unit_info(org_unit_id: int, unit_id: int) -> str:
     return "\n".join(out)
 
 
+def _topic_fetch(ou: int, topic, client=None):
+    """One topic's file response and the name D2L gives it. get_file wants the
+    text out of it and download_course wants the bytes on disk, but the fetch,
+    its errors and the filename are the same for both."""
+    topic_id = topic["TopicId"]
+    c = client or _client()
+    try:
+        r = c.get(f"/d2l/api/le/{LE}/{ou}/content/topics/{topic_id}/file")
+    finally:
+        if client is None:
+            c.close()
+    if r.status_code in (401, 403):
+        raise RuntimeError(
+            "Session rejected (HTTP %d). Run 'uv run --script server.py login' again."
+            % r.status_code
+        )
+    if r.status_code == 404:
+        why = (
+            "is marked broken in the course: it was copied from an earlier "
+            "offering without its file, and nobody but the teacher can fix that"
+            if topic.get("IsBroken")
+            else f"is a {topic.get('TypeIdentifier')} topic with no file behind it"
+        )
+        raise RuntimeError(f"'{topic.get('Title', topic_id)}' {why}.")
+    r.raise_for_status()
+
+    disp = r.headers.get("content-disposition", "")
+    match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)', disp)
+    # D2L percent-encodes the filename, so a space arrives as %20.
+    return r, unquote(match.group(1)) if match else f"topic-{topic_id}"
+
+
 @mcp.tool()
 def get_file(org_unit_id: int, topic_id: int) -> str:
     """Fetch one content topic: a file's text, an HTML page's text, or a link's target.
@@ -500,21 +541,7 @@ def get_file(org_unit_id: int, topic_id: int) -> str:
             f"{BASE}/d2l/le/lessons/{ou}/topics/{topic_id}"
         )
 
-    with _client() as c:
-        r = c.get(f"/d2l/api/le/{LE}/{ou}/content/topics/{topic_id}/file")
-    if r.status_code in (401, 403):
-        raise RuntimeError(
-            "Session rejected (HTTP %d). Run 'uv run --script server.py login' again."
-            % r.status_code
-        )
-    if r.status_code == 404:
-        raise RuntimeError(f"'{title}' is a {kind} topic with no file behind it.")
-    r.raise_for_status()
-
-    disp = r.headers.get("content-disposition", "")
-    match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)', disp)
-    # D2L percent-encodes the filename, so a space arrives as %20.
-    name = unquote(match.group(1)) if match else f"topic-{topic_id}"
+    r, name = _topic_fetch(ou, topic)
     ctype = r.headers.get("content-type", "")
 
     if "html" in ctype:
@@ -563,6 +590,86 @@ def get_file(org_unit_id: int, topic_id: int) -> str:
     )
 
 
+def _safe(name: str) -> str:
+    """A title becomes a directory or file name, so drop what a filesystem
+    would choke on and keep the rest recognisable."""
+    return re.sub(r'[\\/:*?"<>|]+', "_", name).strip(". ")[:80] or "untitled"
+
+
+def _file_topics(modules, parents=()):
+    """Every File topic in the tree, with the unit titles standing above it."""
+    for module in modules or []:
+        path = parents + (_safe(module.get("Title", "unit")),)
+        for topic in module.get("Topics") or []:
+            # Broken topics have no file to fetch; skipping them here keeps a
+            # copied course from reporting fifty failures nobody can act on.
+            if topic.get("TypeIdentifier") == "File" and not topic.get("IsBroken"):
+                yield path, topic
+        yield from _file_topics(module.get("Modules"), path)
+
+
+@lru_cache(maxsize=None)
+def _course_name(ou: int) -> str:
+    """The course's own name, for the folder to be called. lp/courses/{ou} is
+    forbidden to students, so read it off the enrollment list instead."""
+    for it in _paged(f"/d2l/api/lp/{LP}/enrollments/myenrollments/", orgUnitTypeId=3):
+        if it["OrgUnit"]["Id"] == ou:
+            return it["OrgUnit"]["Name"]
+    return str(ou)
+
+
+def _save_topic(client, ou: int, root: Path, parents: tuple, topic) -> tuple:
+    try:
+        r, name = _topic_fetch(ou, topic, client)
+    except (RuntimeError, httpx.HTTPError) as e:
+        return None, f"{topic.get('Title', topic['TopicId'])}: {e}"
+    # Named after the topic, which is what the course tree calls it, with the
+    # extension off the server's filename. Two runs then overwrite rather than
+    # pile up copies.
+    dest = root.joinpath(*parents, _safe(topic.get("Title", "")) + Path(name).suffix)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(r.content)
+    return dest, None
+
+
+@mcp.tool()
+def download_course(org_unit_id: int) -> str:
+    """Download every file in a course to disk, mirroring its unit tree.
+
+    Files land in ~/Downloads/dtulearn/<course>/<unit>/, on the machine running
+    this server. Links and videos are not files and are only counted. Nothing
+    comes back as text -- for that, ask for the one topic with get_file.
+    """
+    ou = _resolve(org_unit_id)
+    modules = _get(f"/d2l/api/le/{LE}/{ou}/content/toc").get("Modules")
+    jobs = list(_file_topics(modules))
+    if not jobs:
+        return "That course has no files to download."
+
+    root = DOWNLOADS / _safe(_course_name(ou))
+    # ponytail: eight at a time; a course is a few hundred files at most, so
+    # nothing here needs a rate limiter or a resumable queue.
+    with _client() as c, ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda job: _save_topic(c, ou, root, *job), jobs))
+
+    saved = [p for p, err in results if p]
+    failed = [err for p, err in results if err]
+    kinds = Counter(
+        "broken" if t.get("IsBroken") else t.get("TypeIdentifier")
+        for t in _toc_index(ou)[0].values()
+    )
+    skipped = ", ".join(
+        f"{n} {kind}" for kind, n in sorted(kinds.items()) if kind != "File"
+    )
+    out = [f"Saved {len(saved)} files under {root}"]
+    if skipped:
+        out.append(f"Nothing to download for: {skipped}.")
+    if failed:
+        out.append(f"{len(failed)} failed:")
+        out += [f"  - {f}" for f in failed]
+    return "\n".join(out)
+
+
 @mcp.tool()
 def list_assignments(org_unit_id: int) -> str:
     """List assignment folders in a course with their due and closing dates."""
@@ -588,6 +695,89 @@ def list_announcements(org_unit_id: int) -> str:
         lines.append(f"## {n['Title']} ({(n.get('StartDate') or '')[:10]})\n{n['Body']['Text']}")
     return "\n\n".join(lines) or "No announcements."
 
+def _current_term_ids() -> list[int]:
+    """Org unit ids of the courses in the newest term I am enrolled in. A
+    calendar of every course I ever took is not what "my calendar" means."""
+    units = [
+        it["OrgUnit"]
+        for it in _paged(f"/d2l/api/lp/{LP}/enrollments/myenrollments/", orgUnitTypeId=3)
+    ]
+    newest = max((_term(ou) for ou in units), default=(0, -1))
+    return [ou["Id"] for ou in units if _term(ou) == newest]
+
+
+def _my_events(ids: list[int], start: datetime, end: datetime) -> list:
+    path = f"/d2l/api/le/{LE}/calendar/events/myEvents/"
+    window = {
+        d: t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        for d, t in (("startDateTime", start), ("endDateTime", end))
+    }
+    csv = ",".join(str(i) for i in ids)
+    try:
+        return _get(path, **window, orgUnitIdsCSV=csv)["Objects"]
+    except RuntimeError:
+        # One course whose calendar is closed to students answers 403 for the
+        # whole batch, so ask course by course and leave that one out. If every
+        # course refuses it is the session that is gone, so let the error stand.
+        events, refused = [], 0
+        for ou in ids:
+            try:
+                events += _get(path, **window, orgUnitIdsCSV=str(ou))["Objects"]
+            except RuntimeError:
+                refused += 1
+        if refused == len(ids):
+            raise
+        return events
+
+
+def _local(stamp: str) -> datetime:
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone()
+
+
+def _calendar_lines(events: list) -> list[str]:
+    """Group events by local day. A lecture spans a time range; a deadline or a
+    release date is a single instant, so it prints one time instead of two."""
+    lines, day = [], None
+    for e in sorted(events, key=lambda e: e["StartDateTime"]):
+        start, end = _local(e["StartDateTime"]), _local(e["EndDateTime"])
+        if start.date() != day:
+            day = start.date()
+            lines.append(f"\n## {start:%a %d %b %Y}")
+
+        when = "all day" if e["IsAllDayEvent"] else f"{start:%H:%M}"
+        if not e["IsAllDayEvent"] and end != start:
+            when += f"-{end:%H:%M}"
+        entity = (e.get("AssociatedEntity") or {}).get("AssociatedEntityType") or ""
+        due = "due: " if "Dropbox" in entity or "Quiz" in entity else ""
+        number = re.match(r"\d{4,5}\b", e["OrgUnitName"] or "")
+        course = number.group() if number else (e["OrgUnitName"] or "")
+        where = (e.get("LocationName") or "").strip()
+        if len(where) > 60:  # a session booked into six rooms lists them all
+            where = where[:57] + "..."
+        lines.append(f"{when}  {course}  {due}{e['Title']}" + (f" — {where}" if where else ""))
+    return lines
+
+
+@mcp.tool()
+def calendar(days: int = 7, org_unit_id: int = 0) -> str:
+    """Show what is scheduled from today to `days` ahead, in local time: lectures,
+    exercise sessions, hand-in deadlines and material release dates.
+
+    Covers every course of the current term, or one course when org_unit_id is
+    given (an org unit id or a DTU course number)."""
+    ids = [_resolve(org_unit_id)] if org_unit_id else _current_term_ids()
+    if not ids:
+        return "No course enrollments found."
+    start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    events = _my_events(ids, start, start + timedelta(days=days))
+    if not events:
+        return f"Nothing scheduled in the next {days} days."
+    lines = _calendar_lines(events)
+    if len(events) >= 100:
+        # D2L stops at 100 events and reports no continuation to page through.
+        lines.append("\n(100 events — the API caps it there. Ask for fewer days.)")
+    return "\n".join(lines).strip()
+
 
 COMMANDS = {
     f.__name__: f
@@ -599,6 +789,8 @@ COMMANDS = {
         get_file,
         list_assignments,
         list_announcements,
+        calendar,
+        download_course,
     )
 }
 

@@ -1,10 +1,12 @@
 """Self-checks for the pure logic in server.py. Run: python3 test_server.py"""
 import ast
 import configparser
+import datetime as datetime_module
 import os
 import re
 import subprocess
 import tempfile
+import time
 import types
 import zipfile
 from html import unescape
@@ -14,7 +16,8 @@ from pathlib import Path
 # Load the functions under test without importing the mcp dependency.
 tree = ast.parse(open("server.py").read())
 wanted = {"_flatten", "_firefox_profile", "_term", "_pdf_text", "_TextExtractor",
-          "_html_text", "_urn_kind", "_ooxml_text", "_description"}
+          "_html_text", "_urn_kind", "_ooxml_text", "_description",
+          "_calendar_lines", "_local", "_safe", "_file_topics"}
 constants_extra = {"OOXML_MEMBERS"}
 constants = {"SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
 
@@ -36,6 +39,7 @@ mod.__dict__.update(
     HTMLParser=HTMLParser,
     zipfile=zipfile,
     unescape=unescape,
+    datetime=datetime_module.datetime,
 )
 exec(
     compile(ast.Module([n for n in tree.body if needed(n)], []), "server.py", "exec"),
@@ -219,5 +223,57 @@ with tempfile.TemporaryDirectory() as tmp:
         raise AssertionError("expected RuntimeError")
     except RuntimeError as e:
         assert "DTU_FIREFOX_PROFILE" in str(e)
+
+# --- _calendar_lines ------------------------------------------------------
+os.environ["TZ"] = "Europe/Copenhagen"
+time.tzset()  # the tool prints local time, so pin the zone the events were booked in
+
+events = [
+    # Out of order on purpose: the day headings depend on sorting them first.
+    {"StartDateTime": "2026-09-21T19:00:00.000Z", "EndDateTime": "2026-09-21T19:00:00.000Z",
+     "IsAllDayEvent": False, "Title": "Optional Hand-in Exercise 3", "LocationName": "",
+     "OrgUnitName": "02249 Computationally Hard Problems, Fall 2026",
+     "AssociatedEntity": {"AssociatedEntityType": "D2L.LE.Dropbox.Dropbox"}},
+    {"StartDateTime": "2026-09-21T06:00:00.000Z", "EndDateTime": "2026-09-21T08:15:00.000Z",
+     "IsAllDayEvent": False, "Title": "Lecture", "LocationName": "LYN.306.AUD35.R:135",
+     "OrgUnitName": "02231 Cryptography fundamentals, Fall 2026", "AssociatedEntity": None},
+    {"StartDateTime": "2026-09-22T06:00:00.000Z", "EndDateTime": "2026-09-22T06:00:00.000Z",
+     "IsAllDayEvent": True, "Title": "Project week", "LocationName": " ".join("room" for _ in range(20)),
+     "OrgUnitName": "Study line", "AssociatedEntity": None},
+]
+assert mod._calendar_lines(events) == [
+    "\n## Mon 21 Sep 2026",
+    "08:00-10:15  02231  Lecture — LYN.306.AUD35.R:135",
+    "21:00  02249  due: Optional Hand-in Exercise 3",
+    "\n## Tue 22 Sep 2026",
+    "all day  Study line  Project week — " + "room " * 11 + "ro...",
+], mod._calendar_lines(events)
+
+# --- _file_topics ---------------------------------------------------------
+tree = [
+    {
+        "Title": "Week 1",
+        "Topics": [
+            {"TopicId": 1, "Title": "Slides", "TypeIdentifier": "File"},
+            # Copied from last year without its file: there is nothing to fetch.
+            {"TopicId": 2, "Title": "Old slides", "TypeIdentifier": "File", "IsBroken": True},
+            {"TopicId": 3, "Title": "Notes", "TypeIdentifier": "Link"},
+        ],
+        "Modules": [
+            {"Title": "Exercises: sheet 1/2", "Topics": [
+                {"TopicId": 4, "Title": "Sheet", "TypeIdentifier": "File"}]},
+        ],
+    },
+    {"Title": "Empty"},
+]
+assert [(p, t["TopicId"]) for p, t in mod._file_topics(tree)] == [
+    (("Week 1",), 1),
+    (("Week 1", "Exercises_ sheet 1_2"), 4),
+], list(mod._file_topics(tree))
+
+# --- _safe ----------------------------------------------------------------
+assert mod._safe("Lecture 1/2: a*b?") == "Lecture 1_2_ a_b_"
+assert mod._safe("...") == "untitled"
+assert len(mod._safe("x" * 200)) == 80
 
 print("OK")

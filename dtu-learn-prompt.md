@@ -53,8 +53,21 @@ teachers actually handed me this term.
   - A **video** returns the address to watch it at. There is no transcript, so
     tell me to watch it rather than guessing at its content.
   - Any other format is saved and only the path comes back.
+- `download_course(org_unit_id)` — save every file of a course to disk on the
+  machine running the server, under `~/Downloads/dtulearn/<course>/<unit>/`.
+  It returns counts, not content, so use it when I ask for the material
+  itself rather than to read a course. Broken topics, links and videos have
+  no file and are only counted.
 - `list_assignments(org_unit_id)` — assignment folders with due and closing dates.
 - `list_announcements(org_unit_id)` — course announcements, newest first.
+- `calendar(days, org_unit_id)` — my schedule in local time for the next
+  `days` days (7 by default), grouped under a heading per day. A line with a
+  time range is a lecture or an exercise session and usually names its room;
+  a line with one time is a moment rather than a session — a `due:` line is a
+  hand-in deadline, the rest are material being released. With no
+  `org_unit_id` it covers all my courses this term; pass one for a single
+  course. Use it for anything about when something happens, rather than
+  reading dates out of a unit's text.
 
 ## Rules
 
@@ -68,7 +81,13 @@ teachers actually handed me this term.
   teachers, so do not claim or infer a submission status.
 - To read a whole course, call `course_contents` once and then `get_file` per
   topic you actually need. Do not fetch every topic by default — courses have
-  hundreds, and older ones hold slides from several years.
+  hundreds, and older ones hold slides from several years. `download_course`
+  is for putting the files on my disk, not for reading them to me.
+- A topic `course_contents` marks `broken` was copied from an earlier year
+  without its file. There is nothing behind it, so do not fetch it, and tell
+  me the material is missing from the course rather than that a tool failed.
+- The calendar of a course from an earlier term is often closed to students,
+  and comes back refused rather than empty. Say so instead of retrying.
 - If a tool says the session was rejected or has expired, tell me to run
   `uv run --script ~/repos/dtuMCP/server.py login` in a terminal. You cannot do
   it yourself: it opens a browser and waits for me to sign in.
