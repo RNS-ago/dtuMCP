@@ -4,8 +4,8 @@
 # ///
 """MCP server for DTU Learn (D2L Brightspace) course material.
 
-Auth: run `uv run --script server.py login`. That lists the Firefox and
-LibreWolf profiles it finds, opens DTU Learn in the one you pick, waits for you
+Auth: run `uv run --script server.py login`. That lists the Firefox
+profiles it finds, opens DTU Learn in the one you pick, waits for you
 to sign in, lifts the session cookies out of that profile's cookie database and
 saves them to ~/.config/dtumcp/cookie.
 
@@ -48,15 +48,10 @@ mcp = MCPServer("dtu-learn")
 logging.getLogger("httpx").setLevel(logging.WARNING)  # one INFO line per request
 
 
-# Firefox and its forks share one profile layout and cookie format, so one
-# reader covers them all. Chromium browsers (Chrome, Brave, Edge) encrypt their
-# cookies with a key in the desktop keyring, so they are not listed here.
+# Chromium browsers (Chrome, Brave, Edge) encrypt their cookies with a key in
+# the desktop keyring, and LibreWolf never writes session cookies to disk, so
+# only Firefox is listed here.
 BROWSERS = {
-    "LibreWolf": (["librewolf"], "~/.librewolf"),
-    "LibreWolf (flatpak)": (
-        ["flatpak", "run", "io.gitlab.librewolf-community"],
-        "~/.var/app/io.gitlab.librewolf-community/.librewolf",
-    ),
     "Firefox": (["firefox"], "~/.mozilla/firefox"),
     "Firefox (snap)": (["firefox"], "~/snap/firefox/common/.mozilla/firefox"),
     "Firefox (flatpak)": (
@@ -66,30 +61,13 @@ BROWSERS = {
 }
 
 
-def _default_browser() -> str:
-    """The default browser's desktop entry, such as librewolf.desktop or
-    firefox_firefox.desktop, or an empty string when xdg-settings is missing."""
-    try:
-        done = subprocess.run(
-            ["xdg-settings", "get", "default-web-browser"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return ""
-    return done.stdout.strip().lower()
-
-
 def _profiles() -> list[tuple[str, list[str], Path]]:
     """Every browser profile on this machine that holds a cookie database, as
-    (label, launch command, profile directory). Each browser's own default
-    comes first, and the default browser's profiles lead the list, so the
-    first entry is the best guess."""
+    (label, launch command, profile directory). Each install's own default
+    comes first, so the first entry is the best guess."""
     override = os.environ.get("DTU_FIREFOX_PROFILE")
     if override:
         return [("DTU_FIREFOX_PROFILE", [], Path(override).expanduser())]
-    default = _default_browser()
     found = []
     for browser, (command, root) in BROWSERS.items():
         root = Path(root).expanduser()
@@ -110,18 +88,15 @@ def _profiles() -> list[tuple[str, list[str], Path]]:
             rank = 0 if path in launched else 1 if ini[s].get("Default") == "1" else 2
             name = ini[s].get("Name", path) + (" (default)" if rank == 0 else "")
             ranked.append((rank, f"{browser}: {name}", command, root / path))
-        # "LibreWolf (flatpak)" matches io.gitlab.librewolf-community.desktop
-        # on its first word, as each Firefox install matches its own entry.
-        is_default = browser.split()[0].lower() in default
-        found += [(not is_default, *e[1:]) for e in sorted(ranked, key=lambda e: e[0])]
-    return [e[1:] for e in sorted(found, key=lambda e: e[0])]
+        found += [e[1:] for e in sorted(ranked, key=lambda e: e[0])]
+    return found
 
 
 def _pick_profile() -> tuple[str, list[str], Path]:
     found = _profiles()
     if not found:
         raise RuntimeError(
-            "No Firefox or LibreWolf profile found. Set DTU_FIREFOX_PROFILE to "
+            "No Firefox profile found. Set DTU_FIREFOX_PROFILE to "
             "your profile directory."
         )
     if len(found) == 1:

@@ -11,8 +11,8 @@ authenticates with your own browser session cookies instead.
 uv run --script server.py login
 ```
 
-That lists the Firefox and LibreWolf profiles it finds (regular, snap and
-flatpak installs), your default browser first, and asks which one to use. It opens DTU Learn in that
+That lists the Firefox profiles it finds (regular, snap and flatpak
+installs) and asks which one to use. It opens DTU Learn in that
 profile. Sign in, press Enter in the terminal, and the session cookies land in `~/.config/dtumcp/cookie` (mode 600). It prints your
 course list to confirm.
 
@@ -31,9 +31,9 @@ One `login` covers every client: they all read the same file.
 Sessions expire after a few hours of inactivity or at logout. When a tool says
 the session was rejected, run `login` again.
 
-Firefox-family browsers only: Chromium browsers (Chrome, Brave, Edge) encrypt
-their cookies with a key kept in the desktop keyring. The list puts each
-browser's `[Install...]` profile from `profiles.ini` first and marks it
+Firefox only: Chromium browsers (Chrome, Brave, Edge) encrypt their cookies
+with a key kept in the desktop keyring, and LibreWolf never writes session
+cookies to disk. The list puts each install's `[Install...]` profile from `profiles.ini` first and marks it
 `(default)` — that is the one the browser actually launches, while the
 `Default=1` flag often points at a stale older profile. Set
 `DTU_FIREFOX_PROFILE` to a profile directory to skip the scan.

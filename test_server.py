@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Load the functions under test without importing the mcp dependency.
 tree = ast.parse(open("server.py").read())
-wanted = {"_flatten", "_profiles", "_default_browser", "_term", "_pdf_text", "_TextExtractor",
+wanted = {"_flatten", "_profiles", "_term", "_pdf_text", "_TextExtractor",
           "_html_text", "_urn_kind", "_ooxml_text", "_description",
           "_calendar_lines", "_local", "_safe", "_file_topics"}
 constants_extra = {"OOXML_MEMBERS"}
@@ -204,36 +204,19 @@ Path=t8zsz31d.default-release
 
 with tempfile.TemporaryDirectory() as tmp:
     firefox = Path(tmp) / ".mozilla" / "firefox"
-    librewolf = Path(tmp) / ".librewolf"
-    for root, profiles in ((firefox, ("t8zsz31d.default-release", "prxr6jl6.default")),
-                           (librewolf, ("ab12cd34.default-default",))):
-        for profile in profiles:
-            (root / profile).mkdir(parents=True)
-            (root / profile / "cookies.sqlite").touch()
+    for profile in ("t8zsz31d.default-release", "prxr6jl6.default"):
+        (firefox / profile).mkdir(parents=True)
+        (firefox / profile / "cookies.sqlite").touch()
     (firefox / "profiles.ini").write_text(INI)
-    (librewolf / "profiles.ini").write_text(
-        "[Profile0]\nName=default-default\nIsRelative=1\nPath=ab12cd34.default-default\n")
     os.environ["HOME"] = tmp
     os.environ.pop("DTU_FIREFOX_PROFILE", None)
-    real_default_browser = mod._default_browser
-    mod._default_browser = lambda: ""
 
     # The Install section's profile leads, then Default=1; a profile with no
-    # cookie database is left out. LibreWolf lists before Firefox.
+    # cookie database is left out.
     assert [(label, path) for label, _, path in mod._profiles()] == [
-        ("LibreWolf: default-default", librewolf / "ab12cd34.default-default"),
         ("Firefox: default-release (default)", firefox / "t8zsz31d.default-release"),
         ("Firefox: default", firefox / "prxr6jl6.default"),
     ], mod._profiles()
-
-    # The default browser's profiles move to the top, in their own order.
-    mod._default_browser = lambda: "firefox_firefox.desktop"
-    assert [label for label, _, _ in mod._profiles()] == [
-        "Firefox: default-release (default)",
-        "Firefox: default",
-        "LibreWolf: default-default",
-    ], mod._profiles()
-    mod._default_browser = real_default_browser
 
     # The override skips the scan.
     os.environ["DTU_FIREFOX_PROFILE"] = "/somewhere/else"
@@ -242,7 +225,6 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # No profiles.ini anywhere means nothing found, not a crash.
     (firefox / "profiles.ini").unlink()
-    (librewolf / "profiles.ini").unlink()
     assert mod._profiles() == []
 
 # --- _calendar_lines ------------------------------------------------------
