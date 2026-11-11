@@ -131,17 +131,33 @@ content tree and saves every file under `~/Downloads/dtulearn/<course>/<unit>/`,
 eight at a time, naming each file after its topic so a second run overwrites
 instead of piling up copies. Announcement attachments go in
 `<course>/Announcements/`. Beside them it writes `index.html`, one page laid
-out like the course site, with two tabs. Content has a folding tree of the
-units on the left and, on the right, every unit with its own text and its
-topics, each linked to the saved file and tagged with its type. Announcements
-has every announcement with its attachments. Open that page in a browser to
-read the course without a connection. It follows the system's dark mode.
+out like the course site, with two tabs. Content has a tree of the units on
+the left, folded until you open a branch, and on the right every unit with its
+own text and its topics, each linked to the saved file and tagged with its
+type. A unit inside another one shows the units above it as links over its
+heading, and a coloured bar on its left marks what it holds. Announcements has
+every announcement with its attachments. The page follows the system's dark
+mode.
+
+`~/Downloads/dtulearn/index.html` is the landing page: every course downloaded
+so far, grouped by term with the newest first, each with the date it was
+saved. Every course page links back to it from "← All courses". It is rebuilt
+from the course folders on each `download_course`, so start there to read
+your courses without a connection. Its search box searches every course at
+once; each result names its course, so adding a word from the course name,
+such as `crypto rsa`, keeps the search to that course.
+
+On either page, `/` jumps to the search box. It replaces the browser's own
+use of the key (Quick Find in Firefox), except while you are typing in a text
+field.
 
 The search box above the tabs looks through titles, unit text, announcements
 and the text inside the saved PDFs, slides, Word documents and HTML pages. Every
-word you type has to start a word in the result, so `rsa` finds RSA but not
-adversary. Results show the match in context, and a PDF result opens on the page
-it was found on. The text is extracted while the course downloads and kept in
+word you type has to start a word in the result, its text or the units above
+it, so `rsa` finds RSA but not adversary, and `milk description` finds the
+Description topic inside the Milk case study. Results show the units they sit
+in and the match in context, and a PDF result opens on the page it was found
+on. The text is extracted while the course downloads and kept in
 `_search.js` beside `index.html`; that is about 8 MB for a course with a hundred
 PDFs. Spreadsheets are found by title only, because their cells are mostly
 numbers and in one course came to 235 MB. Reading PDFs needs `pdftotext`, as

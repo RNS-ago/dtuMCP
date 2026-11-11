@@ -2,6 +2,7 @@
 import ast
 import configparser
 import datetime as datetime_module
+import json
 import os
 from urllib.parse import quote, unquote, urlparse
 import re
@@ -20,9 +21,9 @@ wanted = {"_flatten", "_profiles", "_term", "_pdf_text", "_TextExtractor",
           "_html_text", "_urn_kind", "_ooxml_text", "_description",
           "_calendar_lines", "_local", "_safe", "_file_topics", "_index_html",
           "_d2l_file", "_linked_dest", "_relink",
-          "_search_pages", "_search_entry"}
+          "_search_pages", "_search_entry", "_landing_html"}
 constants_extra = {"OOXML_MEMBERS"}
-constants = {"BASE", "REFERENCE", "INDEX_CSS", "INDEX_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
+constants = {"BASE", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
 
 
 def needed(node):
@@ -43,6 +44,7 @@ mod.__dict__.update(
     zipfile=zipfile,
     unescape=unescape,
     escape=escape,
+    json=json,
     quote=quote,
     unquote=unquote,
     urlparse=urlparse,
@@ -313,9 +315,11 @@ for want in [
     '<a href="Week%201/Slides.pdf">Slides</a><span class="tag">PDF</span></li>',  # saved file, local link
     '<a href="https://x.dk">Site</a><span class="tag online">Link · online</span>',
     '/d2l/le/lessons/7/topics/13">Old</a><span class="tag online">File, broken · online</span>',
-    '<section id="u2"><h3>Sub</h3>',                # nested unit one level down
-    # sidebar tree: top level open, linking to the sections
-    '<li><details open><summary><a href="#u1">Week 1</a></summary><ul><li><a href="#u2">Sub</a></li></ul></details></li>',
+    # nested unit one level down, under links to the units above it
+    '<section id="u2">\n<p class="crumbs"><a href="#u1">Week 1</a></p>\n<h3>Sub</h3>',
+    # sidebar tree: folded, linking to the sections
+    '<li><details><summary><a href="#u1">Week 1</a></summary><ul><li><a href="#u2">Sub</a></li></ul></details></li>',
+    '<a class="back" href="../index.html">',
     "Announcements (1)</label>",
     "<p>a &lt; b</p>",                              # plain text escaped
     '<a href="Announcements/5-a.pdf">a.pdf</a>',
@@ -330,10 +334,11 @@ assert '<script src="_search.js"></script>' in page
 assert docs == [
     {"t": "Week 1", "h": "#u1", "k": "unit", "x": "Room 101"},
     {"t": "Slides", "h": "Week%201/Slides.pdf", "k": "PDF",
-     "x": "Intro to RSA Proof of RSA", "p": [0, 13]},
-    {"t": "Site", "h": "https://x.dk", "k": "Link · online", "x": ""},
-    {"t": "Old", "h": mod.BASE + "/d2l/le/lessons/7/topics/13", "k": "File, broken · online", "x": ""},
-    {"t": "Sub", "h": "#u2", "k": "unit", "x": ""},
+     "x": "Intro to RSA Proof of RSA", "p": [0, 13], "u": "Week 1"},
+    {"t": "Site", "h": "https://x.dk", "k": "Link · online", "x": "", "u": "Week 1"},
+    {"t": "Old", "h": mod.BASE + "/d2l/le/lessons/7/topics/13", "k": "File, broken · online",
+     "x": "", "u": "Week 1"},
+    {"t": "Sub", "h": "#u2", "k": "unit", "x": "", "u": "Week 1"},
     {"t": "Hi", "h": "#n5", "k": "announcement", "x": "a < b"},
     {"t": "a.pdf", "h": "Announcements/5-a.pdf", "k": "attachment", "x": "Homework one"},
 ], docs
@@ -371,5 +376,21 @@ got = mod._relink(page, root / "Week 1/page.html", {
     B + "/content/f.pdf": root / "_linked/my f.pdf",
 })
 assert got == '<img src="../_linked/p.png"> <a href="../_linked/my%20f.pdf">f</a> <a href="https://x.dk">x</a>', got
+
+# --- _landing_html ---------------------------------------------------------
+land = mod._landing_html([
+    ("10060 Physics, Spring 2025", "10060", "2025-06-01"),
+    ("Odd <course> </script>", "Odd", "2026-01-01"),
+    ("02231 Crypto, Fall 2026", "02231%20Crypto", "2026-11-11"),
+])
+# Newest term first, a course with no term last, names escaped.
+assert land.index("<h2>Fall 2026</h2>") < land.index("<h2>Spring 2025</h2>") < land.index("<h2>No term</h2>"), land
+assert '<a href="02231%20Crypto/index.html">02231 Crypto, Fall 2026</a><span class="tag">saved 2026-11-11</span>' in land
+assert "Odd &lt;course&gt;" in land
+# Each course's search data is loaded and taken in turn, then searched as one.
+assert '<script src="02231%20Crypto/_search.js"></script><script>take("02231%20Crypto", "02231 Crypto, Fall 2026")</script>' in land
+assert 'take("Odd", "Odd <course> <\\/script>")' in land   # a name cannot close the script
+assert land.index("function take") < land.index("_search.js") < land.index("window.SEARCH = all;")
+assert "No courses downloaded yet." in mod._landing_html([])
 
 print("OK")

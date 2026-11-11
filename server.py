@@ -775,9 +775,10 @@ def _search_pages(path: Path) -> list[str]:
     return pages if any(pages) else []
 
 
-def _search_entry(title: str, href: str, tag: str, pages=()) -> dict:
+def _search_entry(title: str, href: str, tag: str, pages=(), where: str = "") -> dict:
     """One search result: its text joined into one string, and for a PDF the
-    offset each page starts at, so a match can link to its page."""
+    offset each page starts at, so a match can link to its page. where names
+    the units above it, since many courses repeat titles like "Description"."""
     starts, text = [], ""
     for page in pages:
         starts.append(len(text))
@@ -785,6 +786,8 @@ def _search_entry(title: str, href: str, tag: str, pages=()) -> dict:
     entry = {"t": title, "h": href, "k": tag, "x": text.rstrip()}
     if len(starts) > 1:
         entry["p"] = starts
+    if where:
+        entry["u"] = where
     return entry
 
 
@@ -803,48 +806,55 @@ def _index_html(name: str, ou: int, modules, news, saved: dict, texts: dict) -> 
         html = field.get("Html") or f"<p>{escape(field.get('Text') or '')}</p>"
         return re.sub(r'\b(src|href)="/(?!/)', rf'\1="{BASE}/', html)
 
-    def item(href, label, tag, online=False, key=None):
-        docs.append(_search_entry(label, href, tag, texts.get(key, ())))
+    def item(href, label, tag, online=False, key=None, where=""):
+        docs.append(_search_entry(label, href, tag, texts.get(key, ()), where))
         cls = ' class="tag online"' if online else ' class="tag"'
         return (f'<li><a href="{escape(href)}">{escape(label)}</a>'
                 f"<span{cls}>{escape(tag)}</span></li>")
 
-    def topic(t):
+    def topic(t, where):
         tid, url, kind = t["TopicId"], t.get("Url") or "", t.get("TypeIdentifier", "?")
         title = t.get("Title", "?")
         if tid in saved:
             tag = Path(unquote(saved[tid])).suffix[1:].upper() or "file"
-            return item(saved[tid], title, tag, key=tid)
+            return item(saved[tid], title, tag, key=tid, where=where)
         if kind == "ContentService":
             kind = _urn_kind(url)
         if t.get("IsBroken"):
             kind += ", broken"
         href = url if url.startswith("http") else f"{BASE}/d2l/le/lessons/{ou}/topics/{tid}"
-        return item(href, title, f"{kind} · online", online=True)
+        return item(href, title, f"{kind} · online", online=True, where=where)
 
-    def tree(modules, depth=0):
-        """The sidebar: every unit, nested, linking to its section."""
+    def tree(modules):
+        """The sidebar: every unit, nested and folded, linking to its section."""
         for m in modules or []:
             a = f'<a href="#u{m["ModuleId"]}">{escape(m.get("Title", "?"))}</a>'
             if m.get("Modules"):
-                # Top level open, deeper levels folded, so a big course fits.
-                yield f"<li><details{' open' if depth == 0 else ''}><summary>{a}</summary><ul>"
-                yield from tree(m["Modules"], depth + 1)
+                yield f"<li><details><summary>{a}</summary><ul>"
+                yield from tree(m["Modules"])
                 yield "</ul></details></li>"
             else:
                 yield f"<li>{a}</li>"
 
-    def units(modules, depth=2):
+    def units(modules, depth=2, trail=()):
+        """Each unit's section. trail holds the (id, title) of the units above
+        it, shown as links over the heading so a deep unit says where it sits."""
         for m in modules or []:
-            h = min(depth, 6)
-            docs.append(_search_entry(m.get("Title", "?"), f'#u{m["ModuleId"]}', "unit",
-                                      [" ".join(_description(m).split())]))
-            yield f'<section id="u{m["ModuleId"]}"><h{h}>{escape(m.get("Title", "?"))}</h{h}>'
+            h, title = min(depth, 6), m.get("Title", "?")
+            parents = " › ".join(t for _, t in trail)
+            docs.append(_search_entry(title, f'#u{m["ModuleId"]}', "unit",
+                                      [" ".join(_description(m).split())], parents))
+            yield f'<section id="u{m["ModuleId"]}">'
+            if trail:
+                yield '<p class="crumbs">' + " › ".join(
+                    f'<a href="#u{i}">{escape(t)}</a>' for i, t in trail) + "</p>"
+            yield f"<h{h}>{escape(title)}</h{h}>"
             if _description(m):
                 yield f'<div class="text">{rich(m.get("Description"))}</div>'
+            here = " › ".join([*(t for _, t in trail), title])
             if m.get("Topics"):
-                yield '<ul class="topics">' + "".join(map(topic, m["Topics"])) + "</ul>"
-            yield from units(m.get("Modules"), depth + 1)
+                yield '<ul class="topics">' + "".join(topic(t, here) for t in m["Topics"]) + "</ul>"
+            yield from units(m.get("Modules"), depth + 1, (*trail, (m["ModuleId"], title)))
             yield "</section>"
 
     def announcements():
@@ -869,12 +879,12 @@ def _index_html(name: str, ou: int, modules, news, saved: dict, texts: dict) -> 
         '<!doctype html><html lang="en"><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         f"<title>{escape(name)}</title><style>{INDEX_CSS}</style>",
-        f"<header><h1>{escape(name)}</h1>",
+        f'<header><a class="back" href="../index.html">← All courses</a><h1>{escape(name)}</h1>',
         f'<p>Saved from DTU Learn on {datetime.now():%Y-%m-%d}</p>',
         '<div class="tabs" role="tablist">',
         '<input type="radio" name="tab" id="t-content" checked><label for="t-content">Content</label>',
         f'<input type="radio" name="tab" id="t-news"><label for="t-news">Announcements ({len(news)})</label>',
-        '<input type="search" id="q" placeholder="Search this course, inside files too" aria-label="Search this course">',
+        '<input type="search" id="q" placeholder="Search this course, inside files too (press /)" aria-label="Search this course">',
         "</div></header>",
         f'<div id="p-content" class="panel"><nav aria-label="Units"><ul>{"".join(tree(modules))}</ul></nav>',
         '<main>', *units(modules), "</main></div>",
@@ -885,6 +895,63 @@ def _index_html(name: str, ou: int, modules, news, saved: dict, texts: dict) -> 
         f'<script src="_search.js"></script><script>{INDEX_JS}</script>',
     ])
     return html, docs
+
+
+def _landing_html(courses) -> str:
+    """The page above the course folders: every downloaded course, grouped by
+    term with the newest first, and a search box over all of them. courses
+    holds (name, folder as a URL path, saved date)."""
+    groups = {}
+    for name, folder, saved in courses:
+        groups.setdefault(_term({"Name": name}), []).append(
+            (name, f'<li><a href="{escape(folder)}/index.html">{escape(name)}</a>'
+                   f'<span class="tag">saved {escape(saved)}</span></li>')
+        )
+    body = []
+    for year, season in sorted(groups, reverse=True):
+        body.append(f"<h2>{SEASON_NAMES[season]} {year}</h2>" if year else "<h2>No term</h2>")
+        body.append('<ul class="topics">' + "".join(li for _, li in sorted(groups[year, season])) + "</ul>")
+
+    def js(value):  # a string literal that cannot close the <script> it sits in
+        return json.dumps(value).replace("</", "<\\/")
+
+    # Every course's _search.js sets window.SEARCH. Loaded one after another,
+    # each is taken in turn, its links made relative to this page and its
+    # results labelled with the course, before the next one replaces it.
+    # ponytail: all courses load up front, ~10 MB each for the big ones; load
+    # on first keystroke if the landing page ever opens slowly.
+    loads = [
+        f'<script src="{escape(folder)}/_search.js"></script><script>take({js(folder)}, {js(name)})</script>'
+        for name, folder, _ in courses
+    ]
+    return "\n".join([
+        '<!doctype html><html lang="en"><meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        f"<title>DTU Learn courses</title><style>{INDEX_CSS}</style>",
+        "<header><h1>DTU Learn courses</h1><p>Saved for offline reading. "
+        "Run download_course again to add a course or bring one up to date.</p>",
+        '<div class="tabs"><input type="search" id="q" placeholder="Search every course (press /)" '
+        'aria-label="Search every course"></div></header>',
+        '<main id="courses">', *(body or ["<p>No courses downloaded yet.</p>"]), "</main>",
+        '<main id="results" aria-live="polite"></main>',
+        f"<script>{LANDING_JS}</script>", *loads,
+        f"<script>window.SEARCH = all;{INDEX_JS}</script>",
+    ])
+
+
+def _write_landing() -> None:
+    """Rebuild the landing page from the course folders on disk, so it lists
+    every course downloaded so far, not only the one just fetched."""
+    courses = []
+    for page in DOWNLOADS.glob("*/index.html"):
+        found = re.search(r"<title>(.*?)</title>", page.read_text(encoding="utf-8", errors="replace"))
+        saved = datetime.fromtimestamp(page.stat().st_mtime)
+        courses.append((
+            unescape(found.group(1)) if found else page.parent.name,
+            quote(page.parent.name),
+            f"{saved:%Y-%m-%d}",
+        ))
+    (DOWNLOADS / "index.html").write_text(_landing_html(courses), encoding="utf-8")
 
 
 # The tabs are radio buttons, so they work with no script and from the keyboard.
@@ -902,9 +969,10 @@ header p{margin:.2rem 0 .6rem;color:var(--muted);font-size:.9rem}
 background:Canvas;border:1px solid var(--line);border-radius:.4rem}
 #results{display:none}
 body.searching #results{display:block}
-body.searching .panel{display:none!important}
+body.searching .panel,body.searching #courses{display:none!important}
 .hits li{flex-wrap:wrap}
 .hits p{flex-basis:100%;margin:.15rem 0 0;color:var(--muted);font-size:.9rem}
+.hits p.where{margin:0;font-size:.8rem}
 .tabs input[type=radio]{position:absolute;opacity:0}
 .tabs label{padding:.5rem .9rem;cursor:pointer;color:var(--muted);border-bottom:3px solid transparent}
 .tabs input:checked+label{color:CanvasText;font-weight:600;border-color:LinkText}
@@ -914,8 +982,8 @@ body:has(#t-content:checked) #p-content{display:grid;grid-template-columns:18rem
 body:has(#t-news:checked) #p-news{display:block}
 nav{position:sticky;top:0;align-self:start;max-height:100vh;overflow:auto;
 padding:1rem;border-right:1px solid var(--line);font-size:.92rem}
-nav ul{list-style:none;margin:0;padding-left:1rem}
-nav>ul{padding-left:0}
+nav ul{list-style:none;margin:0 0 0 .3rem;padding-left:.8rem;border-left:1px solid var(--line)}
+nav>ul{margin:0;padding-left:0;border:0}
 nav li{margin:.15rem 0}
 nav a{color:inherit;text-decoration:none}
 nav ul:has(details)>li>a{display:block;padding-left:1.1em}
@@ -923,7 +991,13 @@ nav a:hover{color:LinkText;text-decoration:underline}
 summary{cursor:pointer}
 main{padding:1rem;max-width:60rem;min-width:0}
 section{scroll-margin-top:1rem;margin-bottom:1.5rem}
-section section{margin:1rem 0 0;padding-left:1rem;border-left:2px solid var(--line)}
+main>section+section{border-top:1px solid var(--line);padding-top:1.5rem}
+section section{margin:1.25rem 0 0;padding-left:1rem;
+border-left:3px solid color-mix(in srgb,LinkText 35%,transparent)}
+.crumbs{margin:0;font-size:.85rem;color:var(--muted)}
+.crumbs a{color:inherit}
+.back{font-size:.9rem;color:var(--muted);text-decoration:none}
+.back:hover{color:LinkText}
 h2,h3,h4,h5,h6{margin:0 0 .5rem}
 .text{overflow-x:auto}
 .text img{max-width:100%;height:auto}
@@ -941,13 +1015,16 @@ nav{position:static;max-height:none;border-right:0;border-bottom:1px solid var(-
 #q{flex-basis:100%;margin-left:0}}
 """
 
-# Every search word has to start a word in a result's title or text, so "rsa"
-# finds "RSA" but not "adversary". Title matches come first, the rest stay in
-# course order. A PDF match links to its page.
+# Every search word has to start a word in a result's title, the units above
+# it, or its text, so "rsa" finds "RSA" but not "adversary". Results whose
+# title and units hold every word come first, the rest stay in course order.
+# A PDF match links to its page.
 # ponytail: a linear regex scan, a few ms over a course's ~10 MB of text.
 # An inverted index only if a course ever makes typing lag.
 INDEX_JS = r"""
-const docs = (window.SEARCH || []).map(d => ({...d, lt: d.t.toLowerCase(), lx: d.x.toLowerCase()}));
+// lt is the title and the units above it, so "milk description" finds the
+// Description topic inside the Milk case study.
+const docs = (window.SEARCH || []).map(d => ({...d, lt: (d.t + " " + (d.u || "")).toLowerCase(), lx: d.x.toLowerCase()}));
 const q = document.getElementById("q"), out = document.getElementById("results");
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -981,6 +1058,7 @@ function run() {
     const li = el("li"), a = el("a", "", d.t);
     a.href = href;
     li.append(a, el("span", "tag", tag));
+    if (d.u) li.append(el("p", "where", d.u));
     if (isFinite(at)) {
       const from = Math.max(0, at - 70);
       const snippet = el("p");
@@ -1002,7 +1080,42 @@ out.addEventListener("click", e => {
   q.value = "";
   run();
 });
+// The landing page's results link to course/index.html#n123. An announcement
+// sits in a hidden tab, where the browser cannot scroll to it: open its tab.
+function openTarget() {
+  const id = location.hash.slice(1), target = document.getElementById(id);
+  const tab = document.getElementById(/^n\d+$/.test(id) ? "t-news" : /^u\d+$/.test(id) ? "t-content" : "");
+  if (target && tab) {
+    tab.checked = true;
+    target.scrollIntoView();
+  }
+}
+addEventListener("hashchange", openTarget);
+openTarget();
+// "/" jumps to the search box from anywhere, in place of the browser's own
+// use of it (Quick Find in Firefox), unless you are typing in a text field.
+addEventListener("keydown", e => {
+  if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target.matches?.("input:not([type=radio]), textarea, select, [contenteditable]")) return;
+  e.preventDefault();
+  q.focus();
+  q.select();
+}, true);
 run();  // the browser may restore the box's text on reload
+"""
+
+# Collects each course's search entries on the landing page; see _landing_html.
+# Links become relative to the landing page, and the course name leads the
+# trail, so "crypto rsa" keeps to the cryptography course.
+LANDING_JS = r"""
+const all = [];
+function take(folder, name) {
+  for (const d of window.SEARCH || []) {
+    const href = /^[a-z]+:/.test(d.h) ? d.h : folder + "/" + (d.h.startsWith("#") ? "index.html" : "") + d.h;
+    all.push({...d, h: href, u: d.u ? name + " › " + d.u : name});
+  }
+  window.SEARCH = undefined;  // a course without _search.js must not repeat the last one
+}
 """
 
 
@@ -1068,6 +1181,7 @@ def download_course(org_unit_id: int) -> str:
     (root / "_search.js").write_text(
         f"window.SEARCH = {json.dumps(docs, ensure_ascii=False)};\n", encoding="utf-8"
     )
+    _write_landing()
 
     saved = [p for p, err in results if p]
     failed = [err for p, err in results if err]
