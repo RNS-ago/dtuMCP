@@ -144,10 +144,19 @@ something your saved courses lack shows as such.
 - **Groups**: each group category with your group in it and its members, with
   their e-mail addresses, and when sign-up opens or closes.
 - **Quizzes**: when each opens, is due and closes, attempts and time limit.
+- **Coverage**: what you have studied against the course's units, below.
 
 Upcoming assignments and quizzes come first, soonest at the top, and past ones
 last, dimmed. **Open on DTU Learn** opens one in your browser, to hand it in or
-take it. These four tabs are read live from DTU Learn when first opened (a
+take it. **Coverage** holds LearnHarness's map of what you have studied, the
+statements it extracts from your sessions and files, against the saved course:
+each statement is found in the course by its name or an alias through the
+course's search (a week's slides before a book that spans the whole course),
+and each top-level unit lists what you have studied there, a chip per
+statement that opens where the course covers it, or says nothing has been
+studied from it yet. The map fills only when you run **Extract** on
+LearnHarness's graph page (or **Extract files into the graph**); until then the
+tab says so. It needs no connection. These four tabs are read live from DTU Learn when first opened (a
 course not downloaded has them too), with when they were read and **Read
 again**; offline they say why they cannot be. A unit's name opens it and shows
 its own text and what it holds.

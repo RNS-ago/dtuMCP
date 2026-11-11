@@ -278,7 +278,7 @@ function search(query, hideBroken, { only, limit = 100, partial = false } = {}) 
 	found.sort((a, b) => b.count - a.count || b.inTitle - a.inTitle || b.often - a.often);
 	const mark = new RegExp(`(${patterns.map(p => `(?:${p.source})`).join("|")})`, "gu");
 	const hits = found.slice(0, limit).map(({ course, entry, has }) => {
-		const hit = { ou: course.ou, course: course.name, saved: course.mtime, title: entry.title, where: entry.where, kind: entry.kind, target: entry.target };
+		const hit = { ou: course.ou, course: course.name, saved: course.mtime, title: entry.title, where: entry.where, kind: entry.kind, target: entry.target, pageCount: entry.pages?.length ?? 1 };
 		if (has.includes(false)) hit.missing = words.filter((_, i) => !has[i]);
 		let at = Math.min(...patterns.map(p => entry.text.search(p)).filter(i => i >= 0));
 		if (entry.pages && Number.isFinite(at)) {
@@ -357,6 +357,65 @@ function searchText(input) {
 		if (hit.snippet) lines.push(`    ${hit.snippet.join("")}`);
 	});
 	return { found, text: lines.join("\n") };
+}
+
+// Words that say nothing about where a statement is covered.
+const STOPWORDS = new Set("a an and are as at be by can does each for from has have how if in into is it its of on or that the their then there these this to was what when which with without".split(" "));
+
+// What the learner has studied (LearnHarness's map, its propositions)
+// against one course: each proposition found in the course by its name or
+// an alias, through the course's search, where every word matters but one
+// in four of a long name may be missing. A book that spans the course (over
+// 40 pages) says little about which week covers it, so a match in shorter
+// material is taken first. The units are the course's top level, in order,
+// to show what has nothing studied yet.
+// ponytail: a search per name per proposition, cached per course copy; a
+// map of thousands would want an index of its own.
+const coverageCache = new Map(); // "<ou>:<mtime>:<id>:<name>" -> match or null
+function coverage(learning, ou) {
+	const saved = copies().get(ou);
+	if (!saved) throw new Error("This course has no saved copy. Download it first.");
+	const copy = record(ou);
+	let graph;
+	try { graph = learning?.graph(); } catch {} // no map yet
+	const nodes = graph?.propositions ?? graph?.nodes ?? [];
+	// Each topic's and unit's top-level unit.
+	const top = new Map();
+	const walk = (modules, root) => {
+		for (const module of modules ?? []) {
+			const head = root ?? module.ModuleId;
+			top.set(`u${module.ModuleId}`, head);
+			for (const topic of module.Topics ?? []) top.set(`t${topic.TopicId}`, head);
+			walk(module.Modules, head);
+		}
+	};
+	walk(copy.modules);
+	// The name and every alias each find their matches; shorter material
+	// from any of them comes first, then the book.
+	const find = node => {
+		const good = [];
+		for (const name of [node.name, ...(node.aliases ?? [])]) {
+			const words = String(name ?? "").split(/[\s/,;:()]+/).filter(word => word && !STOPWORDS.has(word.toLowerCase()) && (word.length > 2 || /[\p{Lu}\p{N}]/u.test(word)));
+			if (!words.length) continue;
+			good.push(...search(words.join(" "), true, { only: ou, limit: 8, partial: true }).hits
+				.filter(hit => (hit.missing?.length ?? 0) <= Math.floor(words.length / 4)));
+		}
+		return good.find(hit => hit.pageCount <= 40) ?? good[0] ?? null;
+	};
+	const matched = [];
+	for (const node of nodes) {
+		const key = `${ou}:${saved.mtime}:${node.id}:${node.name}`;
+		if (!coverageCache.has(key)) coverageCache.set(key, find(node));
+		const hit = coverageCache.get(key);
+		if (!hit) continue;
+		const unit = hit.target.topic !== undefined ? top.get(`t${hit.target.topic}`) : hit.target.unit !== undefined ? top.get(`u${hit.target.unit}`) : undefined;
+		matched.push({ id: node.id, name: node.name, statement: node.statement, unit: unit ?? null, target: hit.target, title: hit.title, page: hit.page });
+	}
+	return {
+		total: nodes.length,
+		matched,
+		units: (copy.modules ?? []).map(module => ({ id: module.ModuleId, title: module.Title })),
+	};
 }
 
 exports.activate = ctx => {
@@ -456,8 +515,10 @@ exports.activate = ctx => {
 	// A course page's live tabs, read from DTU Learn as they are opened:
 	// {items} for assignments, quizzes, groups or calendar, and the base
 	// their relative links resolve against.
+	// Coverage is the learner's map against the saved course, read here.
 	const TABS = new Set(["assignments", "quizzes", "groups", "calendar"]);
 	ctx.handle("course-tab", async input => {
+		if (input?.tab === "coverage") return coverage(ctx.learning, id(input.ou));
 		if (!TABS.has(input?.tab)) throw new Error(`No tab ${JSON.stringify(input?.tab)}.`);
 		return { ...JSON.parse(await run(["course_tab", id(input.ou), input.tab])), base: dtuBase };
 	});

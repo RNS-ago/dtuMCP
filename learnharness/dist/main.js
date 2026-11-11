@@ -42,7 +42,7 @@ const wordsPattern = query => {
 };
 
 // A course page's tabs, in order; it opens on the first.
-const COURSE_TABS = { news: "Announcements", assignments: "Assignments", calendar: "Calendar", groups: "Groups", quizzes: "Quizzes" };
+const COURSE_TABS = { news: "Announcements", assignments: "Assignments", calendar: "Calendar", groups: "Groups", quizzes: "Quizzes", coverage: "Coverage" };
 
 const UP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>';
 const DOWN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
@@ -967,6 +967,45 @@ function mount(ctx, container, signal, tutor, opener) {
 			}
 			return body;
 		},
+		// What the learner's LearnHarness map holds against this course: each
+		// of its top-level units, with the statements studied that the course
+		// covers there, each opening where; units with none are the gaps.
+		coverage({ total, matched, units }, course) {
+			const body = el("div", "dtu-learn-coverage");
+			if (!total) {
+				body.append(el("p", undefined, "Your LearnHarness map is empty, so there is nothing to hold against the course yet. It fills from your sessions when you run Extract on LearnHarness's graph page, and from documents with Extract files into the graph."));
+				return body;
+			}
+			const byUnit = new Map();
+			for (const item of matched) byUnit.set(item.unit, [...(byUnit.get(item.unit) ?? []), item]);
+			const touched = units.filter(unit => byUnit.has(unit.id)).length;
+			body.append(el("p", "dtu-learn-muted", `${matched.length} of the ${plural(total, "statement")} in your map are covered by this course; ${touched} of its ${plural(units.length, "unit")} have something you have studied.`));
+			const chips = items => {
+				const box = el("div", "dtu-learn-coverage-items");
+				for (const item of items) {
+					const chip = button("dtu-learn-chip", item.name, () => openRef({ ou: course.id, target: item.target, title: item.title, page: item.page }));
+					chip.title = [item.statement, `${item.title}${item.page ? `, page ${item.page}` : ""}`].filter(Boolean).join("\n");
+					box.append(chip);
+				}
+				return box;
+			};
+			const list = el("ul", "dtu-learn-coverage-units");
+			for (const unit of units) {
+				const items = byUnit.get(unit.id) ?? [];
+				const row = el("li", items.length ? "studied" : "open");
+				const head = el("div", "dtu-learn-coverage-head");
+				head.append(button("dtu-learn-link", unit.title, () => openRef({ ou: course.id, unit: unit.id })),
+					el("span", "dtu-learn-tag", items.length ? `${items.length} studied` : "nothing studied yet"));
+				row.append(head);
+				if (items.length) row.append(chips(items));
+				list.append(row);
+			}
+			body.append(list);
+			// Found in an announcement or a linked file, outside the units.
+			const elsewhere = byUnit.get(null) ?? [];
+			if (elsewhere.length) body.append(el("h3", undefined, "Elsewhere in the course"), chips(elsewhere));
+			return body;
+		},
 		// Each group category, with the learner's group in it and its members.
 		groups({ items, base }, course) {
 			const body = el("div", "dtu-learn-cards");
@@ -1347,7 +1386,9 @@ function mount(ctx, container, signal, tutor, opener) {
 				}
 				if (showing !== name) return;
 				const body = el("div");
-				const note = el("p", "dtu-learn-muted dtu-learn-live", `Live from DTU Learn, read at ${timeOf(data.read)}. `);
+				const note = el("p", "dtu-learn-muted dtu-learn-live", name === "coverage"
+					? `Your LearnHarness map against the saved course, read at ${timeOf(data.read)}. `
+					: `Live from DTU Learn, read at ${timeOf(data.read)}. `);
 				note.append(button("dtu-learn-link", "Read again", () => {
 					tabCache.delete(`${course.id}:${name}`);
 					showLive(name);

@@ -242,6 +242,24 @@
 	margin: .35rem 0 0; max-height: 16rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
 	font-size: .75rem; line-height: 1.45;
 }
+/* Coverage: the course's units, each with what the learner has studied
+   there as chips, a green mark where there is something. */
+.dtu-learn-coverage { padding-top: .5rem; font-size: .875rem; }
+.dtu-learn-coverage > p { margin: 0 0 .75rem; font-size: .8125rem; }
+.dtu-learn-coverage-units { list-style: none; margin: 0; padding: 0; }
+.dtu-learn-coverage-units li { padding: .5rem 0 .5rem .75rem; border-bottom: 1px solid var(--border); border-left: 3px solid var(--border); margin-bottom: -1px; }
+.dtu-learn-coverage-units li.studied { border-left-color: #2f9e5a; }
+.dtu-learn-coverage-head { display: flex; justify-content: space-between; align-items: baseline; gap: .75rem; }
+.dtu-learn-coverage-items { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .4rem; }
+.dtu-learn-coverage h3 { margin: 1rem 0 .25rem; font-size: .875rem; }
+.dtu-learn-chip {
+	all: unset; cursor: pointer; padding: .1rem .55rem; font-size: .75rem; border-radius: 999px;
+	border: 1px solid var(--border); background: color-mix(in oklab, var(--foreground) 5%, transparent);
+	transition: background-color .12s ease, border-color .12s ease;
+}
+.dtu-learn-chip:hover { background: var(--tint-hover); border-color: color-mix(in oklab, var(--foreground) 35%, transparent); }
+.dtu-learn-chip:active { background: var(--tint-press); }
+.dtu-learn-chip:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 /* Send to tutor: a button by the selection, and under the tree what waits
    for the learner's next message. */
 .dtu-learn { position: relative; }
