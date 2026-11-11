@@ -295,6 +295,14 @@ exports.activate = ctx => {
 		return copy ? { saved: copy.saved, modules: copy.modules, files: copy.files, news: copy.news, videos: copy.videos ?? {}, base: dtuBase } : null;
 	});
 	ctx.handle("search", input => search(input?.query, !!input?.hideBroken));
+	// A course page's live tabs, read from DTU Learn as they are opened:
+	// {items} for assignments, quizzes, groups or calendar, and the base
+	// their relative links resolve against.
+	const TABS = new Set(["assignments", "quizzes", "groups", "calendar"]);
+	ctx.handle("course-tab", async input => {
+		if (!TABS.has(input?.tab)) throw new Error(`No tab ${JSON.stringify(input?.tab)}.`);
+		return { ...JSON.parse(await run(["course_tab", id(input.ou), input.tab])), base: dtuBase };
+	});
 	// A unit's text ({ou, unit}), a topic's ({ou, topic}) or an announcement
 	// attachment's ({ou, attachment: "<news id>/<file id>"}).
 	ctx.handle("text", async input => {

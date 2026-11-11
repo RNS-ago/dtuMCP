@@ -127,17 +127,55 @@
 .dtu-learn-muted { color: color-mix(in oklab, var(--foreground) 60%, transparent); }
 .dtu-learn-error { color: #d14343; }
 .dtu-learn-course { display: inline-flex; align-items: center; gap: .5rem; }
-/* Each announcement a card of its own: title, its date under it, its text. */
-.dtu-learn-news { padding-top: .75rem; }
-.dtu-learn-news > p { margin: 0 0 .75rem; }
-.dtu-learn-news article {
+/* Each announcement, assignment, quiz or group category a card of its own:
+   title, a line of dates or facts under it, its text. */
+.dtu-learn-cards { padding-top: .75rem; }
+.dtu-learn-cards > p { margin: 0 0 .75rem; }
+.dtu-learn-cards article {
 	margin: 0 0 1rem; padding: .75rem 1rem;
 	border: 1px solid var(--border); border-radius: 8px;
 	background: color-mix(in oklab, var(--foreground) 3%, transparent);
 }
-.dtu-learn-news h3 { margin: 0; font-size: .95rem; }
-.dtu-learn-news article > .dtu-learn-muted { margin: .15rem 0 .6rem; font-size: .75rem; }
-.dtu-learn-news .dtu-learn-attachment { margin: .5rem 0 0; font-size: .8125rem; }
+.dtu-learn-cards h3 { margin: 0; font-size: .95rem; }
+.dtu-learn-cards article > .dtu-learn-muted { margin: .15rem 0 .6rem; font-size: .75rem; }
+.dtu-learn-cards .dtu-learn-attachment { margin: .5rem 0 0; font-size: .8125rem; }
+/* A course page's tabs, under its name, the open one underlined. */
+.dtu-learn-head > .dtu-learn-tabs { flex-basis: 100%; gap: 0; margin-bottom: -.5rem; }
+.dtu-learn-tab {
+	all: unset; cursor: pointer; padding: .35rem .75rem .45rem; font-size: .8125rem;
+	color: color-mix(in oklab, var(--foreground) 62%, transparent);
+	border-bottom: 2px solid transparent; border-radius: 4px 4px 0 0;
+	transition: background-color .12s ease, color .12s ease;
+}
+.dtu-learn-tab:hover { color: var(--foreground); background: var(--tint-hover); }
+.dtu-learn-tab:active { background: var(--tint-press); }
+.dtu-learn-tab[aria-selected="true"] { color: var(--foreground); font-weight: 600; border-bottom-color: var(--foreground); }
+.dtu-learn-tab:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+.dtu-learn-live { margin: .75rem 0 0; font-size: .75rem; }
+.dtu-learn-live .dtu-learn-link { text-decoration: underline; text-underline-offset: 2px; }
+/* A card's title with its Open on DTU Learn beside it; past ones dimmed. */
+.dtu-learn-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; }
+.dtu-learn-card-head .dtu-learn-action { flex: none; }
+.dtu-learn-cards article.dtu-learn-past { opacity: .62; }
+.dtu-learn-mine { margin: .5rem 0 .25rem; font-size: .8125rem; }
+.dtu-learn-members { margin: 0; padding-left: 1.2rem; font-size: .8125rem; line-height: 1.7; }
+.dtu-learn-members a { color: inherit; font-size: .75rem; }
+/* The calendar: a heading per day, then a row per event, its time beside it. */
+.dtu-learn-agenda { padding-top: .5rem; }
+.dtu-learn-agenda > p { margin: 0 0 .5rem; font-size: .75rem; }
+.dtu-learn-agenda h3 { margin: 1rem 0 .25rem; font-size: .875rem; }
+.dtu-learn-agenda ul { list-style: none; margin: 0; padding: 0; }
+.dtu-learn-agenda li {
+	display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: .75rem;
+	padding: .4rem 0; border-bottom: 1px solid var(--border); font-size: .8125rem; line-height: 1.45;
+}
+.dtu-learn-time { font-variant-numeric: tabular-nums; color: color-mix(in oklab, var(--foreground) 70%, transparent); }
+.dtu-learn-event { font-weight: 500; }
+.dtu-learn-agenda .dtu-learn-tag { margin-left: .5rem; }
+.dtu-learn-tag.dtu-learn-due { color: #c2410c; font-weight: 600; }
+.dtu-learn-agenda .dtu-learn-where { margin: .05rem 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dtu-learn-members-fold summary { cursor: pointer; font-size: .8125rem; margin-top: .25rem; }
+.dtu-learn-agenda .dtu-learn-rich { margin-top: .25rem; font-size: .8125rem; }
 .dtu-learn-toggle { display: flex; align-items: center; gap: .4rem; margin-bottom: .5rem; font-size: .8125rem; cursor: pointer; }
 /* The search box over the tree, and its results in the tree's place. */
 .dtu-learn-search, .dtu-learn-find input {
@@ -177,7 +215,7 @@ mark.dtu-learn-mark { color: inherit; background: color-mix(in oklab, #f5b301 40
 .dtu-learn-snippet mark { color: inherit; background: color-mix(in oklab, #f5b301 40%, transparent); border-radius: 2px; }
 /* What the pane shows, in the tree; an announcement a result opened. */
 .dtu-learn-link.dtu-learn-current { background: var(--tint-press); }
-.dtu-learn-news article.dtu-learn-found { border-color: color-mix(in oklab, var(--foreground) 55%, transparent); }
+.dtu-learn-cards article.dtu-learn-found { border-color: color-mix(in oklab, var(--foreground) 55%, transparent); }
 /* Buttons that answer the pointer: a tint under it, a slight sink and a
    deeper tint while pressed, all quick. --tint is the foreground at a share. */
 .dtu-learn, .dtu-learn-preview, .dtu-learn-player { --tint-hover: color-mix(in oklab, var(--foreground) 9%, transparent); --tint-press: color-mix(in oklab, var(--foreground) 16%, transparent); }

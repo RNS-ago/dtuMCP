@@ -1837,6 +1837,131 @@ def download_video(org_unit_id: int, topic_id: int) -> str:
     return f"Saved {dest} ({dest.stat().st_size / 1e6:.0f} MB)."
 
 
+def _rich(field) -> dict:
+    """D2L rich text, a plain and an HTML rendition, as the view takes it."""
+    field = field or {}
+    return {"text": field.get("Text") or "", "html": field.get("Html") or ""}
+
+
+# Group categories a student signs up to themselves, by D2L's EnrollmentStyle:
+# people per group, number of groups, or both, with self-enrolment.
+SELF_ENROLMENT = {3, 4, 5}
+
+
+def _group_rows(categories: list, groups: list, me: int, classlist: list) -> list:
+    """A course's group categories as its Groups tab shows them, each with
+    the learner's own group and its members, if they are in one. groups holds
+    each category's groups, in the same order; their Enrollments are user
+    ids, which the class list names."""
+    people = {int(u["Identifier"]): u for u in classlist}
+    rows = []
+    for category, members_of in zip(categories, groups):
+        mine = next((g for g in members_of if me in (g.get("Enrollments") or [])), None)
+        rows.append({
+            "name": category["Name"],
+            "description": _rich(category.get("Description")),
+            "groups": len(members_of),
+            "size": category.get("MaxUsersPerGroup"),
+            "signup": category.get("EnrollmentStyle") in SELF_ENROLMENT,
+            "opens": category.get("SelfEnrollmentStartDate"),
+            "closes": category.get("SelfEnrollmentExpiryDate"),
+            "mine": mine and {
+                "name": mine["Name"],
+                "description": _rich(mine.get("Description")),
+                "members": [
+                    {"name": people[i].get("DisplayName") or f"{people[i].get('FirstName', '')} {people[i].get('LastName', '')}".strip(),
+                     "email": people[i].get("Email") or "", "role": people[i].get("ClasslistRoleDisplayName") or "",
+                     "me": i == me}
+                    for i in mine["Enrollments"] if i in people
+                ],
+            },
+        })
+    return rows
+
+
+def course_tab(org_unit_id: int, tab: str) -> str:
+    """Print one tab of a course's page in the LearnHarness view as JSON.
+
+    tab is assignments, quizzes, groups or calendar, read live from DTU Learn.
+    Not an MCP tool: the agents have list_assignments and calendar, and this
+    carries what a page shows rather than what an answer needs.
+    """
+    ou = _resolve(org_unit_id)
+    if tab == "assignments":
+        items = [
+            {
+                "id": f["Id"], "name": f["Name"], "due": f.get("DueDate"),
+                "start": (f.get("Availability") or {}).get("StartDate"),
+                "end": (f.get("Availability") or {}).get("EndDate"),
+                "instructions": _rich(f.get("CustomInstructions")),
+                "files": [a.get("FileName") for a in f.get("Attachments") or []],
+                "links": [{"name": link.get("LinkName") or link.get("Href"), "url": link.get("Href")}
+                          for link in f.get("LinkAttachments") or []],
+                # A group assignment names the group category it is handed in by.
+                "group": bool(f.get("GroupTypeId")),
+                "points": (f.get("Assessment") or {}).get("ScoreDenominator"),
+                "url": f"{BASE}/d2l/lms/dropbox/user/folder_submit_files.d2l?db={f['Id']}&ou={ou}",
+            }
+            for f in _get(f"/d2l/api/le/{LE}/{ou}/dropbox/folders/") if not f.get("IsHidden")
+        ]
+        return json.dumps({"items": items}, ensure_ascii=False)
+    if tab == "quizzes":
+        page = _get(f"/d2l/api/le/{LE}/{ou}/quizzes/")
+        quizzes = page.get("Objects") or []
+        while page.get("Next"):
+            page = _get(page["Next"])
+            quizzes += page.get("Objects") or []
+        items = []
+        for q in quizzes:
+            if not q.get("IsActive"):
+                continue  # hidden from students on DTU Learn too
+            attempts = q.get("AttemptsAllowed") or {}
+            limit = q.get("SubmissionTimeLimit") or {}
+            description = q.get("Description") or {}
+            items.append({
+                "id": q["QuizId"], "name": q["Name"],
+                "start": q.get("StartDate"), "due": q.get("DueDate"), "end": q.get("EndDate"),
+                "attempts": None if attempts.get("IsUnlimited") else attempts.get("NumberOfAttemptsAllowed"),
+                "minutes": limit.get("TimeLimitValue") if limit.get("IsEnforced") else None,
+                "description": _rich(description.get("Text") if description.get("IsDisplayed", True) else None),
+                "url": f"{BASE}/d2l/lms/quizzing/user/quiz_summary.d2l?qi={q['QuizId']}&ou={ou}",
+            })
+        return json.dumps({"items": items}, ensure_ascii=False)
+    if tab == "groups":
+        me = int(_get(f"/d2l/api/lp/{LP}/users/whoami")["Identifier"])
+        categories = _get(f"/d2l/api/lp/{LP}/{ou}/groupcategories/")
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            groups = list(pool.map(
+                lambda c: _get(f"/d2l/api/lp/{LP}/{ou}/groupcategories/{c['GroupCategoryId']}/groups/"),
+                categories,
+            ))
+        # Names only for the learner's own groups, so the class list only then.
+        mine = any(me in (g.get("Enrollments") or []) for gs in groups for g in gs)
+        classlist = _get(f"/d2l/api/le/{LE}/{ou}/classlist/") if mine else []
+        return json.dumps({"items": _group_rows(categories, groups, me, classlist)}, ensure_ascii=False)
+    if tab == "calendar":
+        # From today, as far ahead as a term runs.
+        start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        events = _my_events([ou], start, start + timedelta(days=150))
+        items = []
+        for e in sorted(events, key=lambda e: e["StartDateTime"]):
+            entity = (e.get("AssociatedEntity") or {}).get("AssociatedEntityType") or ""
+            # Event descriptions are HTML. A booked lecture's only says that
+            # TimeEdit made it, which is no news on every line of the week.
+            html = (e.get("Description") or "").strip()
+            if "room bookings in TimeEdit" in html:
+                html = ""
+            items.append({
+                "title": e["Title"], "start": e["StartDateTime"], "end": e["EndDateTime"],
+                "allDay": e["IsAllDayEvent"], "where": (e.get("LocationName") or "").strip(),
+                "due": "Dropbox" in entity or "Quiz" in entity,
+                "description": {"text": "", "html": html},
+            })
+        # D2L stops at 100 events and reports no continuation to page through.
+        return json.dumps({"items": items, "capped": len(events) >= 100}, ensure_ascii=False)
+    raise RuntimeError(f"No tab {tab!r}: assignments, quizzes, groups or calendar.")
+
+
 COMMANDS = {
     f.__name__: f
     for f in (
@@ -1848,6 +1973,7 @@ COMMANDS = {
         get_pdf_pages,
         video_link,
         download_video,
+        course_tab,
         list_assignments,
         list_announcements,
         get_announcement_attachment,

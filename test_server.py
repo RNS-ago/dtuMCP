@@ -25,9 +25,9 @@ wanted = {"_flatten", "_profiles", "_term", "_pdf_text", "_TextExtractor",
           "_search_pages", "_search_entry", "_landing_html",
           "_each", "_status", "_summary", "_code",
           "_copies", "_copy", "_saved_text", "_file_text", "_decode",
-          "_numbered_pages"}
+          "_numbered_pages", "_rich", "_group_rows"}
 constants_extra = {"OOXML_MEMBERS"}
-constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT"}
+constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT"}
 
 
 def needed(node):
@@ -493,5 +493,26 @@ assert mod._decode(b"x", "text/plain; charset=nonsense") == "x"
 # so a reader can ask get_pdf_pages for the page with the figure.
 got = mod._numbered_pages("\n  Title\n\fP = NP?\n\f\f")
 assert got == "[Page 1]\n  Title\n\n[Page 2]\nP = NP?\n\n[Page 3]\n", repr(got)
+
+# The Groups tab: the learner's own group in each category, its members named
+# from the class list (whose ids are strings), a category without one marked so.
+categories = [
+    {"Name": "Project", "EnrollmentStyle": 5, "MaxUsersPerGroup": 3,
+     "SelfEnrollmentExpiryDate": "2026-10-06T07:00:00.000Z", "Description": {"Text": "Pick one", "Html": "<p>Pick one</p>"}},
+    {"Name": "Feedback", "EnrollmentStyle": 1},
+]
+groups = [
+    [{"Name": "project 1", "Enrollments": [5, 6]}, {"Name": "project 2", "Enrollments": [7, 42, 99]}],
+    [{"Name": "feedback 1", "Enrollments": [5]}],
+]
+classlist = [{"Identifier": "42", "DisplayName": "Me", "Email": "me@dtu.dk", "ClasslistRoleDisplayName": "Student"},
+             {"Identifier": "7", "FirstName": "Ada", "LastName": "L", "Email": "ada@dtu.dk", "ClasslistRoleDisplayName": "Student"}]
+rows = mod._group_rows(categories, groups, 42, classlist)
+assert [r["groups"] for r in rows] == [2, 1] and [r["signup"] for r in rows] == [True, False], rows
+assert rows[0]["mine"]["name"] == "project 2" and rows[1]["mine"] is None, rows
+# 99 left the course: not in the class list, so not named.
+assert [(m["name"], m["me"]) for m in rows[0]["mine"]["members"]] == [("Ada L", False), ("Me", True)], rows[0]
+assert rows[0]["description"] == {"text": "Pick one", "html": "<p>Pick one</p>"}
+assert mod._rich(None) == {"text": "", "html": ""}
 
 print("OK")

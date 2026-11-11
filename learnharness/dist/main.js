@@ -25,6 +25,9 @@ const wordsPattern = query => {
 	return new RegExp(`(?<![\\p{L}\\p{N}])(?:${words.map(word => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "giu");
 };
 
+// A course page's tabs, in order; it opens on the first.
+const COURSE_TABS = { news: "Announcements", assignments: "Assignments", calendar: "Calendar", groups: "Groups", quizzes: "Quizzes" };
+
 const UP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>';
 const DOWN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
 const MINUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>';
@@ -532,6 +535,178 @@ function mount(ctx, container, signal) {
 	// under "<news id>/<file id>", a file the course links to at its path.
 	const isPdf = ({ ou, topic, attachment, linked }) => /\.pdf$/i.test(linked ?? courses.get(ou)?.files?.[attachment ?? topic] ?? "");
 
+	// The live tabs of a course page, read once each while the view is open,
+	// unless asked for again; a failed read is tried again next time.
+	const tabCache = new Map(); // "<ou>:<tab>" -> the read, with when it was made
+	const tabData = (ou, tab) => {
+		const key = `${ou}:${tab}`;
+		if (!tabCache.has(key)) {
+			tabCache.set(key, ctx.call("course-tab", { ou, tab }).then(
+				data => ({ ...data, read: new Date().toISOString() }),
+				error => { tabCache.delete(key); throw error; },
+			));
+		}
+		return tabCache.get(key);
+	};
+
+	// Dates as the learner's system writes them, and how far off they are.
+	const dateTime = iso => new Date(iso).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+	const timeOf = iso => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+	const relative = iso => {
+		const hours = (Date.parse(iso) - Date.now()) / 36e5;
+		const format = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+		return Math.abs(hours) < 24 ? format.format(Math.round(hours), "hour") : format.format(Math.round(hours / 24), "day");
+	};
+	const later = iso => iso && Date.parse(iso) > Date.now();
+	// Upcoming first, the soonest at the top, then those with no date, then
+	// past ones, the latest first. Each with whether it is past.
+	const ordered = (items, dateOf) => {
+		const at = item => dateOf(item) ? Date.parse(dateOf(item)) : undefined;
+		const now = Date.now();
+		return [
+			...items.filter(item => at(item) >= now).sort((a, b) => at(a) - at(b)),
+			...items.filter(item => at(item) === undefined),
+			...items.filter(item => at(item) < now).sort((a, b) => at(b) - at(a)),
+		].map(item => ({ item, past: at(item) < now }));
+	};
+	// D2L rich text: its HTML, for its links, else its plain text; nothing
+	// when it has neither.
+	const richField = (field, base) => field?.html?.trim() ? rich(field.html, base)
+		: field?.text?.trim() ? linkify(el("div", "dtu-learn-text"), field.text.trim()) : undefined;
+	// A card of a live tab: its title, beside it a button to open it on DTU
+	// Learn in the browser, and a line of facts under it. A past one is dimmed.
+	const card = (title, url, facts, past) => {
+		const item = el("article");
+		if (past) item.classList.add("dtu-learn-past");
+		const top = el("div", "dtu-learn-card-head");
+		top.append(el("h3", undefined, title));
+		if (url) {
+			const open = button("dtu-learn-action", "Open on DTU Learn", () => openUrl(url));
+			open.title = "Open it in your browser, signed in to DTU Learn";
+			top.append(open);
+		}
+		item.append(top, el("p", "dtu-learn-muted", facts.filter(Boolean).join(" · ")));
+		return item;
+	};
+	const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+	// Each live tab's page from what course_tab read.
+	const LIVE_TABS = {
+		assignments({ items, base }) {
+			const body = el("div", "dtu-learn-cards");
+			if (!items.length) body.append(el("p", undefined, "No assignments."));
+			for (const { item: a, past } of ordered(items, a => a.due ?? a.end)) {
+				const article = card(a.name, a.url, [
+					a.due ? `Due ${dateTime(a.due)}, ${relative(a.due)}` : "No due date",
+					a.end && a.end !== a.due && `closes ${dateTime(a.end)}`,
+					later(a.start) && `opens ${dateTime(a.start)}`,
+					a.group && "group hand-in",
+					a.points && `${a.points} points`,
+				], past);
+				const text = richField(a.instructions, base);
+				if (text) article.append(text);
+				if (a.files.length) article.append(el("p", "dtu-learn-attachment", `Attached on DTU Learn: ${a.files.join(", ")}`));
+				for (const link of a.links) {
+					let url;
+					try { url = new URL(link.url, base).href; } catch { continue; }
+					const line = el("p", "dtu-learn-attachment", "Link: ");
+					line.append(anchor(url, link.name));
+					article.append(line);
+				}
+				body.append(article);
+			}
+			return body;
+		},
+		quizzes({ items, base }) {
+			const body = el("div", "dtu-learn-cards");
+			if (!items.length) body.append(el("p", undefined, "No quizzes."));
+			for (const { item: q, past } of ordered(items, q => q.due ?? q.end)) {
+				const article = card(q.name, q.url, [
+					later(q.start) && `opens ${dateTime(q.start)}`,
+					q.due && `due ${dateTime(q.due)}, ${relative(q.due)}`,
+					q.end && q.end !== q.due && `closes ${dateTime(q.end)}`,
+					!q.start && !q.due && !q.end && "open any time",
+					q.attempts == null ? "unlimited attempts" : plural(q.attempts, "attempt"),
+					q.minutes && `${q.minutes} min`,
+				], past);
+				const text = richField(q.description, base);
+				if (text) article.append(text);
+				body.append(article);
+			}
+			return body;
+		},
+		// By day, from today: the time, what it is, where, and a deadline marked.
+		calendar({ items, capped, base }) {
+			const body = el("div", "dtu-learn-agenda");
+			body.append(el("p", "dtu-learn-muted", capped ? "The next 100 events, all DTU Learn gives at once." : "The next five months."));
+			if (!items.length) body.append(el("p", undefined, "Nothing scheduled."));
+			let day;
+			let list;
+			for (const e of items) {
+				if (new Date(e.start).toDateString() !== day) {
+					day = new Date(e.start).toDateString();
+					list = el("ul");
+					body.append(el("h3", undefined, new Date(e.start).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })), list);
+				}
+				const row = el("li");
+				const what = el("div");
+				what.append(el("span", "dtu-learn-event", e.title));
+				if (e.due) what.append(el("span", "dtu-learn-tag dtu-learn-due", "deadline"));
+				if (e.where) {
+					// A session booked into many rooms lists them all: one line, all on hover.
+					const where = el("p", "dtu-learn-where", e.where);
+					where.title = e.where;
+					what.append(where);
+				}
+				const text = richField(e.description, base);
+				if (text) what.append(text);
+				row.append(el("span", "dtu-learn-time", e.allDay ? "all day" : e.end !== e.start ? `${timeOf(e.start)}–${timeOf(e.end)}` : timeOf(e.start)), what);
+				list.append(row);
+			}
+			return body;
+		},
+		// Each group category, with the learner's group in it and its members.
+		groups({ items, base }, course) {
+			const body = el("div", "dtu-learn-cards");
+			if (!items.length) body.append(el("p", undefined, "This course has no groups."));
+			for (const g of items) {
+				const signup = g.signup && (later(g.opens) ? `sign-up opens ${dateTime(g.opens)}`
+					: !g.closes ? "sign-up open"
+					: later(g.closes) ? `sign-up until ${dateTime(g.closes)}` : `sign-up closed ${dateTime(g.closes)}`);
+				const canJoin = !g.mine && g.signup && !later(g.opens) && (!g.closes || later(g.closes));
+				const article = card(g.name, canJoin && `${base}/d2l/lms/group/user_group_list.d2l?ou=${course.id}`,
+					[plural(g.groups, "group"), g.size && `up to ${g.size} each`, signup]);
+				const text = richField(g.description, base);
+				if (text) article.append(text);
+				if (!g.mine) {
+					article.append(el("p", "dtu-learn-muted", "You are not in one of these groups."));
+				} else {
+					const line = el("p", "dtu-learn-mine", "Your group: ");
+					line.append(el("strong", undefined, g.mine.name));
+					article.append(line);
+					const about = richField(g.mine.description, base);
+					if (about) article.append(about);
+					const people = el("ul", "dtu-learn-members");
+					for (const m of g.mine.members) {
+						const person = el("li", undefined, m.me ? `${m.name} (you)` : m.name);
+						if (m.role && !m.role.startsWith("Student")) person.append(" ", el("span", "dtu-learn-tag", m.role));
+						if (m.email && !m.me) person.append(" ", anchor(`mailto:${m.email}`, m.email));
+						people.append(person);
+					}
+					// A whole exercise class is a long list: folded, its size showing.
+					if (g.mine.members.length > 10) {
+						const fold = el("details", "dtu-learn-members-fold");
+						fold.append(el("summary", undefined, plural(g.mine.members.length, "member")), people);
+						article.append(fold);
+					} else {
+						article.append(people);
+					}
+				}
+				body.append(article);
+			}
+			return body;
+		},
+	};
+
 	// Something that shows one thing at a time under a heading of its own:
 	// the pane beside the tree, or a link's preview. box holds it; life ends
 	// it, freeing whatever it shows.
@@ -769,50 +944,112 @@ function mount(ctx, container, signal) {
 			put(body);
 		}
 
-		// A course's announcements, newest first, as its copy saved them.
-		// Their attachments open here like topics. focus is one to scroll to
-		// and outline, a search result's, with query's words marked in it.
-		async function showCourse(course, focus, query) {
-			const { put } = heading(course.name);
-			if (!course.saved) {
-				put(el("p", "dtu-learn-muted", "Not downloaded yet. Download it to browse its units and read its announcements here."));
-				return;
-			}
-			put(el("p", "dtu-learn-muted", "Reading…"));
-			await load(course.id);
-			const copy = courses.get(course.id);
-			if (!copy || copy instanceof Error) {
-				put(el("p", "dtu-learn-error", copy?.message ?? "Could not read the course."));
-				return;
-			}
-			const body = el("div", "dtu-learn-news");
-			body.append(el("p", "dtu-learn-muted", `Announcements as saved ${copy.saved}. Refresh the course for newer ones.`));
-			if (!copy.news.length) body.append(el("p", undefined, "No announcements."));
-			let found;
-			for (const news of copy.news) {
-				const item = el("article");
-				if (news.Id === focus) found = item;
-				item.append(
-					el("h3", undefined, news.Title),
-					el("p", "dtu-learn-muted", (news.StartDate ?? "").slice(0, 10)),
-					// Its HTML, for its links; else the plain rendition, which keeps
-					// every empty paragraph, so one gap will do.
-					news.Body?.Html?.trim() ? rich(news.Body.Html, copy.base)
-						: linkify(el("div", "dtu-learn-text"), (news.Body?.Text ?? "").trim().replace(/(\s*\n){3,}/g, "\n\n")),
-				);
-				for (const file of news.Attachments ?? []) {
-					const line = el("p", "dtu-learn-attachment", "Attachment: ");
-					line.append(button("dtu-learn-link", file.FileName,
-						() => show(file.FileName, { ou: course.id, attachment: `${news.Id}/${file.FileId}` })));
-					item.append(line);
+		// A course's page: tabs over its announcements, as its copy saved
+		// them, and its assignments, calendar, groups and quizzes, read from
+		// DTU Learn when their tab is first opened. It opens on the
+		// announcements; focus is one of them to scroll to and outline, a
+		// search result's, with query's words marked in it.
+		function showCourse(course, focus, query) {
+			const { put, head } = heading(course.name);
+			const tabs = el("div", "dtu-learn-tabs");
+			tabs.setAttribute("role", "tablist");
+			tabs.setAttribute("aria-label", "Course page");
+			head.append(tabs);
+			let showing;
+			const select = name => {
+				showing = name;
+				for (const tab of tabs.children) {
+					const on = tab.dataset.tab === name;
+					tab.setAttribute("aria-selected", String(on));
+					tab.tabIndex = on ? 0 : -1;
 				}
-				body.append(item);
+				if (name === "news") showNews();
+				else showLive(name);
+			};
+			for (const [name, label] of Object.entries(COURSE_TABS)) {
+				const tab = button("dtu-learn-tab", label, () => select(name));
+				tab.setAttribute("role", "tab");
+				tab.dataset.tab = name;
+				tabs.append(tab);
 			}
-			if (put(body) && found) {
-				markWords(found, wordsPattern(query));
-				found.classList.add("dtu-learn-found");
-				found.scrollIntoView({ block: "start" });
+			// The arrow keys move along the tabs, as in any tab list.
+			tabs.addEventListener("keydown", event => {
+				const step = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
+				if (!step) return;
+				event.preventDefault();
+				const all = [...tabs.children];
+				const next = all[(all.findIndex(tab => tab.dataset.tab === showing) + step + all.length) % all.length];
+				select(next.dataset.tab);
+				next.focus();
+			});
+
+			// Its announcements, newest first. Their attachments open here like topics.
+			async function showNews() {
+				if (!course.saved) {
+					put(el("p", "dtu-learn-muted", "Not downloaded yet. Download it to browse its units and read its announcements here. The other tabs are read from DTU Learn."));
+					return;
+				}
+				put(el("p", "dtu-learn-muted", "Reading…"));
+				await load(course.id);
+				if (showing !== "news") return;
+				const copy = courses.get(course.id);
+				if (!copy || copy instanceof Error) {
+					put(el("p", "dtu-learn-error", copy?.message ?? "Could not read the course."));
+					return;
+				}
+				const body = el("div", "dtu-learn-cards dtu-learn-news");
+				body.append(el("p", "dtu-learn-muted", `Announcements as saved ${copy.saved}. Refresh the course for newer ones.`));
+				if (!copy.news.length) body.append(el("p", undefined, "No announcements."));
+				let found;
+				for (const news of copy.news) {
+					const item = el("article");
+					if (news.Id === focus) found = item;
+					item.append(
+						el("h3", undefined, news.Title),
+						el("p", "dtu-learn-muted", (news.StartDate ?? "").slice(0, 10)),
+						// Its HTML, for its links; else the plain rendition, which keeps
+						// every empty paragraph, so one gap will do.
+						news.Body?.Html?.trim() ? rich(news.Body.Html, copy.base)
+							: linkify(el("div", "dtu-learn-text"), (news.Body?.Text ?? "").trim().replace(/(\s*\n){3,}/g, "\n\n")),
+					);
+					for (const file of news.Attachments ?? []) {
+						const line = el("p", "dtu-learn-attachment", "Attachment: ");
+						line.append(button("dtu-learn-link", file.FileName,
+							() => show(file.FileName, { ou: course.id, attachment: `${news.Id}/${file.FileId}` })));
+						item.append(line);
+					}
+					body.append(item);
+				}
+				if (put(body) && found) {
+					markWords(found, wordsPattern(query));
+					found.classList.add("dtu-learn-found");
+					found.scrollIntoView({ block: "start" });
+				}
+				focus = undefined; // once: coming back to the tab starts at the top
 			}
+
+			// A live tab, with when it was read and a way to read it again.
+			async function showLive(name) {
+				put(el("p", "dtu-learn-muted", "Reading from DTU Learn…"));
+				let data;
+				try {
+					data = await tabData(course.id, name);
+				} catch (error) {
+					if (showing === name) put(el("p", "dtu-learn-error", error.message));
+					return;
+				}
+				if (showing !== name) return;
+				const body = el("div");
+				const note = el("p", "dtu-learn-muted dtu-learn-live", `Live from DTU Learn, read at ${timeOf(data.read)}. `);
+				note.append(button("dtu-learn-link", "Read again", () => {
+					tabCache.delete(`${course.id}:${name}`);
+					showLive(name);
+				}));
+				body.append(note, LIVE_TABS[name](data, course));
+				put(body);
+			}
+
+			select("news");
 		}
 
 		// A link's page. A DTU Learn link to a topic or a unit of a saved

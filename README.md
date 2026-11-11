@@ -107,8 +107,23 @@ prober agents every tool below, named `dtu_list_courses`, `dtu_get_file` and
 so on, with instructions on when to use them, so `dtu-learn-prompt.md` is not
 needed there. It also adds a **DTU Learn** view to the sidebar: your courses by
 term and, for each downloaded course, its units and topics. Click a course's
-name to open it and read its announcements beside the tree, with their
-attachments; a unit's name opens it and shows its own text and what it holds.
+name to open it beside the tree on its page, which has tabs:
+
+- **Announcements**, the one it opens on, from the saved copy, with their
+  attachments.
+- **Assignments**: due and closing dates and how far off they are, group
+  hand-ins, points, instructions, and the names of attached files.
+- **Calendar**: the next five months by day, deadlines marked.
+- **Groups**: each group category with your group in it and its members, with
+  their e-mail addresses, and when sign-up opens or closes.
+- **Quizzes**: when each opens, is due and closes, attempts and time limit.
+
+Upcoming assignments and quizzes come first, soonest at the top, and past ones
+last, dimmed. **Open on DTU Learn** opens one in your browser, to hand it in or
+take it. These four tabs are read live from DTU Learn when first opened (a
+course not downloaded has them too), with when they were read and **Read
+again**; offline they say why they cannot be. A unit's name opens it and shows
+its own text and what it holds.
 Unit text and announcements are shown from their HTML, so their links work,
 rebuilt from a short list of plain tags with every attribute but a link's
 address left out; scripts, styles, frames and forms are dropped, and a
