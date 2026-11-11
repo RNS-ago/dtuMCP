@@ -91,6 +91,7 @@ const instructions = `The learner's DTU Learn courses (DTU's Brightspace) are av
 - For questions about the learner's DTU courses, material, schedule or deadlines, answer from what these tools return, not from memory. Never invent an org unit, unit or topic id: get them from dtu_list_courses and dtu_course_contents.
 - org_unit_id takes the bracketed id or the DTU course number (02231). A course number taken in several terms is ambiguous; the tool lists the offerings, so ask which one unless the context settles it.
 - Course material is read from an offline copy. The first read of a course without one downloads it, which takes a minute or two, so say so before that call. dtu_course_contents and dtu_list_announcements give the date the copy was saved; call dtu_download_course when the learner asks for it to be brought up to date or about something newer. dtu_calendar and dtu_list_assignments are always live.
+- To find where something is covered, search with dtu_search_courses first: it looks inside every downloaded file and names the PDF page, so dtu_get_pdf_pages can show just that page.
 - Read a unit with dtu_unit_info before its files when asked what a week covers or what to do. Fetch only the topics you need with dtu_get_file; courses have hundreds.
 - dtu_get_file returns a file's text, with a PDF's pages headed [Page n]. Figures, diagrams and mathematical notation do not survive extraction: when they matter, look at just those pages with dtu_get_pdf_pages. Each page image costs about 2k tokens, so never ask for a whole document. Spreadsheet text is cell values only. A link returns its URL. A video has no transcript: tell the learner to watch it. dtu_course_contents leaves out topics copied from an earlier year without their files and counts them on their unit's line; if what the learner asks for is not listed and its unit has broken ones, say the material is missing from the course.
 - dtu_list_assignments does not say whether the learner submitted. Never claim a submission status.
@@ -185,40 +186,156 @@ function searchCourse(ou, { file, mtime }) {
 	return course;
 }
 
-// Every saved course searched for all of query's words, each found at the
-// start of a word in an entry's title, its units or its text, as the offline
-// page's search box does. Title matches first; the first 100 are returned,
-// each with the text around its first match, split so odd parts are matches,
-// and for a PDF the page that match is on.
-function search(query, hideBroken) {
-	const words = String(query ?? "").split(/\s+/).filter(Boolean).slice(0, 12);
-	if (!words.length) return { total: 0, hits: [] };
+// One search word as a pattern, without the i flag, so the case of the text
+// can say where a word starts: at the start of a word, or of a hump in a
+// joined-up name ("cycle" in "HamiltonCycle"), in any case. A hyphen in the
+// word, or between its digits and letters, is optional in the text either
+// way: "3SAT" and "3-SAT" find each other. The first letter comes before the
+// check of what precedes it, which lets the engine skip ahead to candidates:
+// ten times faster than the check first. main.js has the same rule.
+const OPTIONAL_HYPHEN = "[-\\u2010]?";
+function wordPattern(word) {
+	const chars = [...word.replace(/^-+|-+$/g, "")];
+	const parts = [];
+	chars.forEach((ch, i) => {
+		if (ch === "-") return void parts.push(OPTIONAL_HYPHEN);
+		const prev = chars[i - 1];
+		if (prev && prev !== "-" && /[\p{L}\p{N}]/u.test(prev) && /[\p{L}\p{N}]/u.test(ch) && /\p{N}/u.test(prev) !== /\p{N}/u.test(ch)) parts.push(OPTIONAL_HYPHEN);
+		const lower = ch.toLowerCase();
+		const upper = ch.toUpperCase();
+		parts.push(lower !== upper && [...lower].length === 1 && [...upper].length === 1 ? `[${lower}${upper}]` : ch.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&"));
+	});
+	const [first = "", ...rest] = parts;
 	// \p{L}\p{N} rather than \b, which only knows ASCII and would miss "økonomi".
-	const start = "(?<![\\p{L}\\p{N}])";
-	const escape = word => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const patterns = words.map(word => new RegExp(start + escape(word), "iu"));
+	return `${first}(?<=(?:(?<![\\p{L}\\p{N}])|(?<=\\p{Ll})(?=\\p{Lu}))${first})${rest.join("")}`;
+}
+
+// The page of a PDF entry with the most of the words, then the most matches,
+// and the other pages that have as many of the words, at most five.
+function bestPages(entry, patterns) {
+	const page = offset => entry.pages.filter(start => start <= offset).length;
+	const tally = new Map(); // page -> { words: Set, hits }
+	patterns.forEach((pattern, i) => {
+		for (const found of entry.text.matchAll(new RegExp(pattern.source, "gu"))) {
+			const n = page(found.index);
+			const t = tally.get(n) ?? tally.set(n, { words: new Set(), hits: 0, first: found.index }).get(n);
+			t.words.add(i);
+			t.hits++;
+			t.first = Math.min(t.first, found.index);
+		}
+	});
+	const ranked = [...tally].sort(([, a], [, b]) => b.words.size - a.words.size || b.hits - a.hits);
+	if (!ranked.length) return undefined;
+	const [best, top] = ranked[0];
+	const also = ranked.slice(1).filter(([, t]) => t.words.size === top.words.size).map(([n]) => n).slice(0, 5).sort((a, b) => a - b);
+	return { page: best, at: top.first, also };
+}
+
+// Every saved course searched for all of query's words (see wordPattern) in
+// an entry's title, its units or its text, as the offline page's search box
+// does. Title matches first, then the ones the words occur in most; the first limit are returned, each with the text
+// around a match, split so odd parts are matches, and for a PDF the page with
+// the most of the words. With partial, after those, entries with some of the
+// words, the most first, each saying which it lacks.
+function search(query, hideBroken, { only, limit = 100, partial = false } = {}) {
+	const words = String(query ?? "").split(/\s+/).filter(word => /[\p{L}\p{N}]/u.test(word)).slice(0, 12);
+	if (!words.length) return { total: 0, hits: [] };
+	const patterns = words.map(word => new RegExp(wordPattern(word), "u"));
 	const found = [];
 	for (const [ou, saved] of copies()) {
+		if (only !== undefined && ou !== only) continue;
 		const course = searchCourse(ou, saved);
 		for (const entry of course.entries) {
 			if (hideBroken && entry.broken) continue;
-			if (patterns.every(p => p.test(entry.label) || p.test(entry.text))) found.push({ course, entry, inTitle: patterns.every(p => p.test(entry.label)) });
+			const has = patterns.map(p => p.test(entry.label) || p.test(entry.text));
+			const count = has.filter(Boolean).length;
+			if (count === words.length || (partial && count)) found.push({ course, entry, has, count, inTitle: patterns.every(p => p.test(entry.label)) });
 		}
 	}
-	found.sort((a, b) => b.inTitle - a.inTitle);
-	const mark = new RegExp(`(${start}(?:${words.map(escape).join("|")}))`, "giu");
-	const hits = found.slice(0, 100).map(({ course, entry }) => {
+	const complete = found.filter(f => f.count === words.length).length;
+	// Then by how often the words occur, capped so one long book does not
+	// bury everything else.
+	const often = entry => patterns.reduce((sum, p) => sum + Math.min(20, entry.text.match(new RegExp(p.source, "gu"))?.length ?? 0), 0);
+	for (const f of found) f.often = often(f.entry);
+	found.sort((a, b) => b.count - a.count || b.inTitle - a.inTitle || b.often - a.often);
+	const mark = new RegExp(`(${patterns.map(p => `(?:${p.source})`).join("|")})`, "gu");
+	const hits = found.slice(0, limit).map(({ course, entry, has }) => {
 		const hit = { ou: course.ou, course: course.name, saved: course.mtime, title: entry.title, where: entry.where, kind: entry.kind, target: entry.target };
-		const at = Math.min(...patterns.map(p => entry.text.search(p)).filter(i => i >= 0));
+		if (has.includes(false)) hit.missing = words.filter((_, i) => !has[i]);
+		let at = Math.min(...patterns.map(p => entry.text.search(p)).filter(i => i >= 0));
+		if (entry.pages && Number.isFinite(at)) {
+			const pages = bestPages(entry, patterns);
+			hit.page = pages.page;
+			if (pages.also.length) hit.also = pages.also;
+			at = pages.at;
+		}
 		if (Number.isFinite(at)) {
-			if (entry.pages) hit.page = entry.pages.filter(offset => offset <= at).length;
 			const from = Math.max(0, at - 70);
 			hit.snippet = entry.text.slice(from, at + 150).split(mark);
 			if (from) hit.snippet[0] = `…${hit.snippet[0]}`;
 		}
 		return hit;
 	});
-	return { total: found.length, hits };
+	return { total: found.length, hits, complete };
+}
+
+// The agents' search, dtu_search_courses: the view's search over the saved
+// courses, its hits written out with the ids the other dtu_ tools take.
+const SEARCH_TOOL = {
+	name: "dtu_search_courses",
+	label: "DTU Learn: search courses",
+	description: "Search the learner's downloaded DTU Learn courses for words: titles, unit text, announcements and the text inside files, a PDF's page by page. Use it to find where something is covered before reading files one by one. Every word must appear; each matches the start of a word or of a part of a joined-up name, so \"reduc\" finds \"reductions\" and \"cycle\" finds \"HamiltonCycle\", and \"3SAT\" and \"3-SAT\" find each other. Course material uses its own terms and abbreviations: when a search comes back thin, try those, or fewer words. When nothing has every word, it returns what has the most of them and says which words each lacks. Returns the best matches, titles first, each with its course, the units above it, its kind, the PDF page with the most matches and other pages with as many words, the ids that dtu_get_file, dtu_unit_info, dtu_get_pdf_pages or dtu_get_announcement_attachment take, and the text around the match. Only downloaded courses are searched; dtu_download_course adds one.",
+	parameters: {
+		type: "object",
+		properties: {
+			query: { type: "string", description: "Words to find, e.g. \"dijkstra shortest path\"" },
+			org_unit_id: { type: "integer", description: "Only this course: its org unit id, or its DTU course number (02231). Left out, every downloaded course." },
+			limit: { type: "integer", description: "How many matches to return, at most 50.", default: 15 },
+		},
+		required: ["query"],
+	},
+};
+
+// A course number (at most five digits, DTU's) to the saved course whose name
+// starts with it; anything else is taken as an org unit id.
+function savedCourse(value) {
+	if (value === undefined || value === null || value === "") return undefined;
+	const number = Number(value);
+	if (!Number.isSafeInteger(number)) throw new Error(`Expected an org unit id or a course number, got ${JSON.stringify(value)}.`);
+	if (number > 99999) return number;
+	const code = String(number).padStart(5, "0");
+	const matches = [...copies().keys()].filter(ou => searchCourse(ou, copies().get(ou)).name?.startsWith(`${code} `));
+	if (matches.length === 1) return matches[0];
+	throw new Error(matches.length ? `Course ${code} is downloaded for several terms: ${matches.join(", ")}. Pass the org unit id.` : `Course ${code} is not downloaded. Run dtu_list_courses and dtu_download_course.`);
+}
+
+function searchText(input) {
+	const only = savedCourse(input?.org_unit_id);
+	const limit = Math.min(50, Math.max(1, Number(input?.limit) || 15));
+	const { total, hits, complete } = search(input?.query, true, { only, limit, partial: true });
+	if (!total) {
+		const saved = [...copies()].map(([ou, file]) => `[${ou}] ${searchCourse(ou, file).name}`);
+		return saved.length
+			? `No matches for "${input?.query}" in ${only ? `course ${only}` : "the downloaded courses"}. Downloaded: ${saved.join("; ")}.`
+			: "No course is downloaded yet, so there is nothing to search. dtu_download_course saves one.";
+	}
+	const ids = (ou, target) => target.topic !== undefined ? `org_unit_id ${ou}, topic_id ${target.topic}`
+		: target.unit !== undefined ? `org_unit_id ${ou}, unit_id ${target.unit} (dtu_unit_info)`
+		: target.attachment !== undefined ? `org_unit_id ${ou}, announcement attachment ${target.attachment.replace("/", ", file ")} (dtu_get_announcement_attachment)`
+		: target.news !== undefined ? `org_unit_id ${ou}, announcement ${target.news} (dtu_list_announcements)`
+		: `org_unit_id ${ou}; a file the course's pages link to, not readable with the tools`;
+	const shown = total > hits.length ? `; the best ${hits.length} shown` : "";
+	const lines = [complete === total ? `${total} match${total === 1 ? "" : "es"}${shown}:`
+		: complete ? `${complete} with every word, then ${total - complete} with some of them, each saying which it lacks${shown}:`
+		: `Nothing has every word of "${input?.query}". These have the most of them, each saying which it lacks; try the course's own words for those${shown}:`];
+	hits.forEach((hit, i) => {
+		const pages = hit.page ? `, page ${hit.page}${hit.also ? `; also pages ${hit.also.join(", ")}` : ""}` : "";
+		lines.push("", `[${i + 1}] ${hit.title} (${hit.kind}${pages})${hit.missing?.length ? ` — lacks: ${hit.missing.join(", ")}` : ""}`,
+			`    ${[hit.course, hit.where].filter(Boolean).join(" › ")}`,
+			`    ${ids(hit.ou, hit.target)}`);
+		if (hit.snippet) lines.push(`    ${hit.snippet.join("")}`);
+	});
+	return lines.join("\n");
 }
 
 exports.activate = ctx => {
@@ -257,7 +374,12 @@ exports.activate = ctx => {
 	ctx.registerInstructions({ agents, text: instructions });
 	ctx.registerTools({
 		agents,
-		create: () => tools.map(tool => ({
+		create: () => [{
+			...SEARCH_TOOL,
+			async execute(_toolCallId, input) {
+				return { content: [{ type: "text", text: searchText(input) }], details: {} };
+			},
+		}, ...tools.map(tool => ({
 			name: `dtu_${tool.name}`,
 			label: `DTU Learn: ${tool.name.replaceAll("_", " ")}`,
 			description: tool.description,
@@ -271,7 +393,7 @@ exports.activate = ctx => {
 				const args = props.map(([key, p]) => input?.[key] ?? p.default ?? "");
 				return { content: JSON.parse(await run(["--json", tool.name, ...args], signal)), details: {} };
 			},
-		})),
+		}))],
 	});
 
 	// The view's calls.

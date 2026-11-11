@@ -15,14 +15,30 @@ const pdfjs = () => pdfjsLoad ??= import(new URL("./assets/pdfjs/pdf.min.js", im
 	throw error;
 });
 
-// The words of a search as one pattern, each found at the start of a word,
-// as the search over the saved courses finds them; undefined for no words.
-// \p{L}\p{N} rather than \b, which only knows ASCII and would miss "økonomi".
-// Longest first, so "network" is marked whole rather than as "net".
+// The words of a search as one pattern, each found as the search over the
+// saved courses finds it (backend.cjs, wordPattern): at the start of a word
+// or of a hump in a joined-up name, any case, a hyphen between digits and
+// letters optional; undefined for no words. Longest first, so "network" is
+// marked whole rather than as "net".
+const OPTIONAL_HYPHEN = "[-\\u2010]?";
+const wordPattern = word => {
+	const chars = [...word.replace(/^-+|-+$/g, "")];
+	const parts = [];
+	chars.forEach((ch, i) => {
+		if (ch === "-") return void parts.push(OPTIONAL_HYPHEN);
+		const prev = chars[i - 1];
+		if (prev && prev !== "-" && /[\p{L}\p{N}]/u.test(prev) && /[\p{L}\p{N}]/u.test(ch) && /\p{N}/u.test(prev) !== /\p{N}/u.test(ch)) parts.push(OPTIONAL_HYPHEN);
+		const lower = ch.toLowerCase();
+		const upper = ch.toUpperCase();
+		parts.push(lower !== upper && [...lower].length === 1 && [...upper].length === 1 ? `[${lower}${upper}]` : ch.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&"));
+	});
+	const [first = "", ...rest] = parts;
+	return `${first}(?<=(?:(?<![\\p{L}\\p{N}])|(?<=\\p{Ll})(?=\\p{Lu}))${first})${rest.join("")}`;
+};
 const wordsPattern = query => {
-	const words = String(query ?? "").split(/\s+/).filter(Boolean).sort((a, b) => b.length - a.length);
+	const words = String(query ?? "").split(/\s+/).filter(word => /[\p{L}\p{N}]/u.test(word)).sort((a, b) => b.length - a.length);
 	if (!words.length) return undefined;
-	return new RegExp(`(?<![\\p{L}\\p{N}])(?:${words.map(word => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "giu");
+	return new RegExp(words.map(word => `(?:${wordPattern(word)})`).join("|"), "gu");
 };
 
 // A course page's tabs, in order; it opens on the first.

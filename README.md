@@ -105,7 +105,13 @@ Paste its contents into:
 `learnharness/` is a LearnHarness plugin. It gives the teacher, practice and
 prober agents every tool below, named `dtu_list_courses`, `dtu_get_file` and
 so on, with instructions on when to use them, so `dtu-learn-prompt.md` is not
-needed there. It also adds a **DTU Learn** view to the sidebar: your courses by
+needed there. They also get `dtu_search_courses`, which only the plugin has:
+the view's search, below, over every downloaded course, returning each match's
+course, units, the PDF page with the most of the words (and others with as
+many) and the ids the other tools take, so a tutor can find where something is
+covered and then read just that page. Course material has its own words for
+things, so after the matches with every word it lists ones with some of them,
+each saying which words it lacks. It also adds a **DTU Learn** view to the sidebar: your courses by
 term and, for each downloaded course, its units and topics. Click a course's
 name to open it beside the tree on its page, which has tabs:
 
@@ -186,7 +192,10 @@ match on the pages, counts them, and Enter or the arrows go to the next one,
 Shift+Enter to the one before. A PDF opened from a search result arrives with
 the search's words in it, so its matches can be stepped through from there.
 Both searches match words by their start, `reduc` finds "reductions", as the
-offline pages' search does. Files a course's pages link to are left out of a
+offline pages' search does, and also at the start of each part of a joined-up
+name, so `cycle` finds "HamiltonCycle"; a hyphen between a number and letters
+is optional either way, so `3SAT` and `3-SAT` find each other. A PDF result
+opens at the page with the most of the words. Files a course's pages link to are left out of a
 copy saved before the record listed them (`linked` in `_course-<id>.json`);
 **Refresh** the course to find them.
 
