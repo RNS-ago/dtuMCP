@@ -105,7 +105,13 @@ Paste its contents into:
 `learnharness/` is a LearnHarness plugin. It gives the teacher, practice and
 prober agents every tool below, named `dtu_list_courses`, `dtu_get_file` and
 so on, with instructions on when to use them, so `dtu-learn-prompt.md` is not
-needed there. They also get `dtu_search_courses`, which only the plugin has:
+needed there. Those instructions also make your course the reference when
+you study from it: its definitions and notation, its pages checked before
+teaching, hand-ins and quizzes left for you to do under the course's own rules
+on generative AI. The prober finds where the course is from its calendar and
+current unit, the teacher plans from the course's material and points to its
+exercises, and the practice agent draws on its exercise sheets and old exams
+but never poses an open graded question. They also get `dtu_search_courses`, which only the plugin has:
 the view's search, below, over every downloaded course, returning each match's
 course, units, the PDF page with the most of the words (and others with as
 many) and the ids the other tools take, so a tutor can find where something is
