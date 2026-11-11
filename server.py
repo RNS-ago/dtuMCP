@@ -753,11 +753,48 @@ def _relink(html: str, page: Path, linked: dict) -> str:
     return REFERENCE.sub(swap, html)
 
 
-def _index_html(name: str, ou: int, modules, news, saved: dict) -> str:
-    """The page that stands in for the course site offline: the announcements,
-    then every unit's own text and topics. saved maps a topic id, or a
-    (news id, file id) pair for an attachment, to its path relative to the page.
-    Anything not saved links back to DTU Learn, which needs a connection."""
+# Spreadsheets are left out: their cells are mostly numbers from data tables,
+# which in one course came to 235 MB of search text against 8 MB for
+# everything else. They are still found by title.
+OOXML_KINDS = {".docx": "wordprocessingml", ".pptx": "presentationml"}
+
+
+def _search_pages(path: Path) -> list[str]:
+    """A saved file's text for the search box: one string per page of a PDF,
+    one for anything else. Empty when no text can be got out of it."""
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        pages = (_pdf_text(path) or "").split("\f")  # pdftotext ends each page with \f
+    elif suffix in OOXML_KINDS:
+        pages = [_ooxml_text(path, OOXML_KINDS[suffix]) or ""]
+    elif suffix in (".html", ".htm"):
+        pages = [_html_text(path.read_bytes().decode("utf-8", "replace"))]
+    else:
+        return []
+    pages = [" ".join(p.split()) for p in pages]
+    return pages if any(pages) else []
+
+
+def _search_entry(title: str, href: str, tag: str, pages=()) -> dict:
+    """One search result: its text joined into one string, and for a PDF the
+    offset each page starts at, so a match can link to its page."""
+    starts, text = [], ""
+    for page in pages:
+        starts.append(len(text))
+        text += page + " "
+    entry = {"t": title, "h": href, "k": tag, "x": text.rstrip()}
+    if len(starts) > 1:
+        entry["p"] = starts
+    return entry
+
+
+def _index_html(name: str, ou: int, modules, news, saved: dict, texts: dict) -> tuple:
+    """The page that stands in for the course site offline, and the entries its
+    search box looks through. saved maps a topic id, or a (news id, file id)
+    pair for an attachment, to its path relative to the page; texts maps the
+    same keys to the file's pages of text. Anything not saved links back to
+    DTU Learn, which needs a connection."""
+    docs = []
     # Teacher HTML points at /content/... on D2L, which would mean
     # file:///content/... here. Make it absolute; _relink then swaps in
     # the local copies of whatever it could fetch.
@@ -766,7 +803,8 @@ def _index_html(name: str, ou: int, modules, news, saved: dict) -> str:
         html = field.get("Html") or f"<p>{escape(field.get('Text') or '')}</p>"
         return re.sub(r'\b(src|href)="/(?!/)', rf'\1="{BASE}/', html)
 
-    def item(href, label, tag, online=False):
+    def item(href, label, tag, online=False, key=None):
+        docs.append(_search_entry(label, href, tag, texts.get(key, ())))
         cls = ' class="tag online"' if online else ' class="tag"'
         return (f'<li><a href="{escape(href)}">{escape(label)}</a>'
                 f"<span{cls}>{escape(tag)}</span></li>")
@@ -775,7 +813,8 @@ def _index_html(name: str, ou: int, modules, news, saved: dict) -> str:
         tid, url, kind = t["TopicId"], t.get("Url") or "", t.get("TypeIdentifier", "?")
         title = t.get("Title", "?")
         if tid in saved:
-            return item(saved[tid], title, Path(unquote(saved[tid])).suffix[1:].upper() or "file")
+            tag = Path(unquote(saved[tid])).suffix[1:].upper() or "file"
+            return item(saved[tid], title, tag, key=tid)
         if kind == "ContentService":
             kind = _urn_kind(url)
         if t.get("IsBroken"):
@@ -798,6 +837,8 @@ def _index_html(name: str, ou: int, modules, news, saved: dict) -> str:
     def units(modules, depth=2):
         for m in modules or []:
             h = min(depth, 6)
+            docs.append(_search_entry(m.get("Title", "?"), f'#u{m["ModuleId"]}', "unit",
+                                      [" ".join(_description(m).split())]))
             yield f'<section id="u{m["ModuleId"]}"><h{h}>{escape(m.get("Title", "?"))}</h{h}>'
             if _description(m):
                 yield f'<div class="text">{rich(m.get("Description"))}</div>'
@@ -808,20 +849,23 @@ def _index_html(name: str, ou: int, modules, news, saved: dict) -> str:
 
     def announcements():
         for n in news:
+            body = n.get("Body") or {}
+            text = (body.get("Text") or "").strip() or _html_text(body.get("Html") or "")
+            docs.append(_search_entry(n.get("Title", "?"), f'#n{n["Id"]}', "announcement", [" ".join(text.split())]))
             yield (f'<article id="n{n["Id"]}"><h2>{escape(n.get("Title", "?"))}</h2>'
                    f'<time>{(n.get("StartDate") or "")[:10]}</time>'
                    f'<div class="text">{rich(n.get("Body"))}</div>')
             files = n.get("Attachments") or []
             if files:
                 yield '<ul class="topics">' + "".join(
-                    item(saved[(n["Id"], a["FileId"])], a["FileName"], "attachment")
+                    item(saved[(n["Id"], a["FileId"])], a["FileName"], "attachment", key=(n["Id"], a["FileId"]))
                     if (n["Id"], a["FileId"]) in saved
                     else f'<li>{escape(a["FileName"])}<span class="tag online">download failed</span></li>'
                     for a in files
                 ) + "</ul>"
             yield "</article>"
 
-    return "\n".join([
+    html = "\n".join([
         '<!doctype html><html lang="en"><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         f"<title>{escape(name)}</title><style>{INDEX_CSS}</style>",
@@ -830,13 +874,17 @@ def _index_html(name: str, ou: int, modules, news, saved: dict) -> str:
         '<div class="tabs" role="tablist">',
         '<input type="radio" name="tab" id="t-content" checked><label for="t-content">Content</label>',
         f'<input type="radio" name="tab" id="t-news"><label for="t-news">Announcements ({len(news)})</label>',
+        '<input type="search" id="q" placeholder="Search this course, inside files too" aria-label="Search this course">',
         "</div></header>",
         f'<div id="p-content" class="panel"><nav aria-label="Units"><ul>{"".join(tree(modules))}</ul></nav>',
         '<main>', *units(modules), "</main></div>",
         '<div id="p-news" class="panel"><main>',
         *(announcements() if news else ["<p>No announcements.</p>"]),
         "</main></div>",
+        '<main id="results" aria-live="polite"></main>',
+        f'<script src="_search.js"></script><script>{INDEX_JS}</script>',
     ])
+    return html, docs
 
 
 # The tabs are radio buttons, so they work with no script and from the keyboard.
@@ -849,8 +897,15 @@ body{margin:0;background:Canvas;color:CanvasText;font:16px/1.5 system-ui,sans-se
 header{padding:1rem 1rem 0;border-bottom:1px solid var(--line)}
 h1{margin:0;font-size:1.5rem}
 header p{margin:.2rem 0 .6rem;color:var(--muted);font-size:.9rem}
-.tabs{display:flex;gap:.25rem}
-.tabs input{position:absolute;opacity:0}
+.tabs{display:flex;flex-wrap:wrap;align-items:center;gap:.25rem}
+#q{flex:0 1 22rem;margin:0 0 .4rem auto;padding:.4rem .6rem;font:inherit;color:inherit;
+background:Canvas;border:1px solid var(--line);border-radius:.4rem}
+#results{display:none}
+body.searching #results{display:block}
+body.searching .panel{display:none!important}
+.hits li{flex-wrap:wrap}
+.hits p{flex-basis:100%;margin:.15rem 0 0;color:var(--muted);font-size:.9rem}
+.tabs input[type=radio]{position:absolute;opacity:0}
 .tabs label{padding:.5rem .9rem;cursor:pointer;color:var(--muted);border-bottom:3px solid transparent}
 .tabs input:checked+label{color:CanvasText;font-weight:600;border-color:LinkText}
 .tabs input:focus-visible+label{outline:2px solid LinkText;outline-offset:-2px}
@@ -882,7 +937,72 @@ article h2{font-size:1.15rem;margin:0}
 time{color:var(--muted);font-size:.9rem}
 @media (max-width:45rem){
 body:has(#t-content:checked) #p-content{grid-template-columns:1fr}
-nav{position:static;max-height:none;border-right:0;border-bottom:1px solid var(--line)}}
+nav{position:static;max-height:none;border-right:0;border-bottom:1px solid var(--line)}
+#q{flex-basis:100%;margin-left:0}}
+"""
+
+# Every search word has to start a word in a result's title or text, so "rsa"
+# finds "RSA" but not "adversary". Title matches come first, the rest stay in
+# course order. A PDF match links to its page.
+# ponytail: a linear regex scan, a few ms over a course's ~10 MB of text.
+# An inverted index only if a course ever makes typing lag.
+INDEX_JS = r"""
+const docs = (window.SEARCH || []).map(d => ({...d, lt: d.t.toLowerCase(), lx: d.x.toLowerCase()}));
+const q = document.getElementById("q"), out = document.getElementById("results");
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+};
+function run() {
+  const words = q.value.toLowerCase().split(/\s+/).filter(Boolean);
+  document.body.classList.toggle("searching", words.length > 0);
+  out.replaceChildren();
+  if (!words.length) return;
+  // \p{L}\p{N} rather than \b, which only knows ASCII and would miss "økonomi".
+  const start = "(?<![\\p{L}\\p{N}])";
+  const esc = w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const res = words.map(w => new RegExp(start + esc(w), "u"));
+  const inTitle = d => res.every(r => r.test(d.lt));
+  const hits = docs.filter(d => res.every(r => r.test(d.lt) || r.test(d.lx)))
+    .sort((a, b) => inTitle(b) - inTitle(a));
+  out.append(el("p", "", hits.length ? `${hits.length} results` : "No results."));
+  const mark = new RegExp("(" + start + "(?:" + words.map(esc).join("|") + "))", "giu");
+  const list = el("ul", "topics hits");
+  for (const d of hits.slice(0, 200)) {
+    const at = Math.min(...res.map(r => d.lx.search(r)).filter(i => i >= 0));
+    let href = d.h, tag = d.k;
+    if (d.p && isFinite(at)) {
+      const page = d.p.filter(start => start <= at).length;
+      href += "#page=" + page;
+      tag += " · p. " + page;
+    }
+    const li = el("li"), a = el("a", "", d.t);
+    a.href = href;
+    li.append(a, el("span", "tag", tag));
+    if (isFinite(at)) {
+      const from = Math.max(0, at - 70);
+      const snippet = el("p");
+      d.x.slice(from, at + 150).split(mark).forEach((part, i) =>
+        snippet.append(i % 2 ? el("mark", "", part) : part));
+      if (from) snippet.prepend("…");
+      li.append(snippet);
+    }
+    list.append(li);
+  }
+  out.append(list);
+}
+q.addEventListener("input", run);
+// A unit or an announcement lives in a tab: open that tab before jumping to it.
+out.addEventListener("click", e => {
+  const href = e.target.closest("a")?.getAttribute("href") || "";
+  if (!href.startsWith("#")) return;
+  document.getElementById(href[1] === "n" ? "t-news" : "t-content").checked = true;
+  q.value = "";
+  run();
+});
+run();  // the browser may restore the box's text on reload
 """
 
 
@@ -916,10 +1036,12 @@ def download_course(org_unit_id: int) -> str:
             key: quote(p.relative_to(root).as_posix())
             for key, (p, _) in zip(keys, results) if p
         }
+        texts = dict(zip(keys, pool.map(lambda r: _search_pages(r[0]) if r[0] else [], results)))
+        html, docs = _index_html(name, ou, modules, news, index, texts)
         # The index and every saved HTML page can show pictures and link to
         # files in D2L's file area. Fetch each of those once, then point the
         # pages at the copies.
-        pages = {root / "index.html": _index_html(name, ou, modules, news, index)}
+        pages = {root / "index.html": html}
         for p, _ in results:
             if p and p.suffix.lower() in (".html", ".htm"):
                 try:
@@ -931,9 +1053,21 @@ def download_course(org_unit_id: int) -> str:
             if (url := _d2l_file(m.group(2)))
         }
         linked = dict(pool.map(lambda url: _save_linked(c, root, url), refs))
-    linked = {url: dest for url, dest in linked.items() if dest}
+        linked = {url: dest for url, dest in linked.items() if dest}
+        # Linked files have no topic, so they are searchable by their file name.
+        docs += [
+            _search_entry(dest.name, quote(dest.relative_to(root).as_posix()),
+                          dest.suffix[1:].upper() or "file", found)
+            for dest, found in zip(linked.values(), pool.map(_search_pages, linked.values()))
+            if found
+        ]
     for page, html in pages.items():
         page.write_text(_relink(html, page, linked), encoding="utf-8")
+    # A script file rather than JSON: a page opened from disk may load a
+    # <script src> but not fetch() a file beside it.
+    (root / "_search.js").write_text(
+        f"window.SEARCH = {json.dumps(docs, ensure_ascii=False)};\n", encoding="utf-8"
+    )
 
     saved = [p for p, err in results if p]
     failed = [err for p, err in results if err]

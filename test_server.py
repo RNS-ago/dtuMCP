@@ -19,9 +19,10 @@ tree = ast.parse(open("server.py").read())
 wanted = {"_flatten", "_profiles", "_term", "_pdf_text", "_TextExtractor",
           "_html_text", "_urn_kind", "_ooxml_text", "_description",
           "_calendar_lines", "_local", "_safe", "_file_topics", "_index_html",
-          "_d2l_file", "_linked_dest", "_relink"}
+          "_d2l_file", "_linked_dest", "_relink",
+          "_search_pages", "_search_entry"}
 constants_extra = {"OOXML_MEMBERS"}
-constants = {"BASE", "REFERENCE", "INDEX_CSS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
+constants = {"BASE", "REFERENCE", "INDEX_CSS", "INDEX_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
 
 
 def needed(node):
@@ -301,7 +302,9 @@ page = mod._index_html(
       "Body": {"Text": "a < b", "Html": ""},
       "Attachments": [{"FileId": 9, "FileName": "a.pdf"}, {"FileId": 8, "FileName": "b.pdf"}]}],
     {11: "Week%201/Slides.pdf", (5, 9): "Announcements/5-a.pdf"},
+    {11: ["Intro to RSA", "Proof of RSA"], (5, 9): ["Homework one"]},
 )
+page, docs = page
 for want in [
     "<title>Course &lt;1&gt;</title>",
     "<p>Room <b>101</b></p>",                       # unit HTML kept as is
@@ -319,7 +322,35 @@ for want in [
     'b.pdf<span class="tag online">download failed</span>',
 ]:
     assert want in page, (want, page)
-assert "No announcements." in mod._index_html("C", 7, [], [], {})
+assert "No announcements." in mod._index_html("C", 7, [], [], {}, {})[0]
+assert '<script src="_search.js"></script>' in page
+
+# Search entries, in course order: units, their topics, then announcements.
+# A PDF's pages are joined with the offset each starts at.
+assert docs == [
+    {"t": "Week 1", "h": "#u1", "k": "unit", "x": "Room 101"},
+    {"t": "Slides", "h": "Week%201/Slides.pdf", "k": "PDF",
+     "x": "Intro to RSA Proof of RSA", "p": [0, 13]},
+    {"t": "Site", "h": "https://x.dk", "k": "Link · online", "x": ""},
+    {"t": "Old", "h": mod.BASE + "/d2l/le/lessons/7/topics/13", "k": "File, broken · online", "x": ""},
+    {"t": "Sub", "h": "#u2", "k": "unit", "x": ""},
+    {"t": "Hi", "h": "#n5", "k": "announcement", "x": "a < b"},
+    {"t": "a.pdf", "h": "Announcements/5-a.pdf", "k": "attachment", "x": "Homework one"},
+], docs
+
+# --- _search_pages ----------------------------------------------------------
+with tempfile.TemporaryDirectory() as tmp:
+    pptx = Path(tmp) / "s.pptx"
+    with zipfile.ZipFile(pptx, "w") as z:
+        z.writestr("ppt/slides/slide1.xml", "<p:sld><a:p><a:t>Block   ciphers</a:t></a:p><a:p><a:t>AES</a:t></a:p></p:sld>")
+    assert mod._search_pages(pptx) == ["Block ciphers AES"], mod._search_pages(pptx)
+    html = Path(tmp) / "p.html"
+    html.write_text("<h1>Deadlines</h1><p>Task 1:\n 3 Oct</p>")
+    assert mod._search_pages(html) == ["Deadlines Task 1: 3 Oct"], mod._search_pages(html)
+    empty = Path(tmp) / "e.html"
+    empty.write_text("<p> </p>")
+    assert mod._search_pages(empty) == []
+    assert mod._search_pages(Path(tmp) / "movie.mp4") == []
 
 # --- _d2l_file, _linked_dest, _relink ---------------------------------------
 B = mod.BASE

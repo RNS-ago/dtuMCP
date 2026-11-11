@@ -135,8 +135,18 @@ out like the course site, with two tabs. Content has a folding tree of the
 units on the left and, on the right, every unit with its own text and its
 topics, each linked to the saved file and tagged with its type. Announcements
 has every announcement with its attachments. Open that page in a browser to
-read the course without a connection. It needs no script and follows the
-system's dark mode.
+read the course without a connection. It follows the system's dark mode.
+
+The search box above the tabs looks through titles, unit text, announcements
+and the text inside the saved PDFs, slides, Word documents and HTML pages. Every
+word you type has to start a word in the result, so `rsa` finds RSA but not
+adversary. Results show the match in context, and a PDF result opens on the page
+it was found on. The text is extracted while the course downloads and kept in
+`_search.js` beside `index.html`; that is about 8 MB for a course with a hundred
+PDFs. Spreadsheets are found by title only, because their cells are mostly
+numbers and in one course came to 235 MB. Reading PDFs needs `pdftotext`, as
+for `get_file`; without it PDFs are found by title only. Tabs and the tree work
+without JavaScript; the search box needs it.
 
 Links and videos hold no file, so the index links to them online. Neither do
 broken topics: a course copied from an earlier offering keeps entries whose
