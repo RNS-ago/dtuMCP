@@ -29,14 +29,16 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
+from functools import lru_cache, partial
+from itertools import count
 from html import escape, unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
+import anyio
 import httpx
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 BASE = os.environ.get("DTU_BASE", "https://learn.inside.dtu.dk")
@@ -1120,7 +1122,7 @@ function take(folder, name) {
 
 
 @mcp.tool()
-def download_course(org_unit_id: int) -> str:
+def download_course(org_unit_id: int, ctx: Context | None = None) -> str:
     """Save a course for offline use: its files, unit text and announcements.
 
     Files land in ~/Downloads/dtulearn/<course>/<unit>/, on the machine running
@@ -1129,27 +1131,149 @@ def download_course(org_unit_id: int) -> str:
     and videos are not files; the index points at them online.
     Nothing comes back as text -- for that, ask for the one topic with get_file.
     """
-    ou = _resolve(org_unit_id)
+    row = _download(_resolve(org_unit_id), report=_reporter(ctx))
+    _status(keep=True)  # a blank line between the ✓ line and the table
+    return _summary([row])
+
+
+@mcp.tool()
+def download_term(term: str = "", ctx: Context | None = None) -> str:
+    """Download every course of one term for offline use, as download_course does.
+
+    term is written like the headings of list_courses: "Fall 2026", "Jan 25".
+    Left out, it is the newest term you are enrolled in. A course that fails
+    is reported and the rest still download.
+    """
+    want = None
+    if term:
+        want = _term({"Name": term})
+        if want == (0, -1):
+            raise RuntimeError(
+                f"No term in {term!r}. Write it like the headings of list_courses, "
+                "for example 'Fall 2026', 'Spring 2025' or 'Jan 25'."
+            )
+    units = _term_units(want)
+    if not units:
+        raise RuntimeError(f"You have no courses in {term or 'any term'}. Run list_courses to see your terms.")
+    rows, report = [], _reporter(ctx)
+    for i, ou in enumerate(units, 1):
+        prefix = f"[{i}/{len(units)}] "
+        try:
+            rows.append(_download(ou["Id"], prefix, report))
+        except (RuntimeError, httpx.HTTPError) as e:
+            rows.append((_code(ou["Name"]), None, [("could not download", [str(e)])]))
+            _status(("31", "  ✗ "), ("2", prefix), ("", ou["Name"]), keep=True)
+    _status(keep=True)  # a blank line between the ✓ lines and the table
+    return _summary(rows)
+
+
+COLUMNS = ("files", "pictures", "announcements", "links", "videos", "broken")
+
+
+def _code(name: str) -> str:
+    """The course number a course name starts with, to label its summary row."""
+    found = re.match(r"\d{5}\b", name)
+    return found.group() if found else name[:20]
+
+
+def _summary(rows: list) -> str:
+    """What the download tools end with: a row of counts per course, then
+    what went wrong, then where to browse. rows are _download's results;
+    a course that failed outright has None for counts."""
+    width = max(len(code) for code, _, _ in rows)
+    table = [" " * width + "".join(f"  {c}" for c in COLUMNS)]
+    table += [
+        code.ljust(width) + "".join(f"  {counts[c]:>{len(c)}}" for c in COLUMNS)
+        for code, counts, _ in rows if counts
+    ]
+    out = [f"  {line}" for line in table] if len(table) > 1 else []
+    problems = [
+        line
+        for code, _, found in rows for head, details in found
+        for line in [f"  ✗ {code}: {head}", *(f"      {d}" for d in details)]
+    ]
+    if problems:
+        out += ["", *problems]
+    out += ["", f"  Open {DOWNLOADS / 'index.html'} to see every course."]
+    return "\n".join(out).lstrip("\n")
+
+
+def _status(*parts: tuple[str, str], keep: bool = False) -> None:
+    """Rewrite the live status line on stderr, or leave it behind with keep.
+    parts are (SGR colour code, text) pairs, cut to the terminal's width.
+    Only on a terminal: under an MCP client stderr goes to a log, where a line
+    per file would only fill it."""
+    if not sys.stderr.isatty():
+        return
+    room, line = shutil.get_terminal_size().columns - 1, ""
+    for colour, text in parts:
+        text = text[:room]
+        room -= len(text)
+        line += f"\033[{colour}m{text}\033[0m" if colour and not os.environ.get("NO_COLOR") else text
+    print("\r\033[K" + line, end="\n" if keep else "", file=sys.stderr, flush=True)
+
+
+def _reporter(ctx: Context | None):
+    """Send each status line to an MCP client as a progress notification too.
+    A no-op from the CLI, and in the SDK when the client asked for none."""
+    if ctx is None:
+        return lambda text: None
+    # The spec wants progress to rise with every notification. The counts
+    # restart each step, so they ride in the message and this only ticks.
+    ticks = count(1)
+    # Tools run in an anyio worker thread; the notification goes out on the
+    # event loop.
+    return lambda text: anyio.from_thread.run(partial(ctx.report_progress, next(ticks), None, text))
+
+
+def _each(pool, fn, items, phase: str, say) -> list:
+    """pool.map that reports "phase 12/245" through say as results come in."""
+    items, out = list(items), []
+    say(phase, 0, len(items))
+    for result in pool.map(fn, items):
+        out.append(result)
+        say(phase, len(out), len(items))
+    return out
+
+
+def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
+    """download_course's work, for one org unit id. prefix leads the status
+    line, so a term download can say which course of how many it is on.
+    report gets the same line as plain text, for _reporter. Returns a row
+    for _summary: the course number, its counts and its problems."""
+    name = _course_name(ou)
+
+    def say(what, done=0, total=0):
+        bar, tally = [], f" {done}/{total}" if total else ""
+        if total:
+            filled = 12 * done // total
+            bar = [("36", "█" * filled), ("2", "░" * (12 - filled) + " ")]
+        # Counts first: a long course name is what gets cut.
+        _status(("2", "    " + prefix), *bar, ("1", what + tally), ("2", " · "), ("", name))
+        report(f"{prefix}{what}{tally} · {name}")
+
+    say("reading the course")
     modules = _get(f"/d2l/api/le/{LE}/{ou}/content/toc").get("Modules")
     news = _get(f"/d2l/api/le/{LE}/{ou}/news/")
     jobs = list(_file_topics(modules))
     atts = [(n["Id"], a) for n in news for a in n.get("Attachments") or []]
 
-    name = _course_name(ou)
     root = DOWNLOADS / _safe(name)
     root.mkdir(parents=True, exist_ok=True)
     # ponytail: eight at a time; a course is a few hundred files at most, so
     # nothing here needs a rate limiter or a resumable queue.
     with _client() as c, ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(lambda job: _save_topic(c, ou, root, *job), jobs))
-        results += pool.map(lambda job: _save_attachment(c, ou, root, *job), atts)
+        tasks = [partial(_save_topic, c, ou, root, *job) for job in jobs]
+        tasks += [partial(_save_attachment, c, ou, root, *job) for job in atts]
+        results = _each(pool, lambda task: task(), tasks, "files", say)
 
         keys = [t["TopicId"] for _, t in jobs] + [(nid, a["FileId"]) for nid, a in atts]
         index = {
             key: quote(p.relative_to(root).as_posix())
             for key, (p, _) in zip(keys, results) if p
         }
-        texts = dict(zip(keys, pool.map(lambda r: _search_pages(r[0]) if r[0] else [], results)))
+        found = _each(pool, lambda r: _search_pages(r[0]) if r[0] else [], results, "search text", say)
+        texts = dict(zip(keys, found))
         html, docs = _index_html(name, ou, modules, news, index, texts)
         # The index and every saved HTML page can show pictures and link to
         # files in D2L's file area. Fetch each of those once, then point the
@@ -1165,15 +1289,18 @@ def download_course(org_unit_id: int) -> str:
             url for html in pages.values() for m in REFERENCE.finditer(html)
             if (url := _d2l_file(m.group(2)))
         }
-        linked = dict(pool.map(lambda url: _save_linked(c, root, url), refs))
+        linked = dict(_each(pool, lambda url: _save_linked(c, root, url), refs,
+                            "pictures and linked files", say))
         linked = {url: dest for url, dest in linked.items() if dest}
         # Linked files have no topic, so they are searchable by their file name.
         docs += [
             _search_entry(dest.name, quote(dest.relative_to(root).as_posix()),
                           dest.suffix[1:].upper() or "file", found)
-            for dest, found in zip(linked.values(), pool.map(_search_pages, linked.values()))
+            for dest, found in zip(linked.values(), _each(
+                pool, _search_pages, linked.values(), "search text of linked files", say))
             if found
         ]
+    say("writing the pages")
     for page, html in pages.items():
         page.write_text(_relink(html, page, linked), encoding="utf-8")
     # A script file rather than JSON: a page opened from disk may load a
@@ -1182,31 +1309,32 @@ def download_course(org_unit_id: int) -> str:
         f"window.SEARCH = {json.dumps(docs, ensure_ascii=False)};\n", encoding="utf-8"
     )
     _write_landing()
+    # The course's bar collapses into one line that stays.
+    _status(("32", "  ✓ "), ("2", prefix), ("", name), keep=True)
 
-    saved = [p for p, err in results if p]
+    def topics(modules):
+        for m in modules or []:
+            yield from m.get("Topics") or []
+            yield from topics(m.get("Modules"))
+
+    kinds = Counter("broken" if t.get("IsBroken") else t.get("TypeIdentifier") for t in topics(modules))
+    counts = {
+        "files": sum(1 for p, _ in results if p),
+        "pictures": len(linked),
+        "announcements": len(news),
+        # Videos are ContentService topics; any other kind is a link of some sort.
+        "videos": kinds["ContentService"],
+        "broken": kinds["broken"],
+        "links": sum(n for kind, n in kinds.items() if kind not in ("File", "ContentService", "broken")),
+    }
+    problems = []
     failed = [err for p, err in results if err]
-    kinds = Counter(
-        "broken" if t.get("IsBroken") else t.get("TypeIdentifier")
-        for t in _toc_index(ou)[0].values()
-    )
-    skipped = ", ".join(
-        f"{n} {kind}" for kind, n in sorted(kinds.items()) if kind != "File"
-    )
-    out = [
-        f"Saved {len(saved)} files under {root}, plus {len(linked)} pictures and "
-        f"files the pages link to. Open {root / 'index.html'} to browse."
-    ]
-    if len(refs) > len(linked):
-        out.append(
-            f"{len(refs) - len(linked)} pictures or linked files could not be "
-            "fetched; the pages keep their online links for those."
-        )
-    if skipped:
-        out.append(f"Nothing to download for: {skipped}.")
     if failed:
-        out.append(f"{len(failed)} failed:")
-        out += [f"  - {f}" for f in failed]
-    return "\n".join(out)
+        problems.append((f"{len(failed)} files failed", failed))
+    if len(refs) > len(linked):
+        problems.append((f"{len(refs) - len(linked)} pictures or linked files could not be "
+                         "fetched; the pages link to them online", []))
+    return _code(name), counts, problems
 
 
 @mcp.tool()
@@ -1271,15 +1399,17 @@ def get_announcement_attachment(org_unit_id: int, news_id: int, file_id: int) ->
     return _file_text(r, name, name)
 
 
-def _current_term_ids() -> list[int]:
-    """Org unit ids of the courses in the newest term I am enrolled in. A
-    calendar of every course I ever took is not what "my calendar" means."""
+def _term_units(want: tuple | None = None) -> list:
+    """The org units of the courses I am enrolled in for one (year, season)
+    term, by default the newest. A calendar of every course I ever took is not
+    what "my calendar" means, nor a download of them what "this term" does."""
     units = [
         it["OrgUnit"]
         for it in _paged(f"/d2l/api/lp/{LP}/enrollments/myenrollments/", orgUnitTypeId=3)
     ]
-    newest = max((_term(ou) for ou in units), default=(0, -1))
-    return [ou["Id"] for ou in units if _term(ou) == newest]
+    if want is None:
+        want = max((_term(ou) for ou in units), default=(0, -1))
+    return [ou for ou in units if _term(ou) == want]
 
 
 def _my_events(ids: list[int], start: datetime, end: datetime) -> list:
@@ -1341,7 +1471,7 @@ def calendar(days: int = 7, org_unit_id: int = 0) -> str:
 
     Covers every course of the current term, or one course when org_unit_id is
     given (an org unit id or a DTU course number)."""
-    ids = [_resolve(org_unit_id)] if org_unit_id else _current_term_ids()
+    ids = [_resolve(org_unit_id)] if org_unit_id else [ou["Id"] for ou in _term_units()]
     if not ids:
         return "No course enrollments found."
     start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1367,6 +1497,7 @@ COMMANDS = {
         list_announcements,
         calendar,
         download_course,
+        download_term,
     )
 }
 
@@ -1375,7 +1506,7 @@ def _usage() -> str:
     """Build the help text from the same docstrings the MCP tools advertise."""
     lines = ["Usage: uv run --script server.py [command] [arguments]", "", "Commands:"]
     for name, fn in COMMANDS.items():
-        params = " ".join(f"<{p}>" for p in inspect.signature(fn).parameters)
+        params = " ".join(f"<{p}>" for p in inspect.signature(fn).parameters if p != "ctx")
         lines.append(f"  {name} {params}".rstrip())
         lines.append(f"      {inspect.getdoc(fn).splitlines()[0]}")
     lines += [
@@ -1399,6 +1530,7 @@ def _usage() -> str:
         "  uv run --script server.py login",
         "  uv run --script server.py list_courses",
         "  uv run --script server.py course_contents 326350",
+        '  uv run --script server.py download_term "Fall 2026"',
     ]
     return "\n".join(lines)
 
@@ -1425,6 +1557,7 @@ if __name__ == "__main__":
         except RuntimeError as e:
             # Expired sessions, unknown course ids and the like are ordinary
             # outcomes here; a traceback only buries the message.
+            _status()  # or the message lands on the end of a download's status line
             raise SystemExit(str(e))
         if result is not None:
             print(result)

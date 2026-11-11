@@ -113,6 +113,7 @@ Paste its contents into:
 | `get_announcement_attachment(org_unit_id, news_id, file_id)` | A file attached to an announcement, read like `get_file` |
 | `calendar(days=7, org_unit_id=0)` | What is scheduled in the next `days` days |
 | `download_course(org_unit_id)` | The whole course saved for offline use, with an `index.html` to browse it |
+| `download_term(term="")` | Every course of a term saved the same way; the newest term if none is given |
 
 Anywhere an `org_unit_id` is asked for, the DTU course number works too:
 `course_contents 02231` is the same as `course_contents 326352`. A course
@@ -176,8 +177,36 @@ pointed at the copies. Quicklinks from one page to another topic, quiz or tool
 stay online: D2L names their target with an opaque code, so there is no local
 file to point them at. Pictures and links on other websites stay online too.
 
-The tool returns a count, not text — use `get_file` for the content of one
-topic.
+`download_term` does the same for every course of a term, written like the
+headings of `list_courses` (`"Fall 2026"`, `"Jan 25"`), or the newest term
+when left out. A course that fails is reported and the others still download.
+
+Both end with counts, not text — use `get_file` for the content of one topic.
+One row per course, then anything that went wrong, then the landing page:
+
+```
+         files  pictures  announcements  links  videos  broken
+  02249     45         0             11      9       0      75
+  02231     54         1             12      0       2       0
+
+  Open ~/Downloads/dtulearn/index.html to see every course.
+```
+
+`pictures` counts pictures and files the pages link to. `links`, `videos` and
+`broken` topics have nothing to download; the index points at the first two
+online.
+
+Run from a terminal, both show a live status line in colour: which course of
+how many, a small bar for the step it is on (files, search text, pictures and
+linked files, writing the pages) and how far along, for example
+`[2/4] ███████░░░░░ files 34/54 · 02231 Cryptography fundamentals`. When a
+course finishes, its bar collapses into one line that stays: a green `✓` or,
+if it failed, a red `✗`. Set `NO_COLOR` for plain text. Nothing is printed
+when the output is not a terminal.
+
+MCP clients get the same line as progress notifications, one per update,
+if they ask for progress when they call the tool. The counts are in the
+message; the progress number only rises.
 
 `calendar` reads the Brightspace calendar in local time: lectures and
 exercise sessions with their rooms, hand-in deadlines, and the dates material
@@ -233,6 +262,7 @@ uv run --script server.py --help
 uv run --script server.py list_courses
 uv run --script server.py course_contents 02231
 uv run --script server.py get_file 12345 67890
+uv run --script server.py download_term "Fall 2026"
 ```
 
 Paste the output into claude.ai or any other chat. This is also the quickest way

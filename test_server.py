@@ -2,6 +2,7 @@
 import ast
 import configparser
 import datetime as datetime_module
+import io
 import json
 import os
 from urllib.parse import quote, unquote, urlparse
@@ -21,9 +22,10 @@ wanted = {"_flatten", "_profiles", "_term", "_pdf_text", "_TextExtractor",
           "_html_text", "_urn_kind", "_ooxml_text", "_description",
           "_calendar_lines", "_local", "_safe", "_file_topics", "_index_html",
           "_d2l_file", "_linked_dest", "_relink",
-          "_search_pages", "_search_entry", "_landing_html"}
+          "_search_pages", "_search_entry", "_landing_html",
+          "_each", "_status", "_summary", "_code"}
 constants_extra = {"OOXML_MEMBERS"}
-constants = {"BASE", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
+constants = {"COLUMNS", "BASE", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
 
 
 def needed(node):
@@ -392,5 +394,60 @@ assert '<script src="02231%20Crypto/_search.js"></script><script>take("02231%20C
 assert 'take("Odd", "Odd <course> <\\/script>")' in land   # a name cannot close the script
 assert land.index("function take") < land.index("_search.js") < land.index("window.SEARCH = all;")
 assert "No courses downloaded yet." in mod._landing_html([])
+
+# --- _each ------------------------------------------------------------------
+# Results come back in order, and the count is reported from 0 up to the total.
+said = []
+assert mod._each(types.SimpleNamespace(map=map), lambda x: x * 2, [3, 1, 2], "files",
+                 lambda *a: said.append(a)) == [6, 2, 4]
+assert said == [("files", 0, 3), ("files", 1, 3), ("files", 2, 3), ("files", 3, 3)], said
+said.clear()
+assert mod._each(types.SimpleNamespace(map=map), str, [], "search text", lambda *a: said.append(a)) == []
+assert said == [("search text", 0, 0)], said
+
+# --- _status ----------------------------------------------------------------
+# Parts are cut to the terminal's width by their text, not their colour codes,
+# and nothing is written when stderr is not a terminal.
+class Tty(io.StringIO):
+    def isatty(self):
+        return True
+
+mod.shutil = types.SimpleNamespace(get_terminal_size=lambda: os.terminal_size((11, 24)))
+os.environ.pop("NO_COLOR", None)
+mod.sys = types.SimpleNamespace(stderr=Tty())
+mod._status(("32", "✓ "), ("", "02231 Cryptography"), ("2", " · more"), keep=True)
+assert mod.sys.stderr.getvalue() == "\r\033[K\033[32m✓ \033[0m02231 Cr\033[2m\033[0m\n", repr(mod.sys.stderr.getvalue())
+os.environ["NO_COLOR"] = "1"
+mod.sys = types.SimpleNamespace(stderr=Tty())
+mod._status(("36", "██"), ("1", "files 3/9"))
+assert mod.sys.stderr.getvalue() == "\r\033[K██files 3/", repr(mod.sys.stderr.getvalue())
+del os.environ["NO_COLOR"]
+mod.sys = types.SimpleNamespace(stderr=io.StringIO())
+mod._status(("1", "files 3/9"))
+assert mod.sys.stderr.getvalue() == ""
+
+# --- _summary ----------------------------------------------------------------
+# One aligned row per course, problems under the table, one pointer to the
+# landing page. A course that failed outright gets no row.
+mod.DOWNLOADS = Path("/dl")
+assert mod._code("02249 Computationally Hard Problems, Fall 2026") == "02249"
+assert mod._code("Sustainability lab") == "Sustainability lab"
+row = dict(files=245, pictures=31, announcements=22, links=101, videos=0, broken=24)
+got = mod._summary([
+    ("12106", row, [("2 files failed", ["Week 3: 404", "Exam: 404"])]),
+    ("02242", None, [("could not download", ["timed out"])]),
+])
+assert got == """\
+         files  pictures  announcements  links  videos  broken
+  12106    245        31             22    101       0      24
+
+  ✗ 12106: 2 files failed
+      Week 3: 404
+      Exam: 404
+  ✗ 02242: could not download
+      timed out
+
+  Open /dl/index.html to see every course.""", got
+assert mod._summary([("02242", None, [("could not download", ["timed out"])])]).startswith("  ✗ 02242")
 
 print("OK")
