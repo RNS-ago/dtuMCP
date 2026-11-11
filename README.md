@@ -190,6 +190,23 @@ offline pages' search does. Files a course's pages link to are left out of a
 copy saved before the record listed them (`linked` in `_course-<id>.json`);
 **Refresh** the course to find them.
 
+**Send to tutor** takes course material into a teaching or practice session.
+Select text anywhere in the pane, in a PDF, a file's text, a unit or a course
+page, and a **Send to tutor** button appears under it; a PDF's **Send page**
+sends the page you are looking at, drawn as an image the way
+`get_pdf_pages` draws pages, so equations and figures arrive as they look.
+What you send waits under the tree, where each item can be removed, or
+clicked to go back to where it is from, at its page; it goes
+with your next message in any teaching or practice session: quotes as text
+under what you wrote, each saying where it is from (file, page, course and
+the ids the `dtu_` tools take), pages as images. The list empties only once
+the message has been accepted. It holds nothing across a restart of the app.
+In an open session, Send works with an empty box while something waits; a new
+session's first message needs text of its own, as LearnHarness asks of it,
+and carries the material all the same.
+A model that takes no images refuses a message with a page, and keeps what you
+wrote; remove the page and send again.
+
 The bar between the tree and the pane can be dragged to share the width
 differently, or focused and moved with the arrow keys; a double click puts it
 back. The width is remembered, and a PDF is redrawn sharp at its new size. **Open file** opens a saved

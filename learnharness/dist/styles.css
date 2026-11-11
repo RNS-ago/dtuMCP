@@ -176,6 +176,29 @@
 .dtu-learn-agenda .dtu-learn-where { margin: .05rem 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dtu-learn-members-fold summary { cursor: pointer; font-size: .8125rem; margin-top: .25rem; }
 .dtu-learn-agenda .dtu-learn-rich { margin-top: .25rem; font-size: .8125rem; }
+/* Send to tutor: a button by the selection, and under the tree what waits
+   for the learner's next message. */
+.dtu-learn { position: relative; }
+.dtu-learn-action.dtu-learn-quote {
+	position: absolute; z-index: 5; padding: .2rem .6rem; font-size: 12px;
+	background: var(--background); box-shadow: 0 2px 8px color-mix(in oklab, var(--foreground) 22%, transparent);
+}
+.dtu-learn-quote[hidden] { display: none; }
+/* Over a page, the usual see-through tints would show the page through it. */
+.dtu-learn-action.dtu-learn-quote:hover:not(:disabled) { background: color-mix(in oklab, var(--foreground) 9%, var(--background)); }
+.dtu-learn-action.dtu-learn-quote:active:not(:disabled) { background: color-mix(in oklab, var(--foreground) 16%, var(--background)); }
+.dtu-learn-outbox {
+	flex: none; margin-top: .5rem; padding: .5rem .65rem; font-size: .8125rem;
+	border: 1px solid var(--border); border-radius: 8px;
+	background: color-mix(in oklab, var(--foreground) 4%, transparent);
+}
+.dtu-learn-outbox[hidden] { display: none; }
+.dtu-learn-outbox-head { display: flex; justify-content: space-between; align-items: baseline; gap: .5rem; }
+.dtu-learn-outbox ul { list-style: none; margin: .35rem 0; padding: 0; max-height: 8rem; overflow: hidden auto; }
+.dtu-learn-outbox li { min-width: 0; display: flex; justify-content: space-between; align-items: baseline; gap: .5rem; padding: .15rem 0; }
+.dtu-learn-outbox li > :first-child { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dtu-learn-outbox .dtu-learn-remove { flex: none; font-size: 1rem; line-height: 1; }
+.dtu-learn-outbox > p { margin: 0; font-size: .75rem; }
 .dtu-learn-toggle { display: flex; align-items: center; gap: .4rem; margin-bottom: .5rem; font-size: .8125rem; cursor: pointer; }
 /* The search box over the tree, and its results in the tree's place. */
 .dtu-learn-search, .dtu-learn-find input {

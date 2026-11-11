@@ -34,12 +34,74 @@ const MINUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke
 const PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
 
 export function activate(ctx) {
-	ctx.registerView({ id: "courses", name: "DTU Learn", mount: (container, signal) => mount(ctx, container, signal) });
+	const tutor = tutorQueue(ctx);
+	ctx.registerView({ id: "courses", name: "DTU Learn", mount: (container, signal) => mount(ctx, container, signal, tutor) });
 	ctx.registerAction({ id: "open", name: "DTU Learn", icon: ICON, run: () => ctx.app.openView("courses") });
 	ctx.placeAction({ id: "sidebar-open", actionId: "open", location: "sidebar" });
+	// What the view queued for the tutor rides on the learner's next message
+	// in a teaching or practice session: quotes as text under it, pages as
+	// images. Only an ordinary message, not an answer to a question. The
+	// queue empties only once the host has accepted that message.
+	ctx.registerSubmissionInterceptor?.({
+		id: "dtu-learn-material",
+		hasPendingInput: target => target.type === "text" && tutor.items.length > 0,
+		intercept(input, context) {
+			if (input.type !== "text" || !tutor.items.length) return undefined;
+			const sent = tutor.items;
+			context.onAccepted(() => tutor.remove(sent));
+			return {
+				type: "text",
+				content: {
+					text: [input.content.text.trim(), ...sent.map(materialText)].filter(Boolean).join("\n\n"),
+					images: [
+						...input.content.images,
+						...sent.filter(item => item.image).map(item => ({ type: "image", data: item.image, mimeType: "image/png" })),
+					],
+				},
+			};
+		},
+	});
 }
 
-function mount(ctx, container, signal) {
+// Course material waiting for the learner's next message: {id, title,
+// course, page?, ou?, topic?} with text, a quote, or image, a page as PNG
+// base64. Kept for the window's life, not saved; the view shows and edits it.
+function tutorQueue(ctx) {
+	let items = [];
+	let next = 0;
+	const listeners = new Set();
+	const changed = () => {
+		ctx.refreshSubmissions?.(); // the session's Send can now go with no text of its own
+		for (const listener of listeners) listener(items);
+	};
+	return {
+		get items() { return items; },
+		add(item) {
+			items = [...items, { ...item, id: ++next }];
+			changed();
+		},
+		remove(gone) {
+			const ids = new Set(gone.map(item => item.id));
+			items = items.filter(item => !ids.has(item.id));
+			changed();
+		},
+		listen(listener, signal) {
+			listeners.add(listener);
+			signal.addEventListener("abort", () => listeners.delete(listener), { once: true });
+		},
+	};
+}
+
+// How a queued item reads in the message: where it is from, ids the tutor's
+// dtu_ tools take, then the quote, or a note that the page is attached.
+function materialText(item) {
+	const where = [item.course, item.ou && `org unit ${item.ou}`, item.topic && `topic ${item.topic}`].filter(Boolean).join("; ");
+	const from = `From DTU Learn, ${item.title}${item.page ? `, page ${item.page}` : ""}${where ? ` (${where})` : ""}`;
+	return item.image ? `${from}: the page is attached as an image.`
+		: `${from}:\n${item.text.split("\n").map(line => `> ${line}`).join("\n")}`;
+}
+
+function mount(ctx, container, signal, tutor) {
 	const el = (tag, className, text) => {
 		const node = container.ownerDocument.createElement(tag);
 		if (className) node.className = className;
@@ -343,7 +405,7 @@ function mount(ctx, container, signal) {
 		for (const unit of (copy && !(copy instanceof Error) && pathTo(copy.modules, target)) || []) open.add(`u:${ou}:${unit}`);
 		redraw();
 		mark(target.topic !== undefined ? `p:${ou}:${target.topic}` : target.unit !== undefined ? `u:${ou}:${target.unit}` : `c:${ou}`);
-		if (target.news !== undefined) main.showCourse(course, target.news, query);
+		if ("news" in target) main.showCourse(course, target.news ?? undefined, query); // a course page
 		else main.show(title, { ou, ...target, ...(page && { page }), find: query });
 	}
 
@@ -719,9 +781,12 @@ function mount(ctx, container, signal) {
 		const scroller = el("div", "dtu-learn-scroll");
 
 		// Replace what it shows with a heading and a body; a later call wins
-		// over an earlier one still waiting.
-		function heading(text) {
+		// over an earlier one still waiting. source says what it is, for a
+		// quote sent to the tutor: {ou, topic, unit, attachment, linked, url}.
+		let about = { title: "" };
+		function heading(text, source = {}) {
 			const mine = ++shown;
+			about = { ...source, title: text };
 			// A cleanup that throws must not keep the next item from showing.
 			try { release(); } catch (error) { console.error("dtu-learn: pane cleanup failed", error); }
 			release = () => {};
@@ -757,7 +822,7 @@ function mount(ctx, container, signal) {
 				return showVideo(title, request);
 			}
 			if (!failure && isPdf(request)) return showPdf(title, request);
-			const { slot, put } = heading(title);
+			const { slot, put } = heading(title, request);
 			put(el("p", "dtu-learn-muted", "Reading…"));
 			try {
 				const { text, file } = await ctx.call("text", request);
@@ -781,7 +846,7 @@ function mount(ctx, container, signal) {
 		// topics, which open here. From the saved course, so it is the text
 		// as the course page shows it, not a flattened rendition.
 		async function showUnit(title, { ou, unit, find }) {
-			const { put } = heading(title);
+			const { put } = heading(title, { ou, unit });
 			put(el("p", "dtu-learn-muted", "Reading…"));
 			await load(ou);
 			const copy = courses.get(ou);
@@ -817,7 +882,7 @@ function mount(ctx, container, signal) {
 		// when asked, and then Open file plays it in the system's player,
 		// offline too.
 		async function showVideo(title, request) {
-			const { slot, put, current } = heading(title);
+			const { slot, put, current } = heading(title, request);
 			put(el("p", "dtu-learn-muted", "Getting the video…"));
 			const handles = [];
 			release = () => handles.forEach(handle => handle.dispose());
@@ -950,7 +1015,7 @@ function mount(ctx, container, signal) {
 		// announcements; focus is one of them to scroll to and outline, a
 		// search result's, with query's words marked in it.
 		function showCourse(course, focus, query) {
-			const { put, head } = heading(course.name);
+			const { put, head } = heading(course.name, { ou: course.id });
 			const tabs = el("div", "dtu-learn-tabs");
 			tabs.setAttribute("role", "tablist");
 			tabs.setAttribute("aria-label", "Course page");
@@ -1003,6 +1068,7 @@ function mount(ctx, container, signal) {
 				let found;
 				for (const news of copy.news) {
 					const item = el("article");
+					item.dataset.news = news.Id;
 					if (news.Id === focus) found = item;
 					item.append(
 						el("h3", undefined, news.Title),
@@ -1057,7 +1123,7 @@ function mount(ctx, container, signal) {
 		// frame it, the page itself, with its text a click away; otherwise
 		// its text.
 		async function showWeb(url) {
-			const { slot, put, current, title } = heading(url);
+			const { slot, put, current, title } = heading(url, { url });
 			const copy = control(slot, { label: "Copy link", onClick: async () => {
 				await navigator.clipboard.writeText(url);
 				copy.update({ label: "Copied" });
@@ -1115,7 +1181,7 @@ function mount(ctx, container, signal) {
 		// a zoom. Each page is drawn when it comes near the screen and cleared
 		// when it goes far off, so a long deck holds only a few pages' pixels.
 		async function showPdf(title, request) {
-			const { slot, put, current, head } = heading(title);
+			const { slot, put, current, head } = heading(title, request);
 			put(el("p", "dtu-learn-muted", "Opening…"));
 			// pdf.js 6 frees a document, and its worker, through the loading task;
 			// the document itself has no destroy().
@@ -1384,15 +1450,54 @@ function mount(ctx, container, signal) {
 					field.select();
 				}, { capture: true, signal: listening.signal });
 
+				// Send page: the page taking most of the pane, drawn as get_pdf_pages
+				// draws pages for the tutors (1568 pixels on its long side), queued
+				// for the learner's next message.
+				const pageInView = () => {
+					const view = scroller.getBoundingClientRect();
+					let best = 1;
+					let most = -Infinity;
+					for (const box of pages.children) {
+						const rect = box.getBoundingClientRect();
+						const visible = Math.min(rect.bottom, view.bottom) - Math.max(rect.top, view.top);
+						if (visible > most) [most, best] = [visible, Number(box.dataset.page)];
+					}
+					return best;
+				};
+				const pagePng = async n => {
+					const page = await doc.getPage(n);
+					const base = page.getViewport({ scale: 1 });
+					const viewport = page.getViewport({ scale: 1568 / Math.max(base.width, base.height) });
+					const canvas = el("canvas");
+					canvas.width = Math.round(viewport.width);
+					canvas.height = Math.round(viewport.height);
+					await page.render({ canvas, viewport }).promise;
+					return canvas.toDataURL("image/png").slice("data:image/png;base64,".length);
+				};
+				let sentLabel;
+				const send = control(slot, {
+					label: "Send page",
+					title: "Send the page in view to your tutor, as an image, with your next message in a teaching or practice session",
+					onClick: async () => {
+						const n = pageInView();
+						const image = await pagePng(n);
+						if (!current()) return;
+						tutor.add({ ...materialSource(about), page: n, image });
+						send.update({ label: `Page ${n} queued` });
+						clearTimeout(sentLabel);
+						sentLabel = setTimeout(() => current() && send.update({ label: "Send page" }), 1600);
+					},
+				});
 				const button = openButton(slot, request);
 				const task = loading;
 				release = () => {
 					listening.abort();
 					clearTimeout(settle);
 					clearTimeout(typing);
+					clearTimeout(sentLabel);
 					resized.disconnect();
 					observer.disconnect();
-					for (const handle of [out, reset, into, button, previous, next]) handle.dispose();
+					for (const handle of [out, reset, into, send, button, previous, next]) handle.dispose();
 					task.destroy();
 				};
 			} catch (error) {
@@ -1401,9 +1506,98 @@ function mount(ctx, container, signal) {
 			}
 		}
 
-		return { heading, show, showCourse, showWeb };
+		return { heading, show, showCourse, showWeb, about: () => about };
 	}
 	const main = panel(pane, signal);
+
+	// Where queued material is from, as the tutor's message will say it, and
+	// where it sits, to go back to from the queue: what the pane showed, a
+	// file, a unit or a course page (with the announcement, news).
+	function materialSource(about, news) {
+		const { title, ou, topic } = about;
+		const target = Object.fromEntries(["topic", "unit", "attachment", "linked"]
+			.filter(key => about[key] !== undefined).map(key => [key, about[key]]));
+		if (!Object.keys(target).length) target.news = news ?? null;
+		return {
+			title, ou, topic, course: terms.flatMap(term => term.courses).find(course => course.id === ou)?.name,
+			place: ou && !about.url ? { title, target } : undefined,
+		};
+	}
+
+	// Send to tutor: selected text in the pane, a PDF's or any other, gets a
+	// button beside it that queues it as a quote for the learner's next
+	// message, with the page it is on.
+	const doc = container.ownerDocument;
+	const quote = button("dtu-learn-action dtu-learn-quote", "Send to tutor", () => {
+		const selection = doc.getSelection();
+		const text = selection.toString().trim();
+		if (!text) return;
+		const node = selection.anchorNode?.nodeType === 1 ? selection.anchorNode : selection.anchorNode?.parentElement;
+		const page = Number(node?.closest(".dtu-learn-page")?.dataset.page) || undefined;
+		// On a course page, the announcement, assignment or quiz it is from.
+		const article = node?.closest("article");
+		const card = article?.querySelector("h3")?.textContent;
+		const source = materialSource(main.about(), Number(article?.dataset.news) || undefined);
+		tutor.add({ ...source, title: card ?? source.title, page, text: text.slice(0, 6000) });
+		selection.removeAllRanges();
+	});
+	quote.title = "Quote this with your next message to your tutor, in a teaching or practice session";
+	quote.hidden = true;
+	// Pressing it must not take the selection away before the click.
+	quote.addEventListener("pointerdown", event => event.preventDefault());
+	root.append(quote);
+	const placeQuote = () => {
+		const selection = doc.getSelection();
+		const range = selection?.rangeCount && !selection.isCollapsed ? selection.getRangeAt(0) : undefined;
+		const show = !!range && pane.contains(range.commonAncestorContainer) && !!selection.toString().trim();
+		quote.hidden = !show;
+		if (!show) return;
+		// Just under the selection's last line, kept inside the view.
+		const rects = range.getClientRects();
+		const end = rects[rects.length - 1] ?? range.getBoundingClientRect();
+		const box = root.getBoundingClientRect();
+		const view = (pane.querySelector(".dtu-learn-scroll") ?? pane).getBoundingClientRect(); // below the heading
+		const top = Math.min(Math.max(end.bottom, view.top), view.bottom - quote.offsetHeight - 4);
+		quote.style.left = `${Math.max(view.left - box.left, Math.min(end.right - box.left - quote.offsetWidth / 2, view.right - box.left - quote.offsetWidth - 4))}px`;
+		quote.style.top = `${top - box.top + 6}px`;
+	};
+	doc.addEventListener("selectionchange", placeQuote, { signal });
+	pane.addEventListener("scroll", placeQuote, { capture: true, signal });
+
+	// What waits for the tutor, under the tree: each item, removable, until
+	// the next message takes it.
+	const outbox = el("div", "dtu-learn-outbox");
+	left.append(outbox);
+	const drawOutbox = items => {
+		outbox.hidden = !items.length;
+		if (!items.length) return outbox.replaceChildren();
+		const top = el("div", "dtu-learn-outbox-head");
+		top.append(el("strong", undefined, `For your tutor (${items.length})`),
+			button("dtu-learn-link", "Clear", () => tutor.remove(tutor.items)));
+		const list = el("ul");
+		for (const item of items) {
+			const where = `${item.title}${item.page ? `, p. ${item.page}` : ""}`;
+			const entry = el("li");
+			const label = item.image ? `Page ${item.page} of ${item.title}` : `“${item.text.replace(/\s+/g, " ").slice(0, 70)}${item.text.length > 70 ? "…" : ""}” ${where}`;
+			// Click it to go back to where it is from, at its page.
+			const place = item.place;
+			if (place) {
+				const back = button("dtu-learn-link", label, () => go({ ou: item.ou, course: item.course, title: place.title, target: place.target, page: item.page }));
+				back.title = `Go back to ${where}`;
+				entry.append(back);
+			} else {
+				entry.append(el("span", undefined, label));
+			}
+			const drop = button("dtu-learn-link dtu-learn-remove", "×", () => tutor.remove([item]));
+			drop.setAttribute("aria-label", "Remove");
+			drop.title = "Remove";
+			entry.append(drop);
+			list.append(entry);
+		}
+		outbox.replaceChildren(top, list, el("p", "dtu-learn-muted", "Sent with your next message in a teaching or practice session."));
+	};
+	drawOutbox(tutor.items);
+	tutor.listen(drawOutbox, signal);
 
 	async function download(course, action) {
 		const { put } = main.heading(course.name);
