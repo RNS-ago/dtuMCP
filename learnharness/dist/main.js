@@ -83,6 +83,11 @@ export function activate(ctx) {
 		language: "dtu-learn",
 		mount: (container, block) => mountRefs(ctx, container, block, ref => openOverlay(undefined, undefined, ref)),
 	});
+	// Each dtu_ tool call in a transcript as a card saying what the tutor did,
+	// with a way to open what it read.
+	for (const toolName of Object.keys(TOOL_CARDS)) {
+		ctx.registerToolRenderer?.({ toolName, mount: (container, tool) => mountToolCard(ctx, container, tool, ref => openOverlay(undefined, undefined, ref)) });
+	}
 	ctx.registerAction({
 		id: "session-open", icon: ICON,
 		// What waits for the tutor shows here too, where the message is written.
@@ -180,6 +185,121 @@ function mountRefs(ctx, container, block, open) {
 	}
 	container.append(box);
 	return () => box.remove();
+}
+
+// What each dtu_ tool's card says, from its input and what the saved copy
+// names (w: {ou, course, title}): [while it runs, once done, what Open shows].
+const pagesOf = input => {
+	const first = Number(input?.first_page) || 1;
+	const last = Number(input?.last_page) || first;
+	return last > first ? `pages ${first}–${last}` : `page ${first}`;
+};
+const quoted = (w, fallback) => w.title ? `“${w.title}”` : fallback;
+const courseOf = (w, input) => w.course ?? (input?.org_unit_id ? `course ${input.org_unit_id}` : "a course");
+const TOOL_CARDS = {
+	dtu_search_courses: (input, w) => {
+		const scope = input?.org_unit_id ? courseOf(w, input) : "your courses";
+		return [`Searching ${scope} for “${input?.query ?? ""}”`, `Searched ${scope} for “${input?.query ?? ""}”`];
+	},
+	dtu_get_file: (input, w) => [`Reading ${quoted(w, "a file")}`, `Read ${quoted(w, "a file")}`, { topic: input?.topic_id }],
+	dtu_get_pdf_pages: (input, w) => [`Looking at ${pagesOf(input)} of ${quoted(w, "a PDF")}`, `Looked at ${pagesOf(input)} of ${quoted(w, "a PDF")}`, { topic: input?.topic_id, page: Number(input?.first_page) || 1 }],
+	dtu_unit_info: (input, w) => [`Reading the unit ${quoted(w, "")}`, `Read the unit ${quoted(w, "")}`, { unit: input?.unit_id }],
+	dtu_course_contents: (input, w) => [`Reading the contents of ${courseOf(w, input)}`, `Read the contents of ${courseOf(w, input)}`, {}],
+	dtu_list_announcements: (input, w) => [`Reading the announcements of ${courseOf(w, input)}`, `Read the announcements of ${courseOf(w, input)}`, {}],
+	dtu_get_announcement_attachment: (input, w) => [`Reading an announcement's attachment in ${courseOf(w, input)}`, `Read an announcement's attachment in ${courseOf(w, input)}`, {}],
+	dtu_list_assignments: (input, w) => [`Checking the assignments of ${courseOf(w, input)}`, `Checked the assignments of ${courseOf(w, input)}`, {}],
+	dtu_calendar: (input, w) => {
+		const scope = `the next ${Number(input?.days) || 7} days${input?.org_unit_id ? ` of ${courseOf(w, input)}` : ""}`;
+		return [`Checking the calendar for ${scope}`, `Checked the calendar for ${scope}`];
+	},
+	dtu_list_courses: () => ["Listing your DTU Learn courses", "Listed your DTU Learn courses"],
+	dtu_download_course: (input, w) => [`Downloading ${courseOf(w, input)}`, `Downloaded ${courseOf(w, input)}`, {}],
+	dtu_download_term: input => [`Downloading the courses of ${input?.term || "this term"}`, `Downloaded the courses of ${input?.term || "this term"}`],
+};
+
+function mountToolCard(ctx, container, tool, open) {
+	const make = (tag, className, text) => {
+		const node = container.ownerDocument.createElement(tag);
+		if (className) node.className = className;
+		if (text !== undefined) node.textContent = text;
+		return node;
+	};
+	const running = tool.state === "input-streaming" || tool.state === "input-available";
+	const failed = tool.state === "output-error" || !!tool.result?.isError;
+	const content = tool.result?.content ?? [];
+	const text = content.filter(block => block.type === "text").map(block => block.text).join("\n").trim();
+	const card = make("div", `dtu-learn-tool${running ? " running" : ""}${failed ? " failed" : ""}`);
+	const head = make("div", "dtu-learn-tool-head");
+	const icon = make("span", "dtu-learn-tool-icon");
+	icon.innerHTML = ICON; // the plugin's own trusted icon
+	const what = make("span", "dtu-learn-tool-what", tool.toolName.replace(/^dtu_/, "").replaceAll("_", " "));
+	head.append(icon, what);
+	card.append(head);
+	container.append(card);
+	const input = tool.input ?? {};
+	// Names from the saved copy; an org unit id or course number either way.
+	const ask = input.org_unit_id ? ctx.call("where", { ou: input.org_unit_id, topic: input.topic_id, unit: input.unit_id }).catch(() => ({})) : Promise.resolve({});
+	ask.then(w => {
+		if (tool.signal.aborted) return;
+		const [doing, done, ref] = TOOL_CARDS[tool.toolName](input, w ?? {});
+		const total = (tool.output ?? tool.result?.details)?.total;
+		what.textContent = running ? `${doing}…` : failed ? `${doing}: failed`
+			: Number.isInteger(total) ? `${done} · ${total === 1 ? "1 match" : `${total} matches`}` : done;
+		if (ref && w?.ou && !running && !failed) {
+			const go = make("button", "dtu-learn-action", "Open in DTU Learn");
+			go.type = "button";
+			go.title = "Open it over the chat, where the tutor found it";
+			go.addEventListener("click", () => open({ ou: w.ou, ...ref }));
+			head.append(go);
+		}
+		// The pages the tutor looked at, each opening at itself.
+		const images = content.filter(block => block.type === "image");
+		if (images.length && !failed) {
+			const strip = make("div", "dtu-learn-tool-pages");
+			const first = Number(input.first_page) || 1;
+			images.forEach((image, i) => {
+				const page = make("button", "dtu-learn-tool-page");
+				page.type = "button";
+				const img = make("img");
+				img.alt = `Page ${first + i}`;
+				img.src = `data:${image.mimeType};base64,${image.data}`;
+				img.addEventListener("error", () => img.remove()); // a host that refuses data: pictures
+				page.append(img, make("span", undefined, `p. ${first + i}`));
+				if (w?.ou) page.addEventListener("click", () => open({ ou: w.ou, topic: input.topic_id, page: first + i }));
+				else page.disabled = true;
+				strip.append(page);
+			});
+			card.insertBefore(strip, card.children[1] ?? null);
+		}
+	});
+	if (failed) {
+		card.append(make("p", "dtu-learn-error", tool.errorText || text || "The tool failed."));
+		return () => card.remove();
+	}
+	if (running) return () => card.remove();
+	// A search's matches, each opening where it is.
+	const found = tool.output?.hits ?? tool.result?.details?.hits;
+	if (Array.isArray(found) && found.length) {
+		const list = make("div", "dtu-learn-tool-hits");
+		found.slice(0, 6).forEach(hit => {
+			const row = make("button", "dtu-learn-tool-hit");
+			row.type = "button";
+			row.append(make("strong", undefined, hit.title),
+				// The course only when the search went over several.
+				make("span", undefined, [hit.page && `p. ${hit.page}`, !input.org_unit_id && hit.course, hit.where, hit.missing?.length && `lacks ${hit.missing.join(", ")}`].filter(Boolean).join(" · ")));
+			row.addEventListener("click", () => open({ ou: hit.ou, target: hit.target, title: hit.title, page: hit.page }));
+			list.append(row);
+		});
+		if (found.length > 6) list.append(make("p", "dtu-learn-tool-more", `and ${found.length - 6} more in the result below`));
+		card.append(list);
+	}
+	// What the tool returned, as the tutor got it.
+	if (text) {
+		const fold = make("details", "dtu-learn-tool-text");
+		fold.append(make("summary", undefined, "What the tutor got"), make("pre", undefined, text));
+		card.append(fold);
+	}
+	return () => card.remove();
 }
 
 // Course material waiting for the learner's next message: {id, title,
@@ -1763,17 +1883,23 @@ function mount(ctx, container, signal, tutor, opener) {
 		if (opener.target) openRef(opener.target);
 	})();
 
-	// A reference's topic or unit, in the pane and the tree, at its page.
-	async function openRef({ ou, topic, unit, page }) {
+	// What a reference, a tool card or a search hit names, in the pane and
+	// the tree, at its page: a topic, a unit, a hit's own target (with its
+	// title), or with none of them the course's page.
+	async function openRef({ ou, topic, unit, page, target, title }) {
 		await load(ou);
 		const copy = courses.get(ou);
-		const found = copy && !(copy instanceof Error) && (topic !== undefined ? findTopic(copy.modules, topic) : findUnit(copy.modules, unit));
+		const name = terms.flatMap(term => term.courses).find(course => course.id === ou)?.name;
+		target ??= topic !== undefined ? { topic } : unit !== undefined ? { unit } : { news: null };
+		const found = copy && !(copy instanceof Error) && (
+			target.topic !== undefined ? findTopic(copy.modules, target.topic)
+			: target.unit !== undefined ? findUnit(copy.modules, target.unit)
+			: { Title: title ?? name });
 		if (!found) {
 			main.heading("Not found").put(el("p", "dtu-learn-error", "That is not in your saved copy of the course. Refresh the course, then try again."));
 			return;
 		}
-		const name = terms.flatMap(term => term.courses).find(course => course.id === ou)?.name;
-		go({ ou, course: name, title: found.Title, target: topic !== undefined ? { topic } : { unit }, page });
+		go({ ou, course: name, title: title ?? found.Title, target, page });
 	}
 
 	return () => {

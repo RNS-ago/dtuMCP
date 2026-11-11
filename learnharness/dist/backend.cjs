@@ -327,15 +327,18 @@ function savedCourse(value) {
 	throw new Error(matches.length ? `Course ${code} is downloaded for several terms: ${matches.join(", ")}. Pass the org unit id.` : `Course ${code} is not downloaded. Run dtu_list_courses and dtu_download_course.`);
 }
 
+// The agents' search: its text, and its hits for the tool's card in the
+// transcript (their titles, pages and where each opens).
 function searchText(input) {
 	const only = savedCourse(input?.org_unit_id);
 	const limit = Math.min(50, Math.max(1, Number(input?.limit) || 15));
 	const { total, hits, complete } = search(input?.query, true, { only, limit, partial: true });
+	const found = { total, hits: hits.map(({ ou, title, kind, page, course, where, target, missing }) => ({ ou, title, kind, page, course, where, target, missing })) };
 	if (!total) {
 		const saved = [...copies()].map(([ou, file]) => `[${ou}] ${searchCourse(ou, file).name}`);
-		return saved.length
+		return { found, text: saved.length
 			? `No matches for "${input?.query}" in ${only ? `course ${only}` : "the downloaded courses"}. Downloaded: ${saved.join("; ")}.`
-			: "No course is downloaded yet, so there is nothing to search. dtu_download_course saves one.";
+			: "No course is downloaded yet, so there is nothing to search. dtu_download_course saves one." };
 	}
 	const ids = (ou, target) => target.topic !== undefined ? `org_unit_id ${ou}, topic_id ${target.topic}`
 		: target.unit !== undefined ? `org_unit_id ${ou}, unit_id ${target.unit} (dtu_unit_info)`
@@ -353,7 +356,7 @@ function searchText(input) {
 			`    ${ids(hit.ou, hit.target)}`);
 		if (hit.snippet) lines.push(`    ${hit.snippet.join("")}`);
 	});
-	return lines.join("\n");
+	return { found, text: lines.join("\n") };
 }
 
 exports.activate = ctx => {
@@ -396,7 +399,8 @@ exports.activate = ctx => {
 		create: () => [{
 			...SEARCH_TOOL,
 			async execute(_toolCallId, input) {
-				return { content: [{ type: "text", text: searchText(input) }], details: {} };
+				const { text, found } = searchText(input);
+				return { content: [{ type: "text", text }], details: found };
 			},
 		}, ...tools.map(tool => ({
 			name: `dtu_${tool.name}`,
@@ -410,7 +414,8 @@ exports.activate = ctx => {
 				// and page images from get_pdf_pages.
 				const props = Object.entries(tool.parameters.properties ?? {});
 				const args = props.map(([key, p]) => input?.[key] ?? p.default ?? "");
-				return { content: JSON.parse(await run(["--json", tool.name, ...args], signal)), details: {} };
+				// No details: the plugin's card, or else the host's, reads the content.
+				return { content: JSON.parse(await run(["--json", tool.name, ...args], signal)), details: undefined };
 			},
 		}))],
 	});
@@ -438,10 +443,15 @@ exports.activate = ctx => {
 	ctx.handle("search", input => search(input?.query, !!input?.hideBroken));
 	// What a reference in a tutor's answer names: its title and its course's
 	// name, from the saved copy, or nothing when the copy lacks it.
+	// A tool card's course alone ({ou}) too, and a course number for ou, as
+	// the agents may pass one.
 	ctx.handle("where", input => {
-		const copy = record(id(input?.ou));
-		const target = input?.topic !== undefined ? { topic: id(input.topic) } : { unit: id(input?.unit) };
-		return { title: copy && titleIn(copy.modules, target), course: copy?.name };
+		let ou;
+		try { ou = savedCourse(input?.ou); } catch { return {}; }
+		const copy = ou && record(ou);
+		if (!copy) return {};
+		const target = input?.topic !== undefined ? { topic: id(input.topic) } : input?.unit !== undefined ? { unit: id(input.unit) } : undefined;
+		return { ou, course: copy.name, title: target && titleIn(copy.modules, target) };
 	});
 	// A course page's live tabs, read from DTU Learn as they are opened:
 	// {items} for assignments, quizzes, groups or calendar, and the base

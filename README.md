@@ -121,6 +121,13 @@ each saying which words it lacks. It also adds a **DTU Learn** view to the sideb
 term and, for each downloaded course, its units and topics. Click a course's
 name to open it beside the tree on its page, which has tabs:
 
+Each `dtu_` tool call in a session shows as a card saying what the tutor
+did, such as *Looked at pages 5–7 of "Slides from Lecture 7"*, with **Open in
+DTU Learn** for a file, its pages, a unit or a course. A search's card lists
+its best matches, each opening where it is; a card for PDF pages shows the
+pages the tutor looked at, each opening at itself. Every card keeps what the
+tool returned, as the tutor got it, in a fold.
+
 When a tutor points you to course material, its answer carries a card per
 item: the file's or unit's title, its course and the pages, which opens it
 over the chat, at the first of those pages, in the same browser as the
