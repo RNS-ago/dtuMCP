@@ -122,9 +122,9 @@ term and, for each downloaded course, its units and topics. Click a course's
 name to open it beside the tree on its page, which has tabs:
 
 When a tutor points you to course material, its answer carries a card per
-item: the file's or unit's title, its course and the pages, which opens it in
-the DTU Learn view at the first of those pages, with **← Back to the session**
-above the tree. The tutors write them as a `dtu-learn` code block, a line per
+item: the file's or unit's title, its course and the pages, which opens it
+over the chat, at the first of those pages, in the same browser as the
+session's **DTU Learn** button. The tutors write them as a `dtu-learn` code block, a line per
 item, `topic <org unit id> <topic id> pages <a>-<b> | <what to look at>` or
 `unit <org unit id> <unit id> | ...`, which the plugin draws; a line naming
 something your saved courses lack shows as such.
@@ -212,6 +212,12 @@ is optional either way, so `3SAT` and `3-SAT` find each other. A PDF result
 opens at the page with the most of the words. Files a course's pages link to are left out of a
 copy saved before the record listed them (`linked` in `_course-<id>.json`);
 **Refresh** the course to find them.
+
+In a teaching or practice session, **DTU Learn** in the top bar opens the
+whole view over the chat: the tree, search, PDFs, course pages and Send to
+tutor, without leaving the session. Its X, Escape or the button again closes
+it, and the chat is as you left it. While something waits for the tutor, the
+button says how much, **DTU Learn · 2 for tutor**.
 
 **Send to tutor** takes course material into a teaching or practice session.
 Select text anywhere in the pane, in a PDF, a file's text, a unit or a course

@@ -51,20 +51,52 @@ const PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-
 
 export function activate(ctx) {
 	const tutor = tutorQueue(ctx);
-	// Where a reference in a tutor's answer asked the view to open, and the
-	// page it was clicked on, for the way back. The view takes it on mount.
-	const opener = { target: undefined, from: undefined };
-	ctx.registerView({ id: "courses", name: "DTU Learn", mount: (container, signal) => mount(ctx, container, signal, tutor, opener) });
-	ctx.registerCodeBlock?.({
-		language: "dtu-learn",
-		mount: (container, block) => mountRefs(ctx, container, block, ref => {
-			opener.target = ref;
-			opener.from = ctx.app.pathname();
-			ctx.app.openView("courses");
-		}),
-	});
+	// Something for the view to open as it mounts: {target}, a reference's.
+	const nothing = { target: undefined };
+	ctx.registerView({ id: "courses", name: "DTU Learn", mount: (container, signal) => mount(ctx, container, signal, tutor, nothing) });
 	ctx.registerAction({ id: "open", name: "DTU Learn", icon: ICON, run: () => ctx.app.openView("courses") });
 	ctx.placeAction({ id: "sidebar-open", actionId: "open", location: "sidebar" });
+
+	// The view over a session: the same tree and pane on a surface covering
+	// the chat, which closing (its X, Escape, or the button again) uncovers
+	// as it was. Opened from the session's top bar, or by a reference card
+	// in an answer, at what it names. One at a time.
+	let overlay; // { session, close }
+	const openOverlay = (surfaceTarget, session, ref) => {
+		overlay?.close();
+		const closed = new AbortController();
+		const content = document.createElement("div");
+		content.className = "dtu-learn-overlay";
+		const props = { title: "DTU Learn", background: "opaque", content, onClose: () => closed.abort() };
+		// Its signal disposes it, whoever closes it.
+		if (surfaceTarget) ctx.ui.openSurface(surfaceTarget, props, { signal: closed.signal });
+		else ctx.ui.openSurface(props, { signal: closed.signal }); // the page the card was clicked on
+		const unmount = mount(ctx, content, closed.signal, tutor, { target: ref, overlay: true });
+		const mine = { session, close: () => closed.abort() };
+		overlay = mine;
+		closed.signal.addEventListener("abort", () => {
+			unmount();
+			if (overlay === mine) overlay = undefined;
+		}, { once: true });
+	};
+	ctx.registerCodeBlock?.({
+		language: "dtu-learn",
+		mount: (container, block) => mountRefs(ctx, container, block, ref => openOverlay(undefined, undefined, ref)),
+	});
+	ctx.registerAction({
+		id: "session-open", icon: ICON,
+		// What waits for the tutor shows here too, where the message is written.
+		get name() {
+			const waiting = tutor.items.length;
+			return waiting ? `DTU Learn · ${waiting} for tutor` : "DTU Learn";
+		},
+		run(context) {
+			if (context.surface !== "session") return;
+			if (overlay && overlay.session === context.sessionId) return overlay.close();
+			openOverlay(context.surfaceTarget, context.sessionId);
+		},
+	});
+	ctx.placeAction({ id: "session-open", actionId: "session-open", location: "top-bar", sessions: ["teaching", "practice"] });
 	// What the view queued for the tutor rides on the learner's next message
 	// in a teaching or practice session: quotes as text under it, pages as
 	// images. Only an ordinary message, not an answer to a question. The
@@ -159,6 +191,7 @@ function tutorQueue(ctx) {
 	const listeners = new Set();
 	const changed = () => {
 		ctx.refreshSubmissions?.(); // the session's Send can now go with no text of its own
+		ctx.refreshActions?.(); // and its top bar says how much waits
 		for (const listener of listeners) listener(items);
 	};
 	return {
@@ -196,6 +229,7 @@ function mount(ctx, container, signal, tutor, opener) {
 		return node;
 	};
 	const root = el("div", "dtu-learn");
+	if (opener.overlay) root.classList.add("dtu-learn-in-overlay");
 	const left = el("div", "dtu-learn-tree");
 	const note = el("p", "dtu-learn-muted", "Loading courses…");
 	const treeBox = el("div", "dtu-learn-tree-scroll"); // the tree scrolls in here, below the checkbox
@@ -1725,17 +1759,8 @@ function mount(ctx, container, signal, tutor, opener) {
 			columns: [{ key: "info", header: "Info", width: 96, align: "right" }],
 			rows: rows(),
 		}, { signal });
-		// Opened from a reference in a tutor's answer: show it, with a way back.
-		const sent = opener.target;
-		opener.target = undefined;
-		if (sent) {
-			const session = /^\/chat\/([A-Za-z0-9_-]+)/.exec(opener.from ?? "")?.[1];
-			if (session) {
-				const back = button("dtu-learn-link dtu-learn-back", "← Back to the session", () => ctx.app.openSession(session));
-				left.prepend(back);
-			}
-			openRef(sent);
-		}
+		// Opened at a reference from a tutor's answer: show it.
+		if (opener.target) openRef(opener.target);
 	})();
 
 	// A reference's topic or unit, in the pane and the tree, at its page.

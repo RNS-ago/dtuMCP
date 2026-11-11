@@ -198,7 +198,9 @@
 .dtu-learn-ref-facts:empty { display: none; }
 .dtu-learn-ref-go { flex: none; font-size: .75rem; color: color-mix(in oklab, var(--foreground) 70%, transparent); }
 .dtu-learn-ref-raw { margin: 0; font-family: monospace; font-size: .8125rem; }
-.dtu-learn-back { margin-bottom: .5rem; font-size: .8125rem; align-self: flex-start; }
+/* The view over a session: the surface's close button floats at the top
+   right, so everything starts below it. */
+.dtu-learn.dtu-learn-in-overlay { padding-top: 3rem; }
 @media (prefers-reduced-motion: reduce) { .dtu-learn-ref { transition: none; } .dtu-learn-ref:active { transform: none; } }
 /* Send to tutor: a button by the selection, and under the tree what waits
    for the learner's next message. */
