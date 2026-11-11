@@ -39,13 +39,16 @@ teachers actually handed me this term.
   am supposed to do. Only units marked `(info)` have any.
 - `get_file(org_unit_id, topic_id)` — one topic, whatever kind it is.
   - A **PDF**, **Word**, **PowerPoint**, **Excel** or plain-text file comes
-    back as text. Work from that text.
+    back as text. Work from that text. A PDF's pages are headed `[Page n]`.
   - Any path in a reply is on the machine running the server, which is not
     necessarily one you can read from. Never treat a saved path as a way to
     reach the content, and never report that you cannot read the material
-    because of it — the text is already in the reply. For a figure, a diagram
-    or heavy mathematical notation, which do not survive extraction, ask me to
-    open the file or to attach it to the conversation.
+    because of it — the text is already in the reply.
+  - Figures, diagrams and mathematical notation do not survive extraction.
+    When they matter, look at just those pages with
+    `get_pdf_pages(org_unit_id, topic_id, first_page, last_page)`, which
+    returns them as images. A page costs about 2k tokens against roughly 100
+    as text, so never ask for a whole document.
   - Spreadsheet text is cell values only, with the row and column layout lost,
     so do not read relationships across columns out of it.
   - An **HTML page** comes back as stripped text.
@@ -55,9 +58,14 @@ teachers actually handed me this term.
   - Any other format is saved and only the path comes back.
 - `download_course(org_unit_id)` — save every file of a course to disk on the
   machine running the server, under `~/Downloads/dtulearn/<course>/<unit>/`.
-  It returns counts, not content, so use it when I ask for the material
-  itself rather than to read a course. Broken topics, links and videos have
-  no file and are only counted.
+  It returns counts, not content. Broken topics, links and videos have no
+  file and are only counted.
+- Course material is read from that saved copy. The first `course_contents`,
+  `unit_info`, `get_file` or announcement call for a course without one
+  downloads it, which takes a minute or two, so tell me before that call.
+  `course_contents` and `list_announcements` name the date the copy was saved;
+  call `download_course` when I ask for it to be brought up to date, or about
+  something newer than that. `calendar` and `list_assignments` are always live.
 - `list_assignments(org_unit_id)` — assignment folders with due and closing dates.
 - `list_announcements(org_unit_id)` — course announcements, newest first,
   each headed by its id and followed by `Attachment [file_id]` lines for any
@@ -86,12 +94,15 @@ teachers actually handed me this term.
 - To read a whole course, call `course_contents` once and then `get_file` per
   topic you actually need. Do not fetch every topic by default — courses have
   hundreds, and older ones hold slides from several years. `download_course`
-  is for putting the files on my disk, not for reading them to me.
-- A topic `course_contents` marks `broken` was copied from an earlier year
-  without its file. There is nothing behind it, so do not fetch it, and tell
-  me the material is missing from the course rather than that a tool failed.
+  returns counts, not content, so never use it to read a course to me.
+- `course_contents` leaves out topics copied from an earlier year without
+  their files, and only counts them on their unit's line as
+  `[N broken topics not listed]`. If what I ask for is not among the listed
+  topics and its unit has broken ones, tell me the material is missing from
+  the course rather than that a tool failed.
 - The calendar of a course from an earlier term is often closed to students,
   and comes back refused rather than empty. Say so instead of retrying.
 - If a tool says the session was rejected or has expired, tell me to run
   `uv run --script ~/repos/dtuMCP/server.py login` in a terminal. You cannot do
-  it yourself: it opens a browser and waits for me to sign in.
+  it yourself: it opens a browser and waits for me to sign in. Courses already
+  downloaded can still be read meanwhile.

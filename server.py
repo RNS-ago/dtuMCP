@@ -17,6 +17,7 @@ import configparser
 import inspect
 import json
 import logging
+import mimetypes
 import os
 import re
 import shutil
@@ -38,7 +39,7 @@ from urllib.parse import quote, unquote, urlparse
 
 import anyio
 import httpx
-from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver import Context, Image, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 BASE = os.environ.get("DTU_BASE", "https://learn.inside.dtu.dk")
@@ -280,9 +281,19 @@ def _client() -> httpx.Client:
         raise RuntimeError(
             "No DTU Learn session. Run: uv run --script server.py login"
         )
+    # In the cookie jar, not a Cookie header: httpx drops that header on every
+    # redirect, so a short link to a course file, which redirects to the
+    # file, arrived signed out and was sent to the login page. Scoped to
+    # DTU Learn's host, so a redirect elsewhere (DTU's sign-in) never gets it.
+    jar = httpx.Cookies()
+    for part in cookie.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name:
+            jar.set(name, value, domain=urlparse(BASE).hostname)
     return httpx.Client(
         base_url=BASE,
-        headers={"Cookie": cookie, "Accept": "application/json"},
+        cookies=jar,
+        headers={"Accept": "application/json"},
         timeout=30,
         follow_redirects=True,
     )
@@ -320,11 +331,10 @@ def _resolve(org_unit_id: int) -> int:
     if org_unit_id >= 100000:
         return org_unit_id
 
-    items = _paged(f"/d2l/api/lp/{LP}/enrollments/myenrollments/", orgUnitTypeId=3)
     matches = [
-        it["OrgUnit"]
-        for it in items
-        if (m := re.match(r"(\d{4,5})\b", it["OrgUnit"]["Name"]))
+        ou
+        for ou in _enrolled()[0]
+        if (m := re.match(r"(\d{4,5})\b", ou["Name"]))
         and int(m.group(1)) == org_unit_id
     ]
     if len(matches) == 1:
@@ -387,11 +397,10 @@ def _html_text(html: str) -> str:
     return re.sub(r"[ \t]*\n[ \t\n]*", "\n", text).strip()
 
 
-@lru_cache(maxsize=None)
-def _toc_index(ou: int) -> tuple:
-    """Index one fetch of the table of contents by topic id and by module id.
-    get_file needs to know what kind of thing a topic is before fetching it, and
-    the single-topic endpoint does not answer consistently across courses."""
+def _toc_index(modules) -> tuple:
+    """Index a table of contents by topic id and by module id. get_file needs
+    to know what kind of thing a topic is before fetching it, and the
+    single-topic endpoint does not answer consistently across courses."""
     topics, units = {}, {}
 
     def walk(modules):
@@ -401,8 +410,60 @@ def _toc_index(ou: int) -> tuple:
                 topics[t["TopicId"]] = t
             walk(m.get("Modules"))
 
-    walk(_get(f"/d2l/api/le/{LE}/{ou}/content/toc").get("Modules"))
+    walk(modules)
     return topics, units
+
+
+def _copies() -> list[Path]:
+    """The course records download_course leaves in each course folder,
+    oldest first, so a course saved under two names resolves to the newer."""
+    return sorted(DOWNLOADS.glob("*/_course-*.json"), key=lambda p: p.stat().st_mtime)
+
+
+def _copy(ou: int) -> dict | None:
+    """A course's offline copy as download_course saved it, or None: its
+    table of contents, announcements and the files it saved, with root set
+    to the folder holding them."""
+    found = [p for p in _copies() if p.name == f"_course-{ou}.json"]
+    if not found:
+        return None
+    return json.loads(found[-1].read_text(encoding="utf-8")) | {"root": found[-1].parent}
+
+
+def _course(ou: int, ctx: Context | None = None) -> dict:
+    """A course's offline copy, downloading the course first if it has none.
+    Course material is read from the copy once it exists, so the first read
+    of a course is slow and every later one is local."""
+    # ponytail: two first reads of one course at once both download it; the
+    # second overwrites the first with the same files. Lock per course if
+    # that ever costs more than the wait.
+    copy = _copy(ou)
+    if copy is None:
+        _download(ou, report=_reporter(ctx))
+        copy = _copy(ou)
+    return copy
+
+
+def _saved_note(copy: dict) -> str:
+    return (f"(From the offline copy saved {copy['saved']}. download_course "
+            "brings it up to date.)")
+
+
+def _enrolled() -> tuple[list, str]:
+    """The org units of my courses, and if DTU Learn could not be asked, why.
+    With the session expired or no network, the courses saved offline stand
+    in, so what was downloaded can still be found and read."""
+    try:
+        items = _paged(f"/d2l/api/lp/{LP}/enrollments/myenrollments/", orgUnitTypeId=3)
+        return [it["OrgUnit"] for it in items], ""
+    except (RuntimeError, httpx.HTTPError) as e:
+        saved = {}
+        for p in _copies():
+            copy = json.loads(p.read_text(encoding="utf-8"))
+            saved[copy["ou"]] = {"Id": copy["ou"], "Name": copy["name"]}
+        if not saved:
+            raise
+        return list(saved.values()), str(e)
 
 
 def _description(node) -> str:
@@ -424,12 +485,23 @@ def _urn_kind(url: str) -> str:
 
 
 def _flatten(modules, depth=0):
-    """TOC modules nest arbitrarily; flatten to one line per module and topic."""
+    """TOC modules nest arbitrarily; flatten to one line per module and topic.
+
+    A course copied from last year keeps topics whose file did not come with
+    it. D2L flags them and answers 404 for their content, and they sit beside
+    this year's topic of nearly the same title, so they are left out and only
+    counted on their unit's line, where nobody can pick one by mistake.
+    """
     out = []
     for m in modules or []:
+        topics = m.get("Topics") or []
         info = " (info)" if _description(m) else ""
-        out.append("  " * depth + f"# [{m['ModuleId']}] {m.get('Title', '?')}{info}")
-        for t in m.get("Topics") or []:
+        broken = sum(1 for t in topics if t.get("IsBroken"))
+        left_out = f" [{broken} broken topic{'s' * (broken > 1)} not listed]" if broken else ""
+        out.append("  " * depth + f"# [{m['ModuleId']}] {m.get('Title', '?')}{info}{left_out}")
+        for t in topics:
+            if t.get("IsBroken"):
+                continue
             kind = t.get("TypeIdentifier", "?")
             # Link topics point either inside D2L (a relative quicklink, no use
             # to anyone outside it) or out to the course's own website, which is
@@ -438,10 +510,6 @@ def _flatten(modules, depth=0):
             external = f" {url}" if url.startswith("http") else ""
             if kind == "ContentService":
                 kind = _urn_kind(url)  # "video" reads better than "ContentService"
-            # A course copied from last year keeps topics whose file did not
-            # come with it. D2L flags them and answers 404 for their content.
-            if t.get("IsBroken"):
-                kind += ", broken"
             out.append(
                 "  " * (depth + 1)
                 + f"- [{t['TopicId']}] {t.get('Title', '?')} ({kind}){external}"
@@ -486,14 +554,15 @@ def _term(org_unit) -> tuple[int, int]:
 
 @mcp.tool()
 def list_courses() -> str:
-    """List the DTU Learn courses you are enrolled in, grouped by term, newest first."""
-    items = _paged(f"/d2l/api/lp/{LP}/enrollments/myenrollments/", orgUnitTypeId=3)
+    """List the DTU Learn courses you are enrolled in, grouped by term, newest first.
+
+    When DTU Learn cannot be reached, lists the courses saved offline instead."""
+    units, why = _enrolled()
     groups = {}
-    for it in items:
-        ou = it["OrgUnit"]
+    for ou in units:
         groups.setdefault(_term(ou), []).append(f"[{ou['Id']}] {ou['Name']}")
 
-    out = []
+    out = [f"DTU Learn could not be reached: {why}\nThese are the courses saved offline.\n"] if why else []
     for term in sorted(groups, reverse=True):
         year, season = term
         out.append(f"## {SEASON_NAMES[season]} {year}" if year else "## No term")
@@ -503,22 +572,28 @@ def list_courses() -> str:
 
 
 @mcp.tool()
-def course_contents(org_unit_id: int) -> str:
+def course_contents(org_unit_id: int, ctx: Context | None = None) -> str:
     """Show a course's content tree. Takes an org unit id or a DTU course number.
 
-    The topic ids it prints are what get_file takes."""
-    toc = _get(f"/d2l/api/le/{LE}/{_resolve(org_unit_id)}/content/toc")
-    return "\n".join(_flatten(toc.get("Modules"))) or "Course has no content."
+    The topic ids it prints are what get_file takes. Topics copied from an
+    earlier year without their files are left out and counted on their
+    unit's line. Course material is read from the offline copy
+    download_course saves; a course with none is downloaded first, which
+    takes a minute or two.
+    """
+    copy = _course(_resolve(org_unit_id), ctx)
+    lines = _flatten(copy["modules"])
+    return "\n".join([_saved_note(copy), "", *lines]) if lines else "Course has no content."
 
 
 @mcp.tool()
-def unit_info(org_unit_id: int, unit_id: int) -> str:
+def unit_info(org_unit_id: int, unit_id: int, ctx: Context | None = None) -> str:
     """Show a unit's own text: its schedule, instructions and notes, plus its topics.
 
     Unit ids are the bracketed numbers on the `#` lines of course_contents. Only
     units marked `(info)` there have any text of their own.
     """
-    unit = _toc_index(_resolve(org_unit_id))[1].get(unit_id)
+    unit = _toc_index(_course(_resolve(org_unit_id), ctx)["modules"])[1].get(unit_id)
     if unit is None:
         raise RuntimeError(
             f"No unit {unit_id} in that course. Run course_contents; unit ids are "
@@ -569,14 +644,16 @@ def _filename(r: httpx.Response, fallback: str) -> str:
 
 
 @mcp.tool()
-def get_file(org_unit_id: int, topic_id: int) -> str:
+def get_file(org_unit_id: int, topic_id: int, ctx: Context | None = None) -> str:
     """Fetch one content topic: a file's text, an HTML page's text, or a link's target.
 
     Topic ids come from course_contents. PDFs come back as extracted text with
     the saved file's path; other binaries are saved and only the path returned.
+    Read from the course's offline copy, like course_contents.
     """
     ou = _resolve(org_unit_id)
-    topic = _toc_index(ou)[0].get(topic_id)
+    copy = _course(ou, ctx)
+    topic = _toc_index(copy["modules"])[0].get(topic_id)
     if topic is None:
         raise RuntimeError(
             f"No topic {topic_id} in that course. Run course_contents to see the "
@@ -599,31 +676,141 @@ def get_file(org_unit_id: int, topic_id: int) -> str:
             f"{BASE}/d2l/le/lessons/{ou}/topics/{topic_id}"
         )
 
+    saved = copy["files"].get(str(topic_id))
+    if saved:
+        return _saved_text(copy["root"] / saved, title)
+    # Not in the copy: its download failed, so try DTU Learn once more.
     r, name = _topic_fetch(ou, topic)
-    return _file_text(r, name, title)
+    return _file_text(r.content, r.headers.get("content-type", ""), name, title)
 
 
-def _file_text(r: httpx.Response, name: str, title) -> str:
-    """Turn a fetched file into text for the caller, saving it to disk when the
-    bytes are not text themselves. Shared by content topics and announcement
-    attachments, which arrive the same way."""
-    ctype = r.headers.get("content-type", "")
+def _numbered_pages(text: str) -> str:
+    """pdftotext's output with each page headed [Page n]. It ends every page
+    with a form feed, which says nothing to a reader. Only the last one goes:
+    the ones before it may close blank pages, which still count."""
+    pages = text.removesuffix("\f").split("\f")
+    return "\n\n".join(f"[Page {n}]\n{page.strip(chr(10))}" for n, page in enumerate(pages, 1))
 
+
+PAGE_LIMIT = 10  # ponytail: ~2k tokens a page; raise it if real questions need more at once
+
+
+@mcp.tool()
+def get_pdf_pages(
+    org_unit_id: int, topic_id: int, first_page: int, last_page: int = 0,
+    ctx: Context | None = None,
+) -> list[str | Image]:
+    """Show pages of a PDF topic as images, for what get_file's text loses.
+
+    Figures, diagrams and mathematical notation do not survive text
+    extraction. Read the text with get_file first; it numbers the pages as
+    [Page n]. Then ask for only the pages that matter: an image costs about
+    2k tokens against roughly 100 for the same page as text. last_page
+    defaults to first_page; at most 10 pages at a time.
+    """
+    last_page = last_page or first_page
+    if not 1 <= first_page <= last_page or last_page - first_page >= PAGE_LIMIT:
+        raise RuntimeError(
+            f"Ask for pages first_page to last_page, counted from 1, at most "
+            f"{PAGE_LIMIT} at a time."
+        )
+    ou = _resolve(org_unit_id)
+    copy = _course(ou, ctx)
+    topic = _toc_index(copy["modules"])[0].get(topic_id)
+    if topic is None:
+        raise RuntimeError(
+            f"No topic {topic_id} in that course. Run course_contents to see the "
+            "topic ids it does have."
+        )
+    title = topic.get("Title", topic_id)
+    if topic.get("TypeIdentifier") != "File":
+        raise RuntimeError(f"'{title}' is not a file, so it has no pages. get_file says what it is.")
+    saved = copy["files"].get(str(topic_id))
+    if saved:
+        path = copy["root"] / saved
+    else:  # not in the copy: its download failed, so try DTU Learn once more
+        r, name = _topic_fetch(ou, topic)
+        DOWNLOADS.mkdir(parents=True, exist_ok=True)
+        path = DOWNLOADS / name
+        path.write_bytes(r.content)
+    if path.suffix.lower() != ".pdf":
+        raise RuntimeError(f"'{title}' is {path.name}, not a PDF. get_file has its text.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 1568 pixels on the long side is as much as a model takes in before
+        # scaling an image down, so anything sharper is paid for and lost.
+        try:
+            subprocess.run(
+                ["pdftoppm", "-png", "-scale-to", "1568", "-f", str(first_page),
+                 "-l", str(last_page), str(path), f"{tmp}/page"],
+                check=True, capture_output=True, timeout=120,
+            )
+        except FileNotFoundError:
+            raise RuntimeError("Showing PDF pages needs pdftoppm, from poppler-utils.")
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"pdftoppm could not read {path.name}: {e.stderr.decode().strip()}")
+        # page-07.png: zero-padded to the width of the page count, so they sort.
+        images = sorted(Path(tmp).glob("page-*.png"))
+        if not images:
+            raise RuntimeError(f"'{title}' has fewer than {first_page} pages.")
+        out = []
+        for image in images:
+            out += [f"Page {int(image.stem.split('-')[-1])} of '{title}':",
+                    Image(data=image.read_bytes(), format="png")]
+    return out
+
+
+def _blocks(result) -> list[dict]:
+    """A tool's result as MCP content blocks, which is also the shape
+    LearnHarness tools return: text, and images as base64 PNG."""
+    return [
+        item.to_image_content().model_dump(by_alias=True, exclude_none=True)
+        if isinstance(item, Image) else {"type": "text", "text": item}
+        for item in (result if isinstance(result, list) else [result])
+    ]
+
+
+def _decode(content: bytes, ctype: str) -> str:
+    """Bytes as text, in the charset the content type names, else UTF-8."""
+    charset = re.search(r"charset=([\w-]+)", ctype)
+    try:
+        return content.decode(charset.group(1) if charset else "utf-8", "replace")
+    except LookupError:  # a charset Python does not know
+        return content.decode("utf-8", "replace")
+
+
+def _saved_text(path: Path, title) -> str:
+    """_file_text for a file in an offline copy. The copy keeps no content
+    type, so the extension stands in. Anything but a page, a PDF or an Office
+    file is left to the bytes, as D2L's unknown type is: guess_type calls a
+    MATLAB .m file a Mathematica package."""
+    ctype = mimetypes.guess_type(path.name)[0] or ""
+    if not any(kind in ctype for kind in ("html", "pdf", "officedocument")):
+        ctype = "d2l/unknowntype"
+    return _file_text(path.read_bytes(), ctype, path.name, title, path)
+
+
+def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None = None) -> str:
+    """Turn a file into text for the caller, saving it to disk when the bytes
+    are not text themselves. Shared by content topics and announcement
+    attachments, fetched or read from an offline copy; path is where a copy
+    already keeps the file."""
     if "html" in ctype:
-        return f"[{title}]\n\n{_html_text(r.text)}"
+        return f"[{title}]\n\n{_html_text(_decode(content, ctype))}"
     if ctype.startswith("text/") or "json" in ctype:
-        return r.text
+        return _decode(content, ctype)
     if ctype == "d2l/unknowntype":
         # D2L labels every extension it does not know this way, and many of them
         # are plain text: source code, PRISM models, LaTeX. Let the bytes decide.
         try:
-            return r.content.decode("utf-8")
+            return content.decode("utf-8")
         except UnicodeDecodeError:
             pass
 
-    DOWNLOADS.mkdir(parents=True, exist_ok=True)
-    path = DOWNLOADS / name
-    path.write_bytes(r.content)
+    if path is None:
+        DOWNLOADS.mkdir(parents=True, exist_ok=True)
+        path = DOWNLOADS / name
+        path.write_bytes(content)
 
     if "pdf" in ctype or name.lower().endswith(".pdf"):
         text = _pdf_text(path)
@@ -631,12 +818,15 @@ def _file_text(r: httpx.Response, name: str, title) -> str:
             # Reading the PDF itself renders every page as an image, which costs
             # roughly ten times the tokens of its text. Extraction drops figures
             # and mangles heavy mathematical notation, so say where the original
-            # is rather than pretending the text is the whole document.
+            # is rather than pretending the text is the whole document, and
+            # number the pages so the ones that matter can be looked at.
+            text = _numbered_pages(text)
             cut = "\n\n[Text truncated here.]" if len(text) > TEXT_LIMIT else ""
             return (
-                f"[Text of {name}. The PDF itself is at {path} -- open it for "
-                f"figures or mathematical notation, which do not survive "
-                f"extraction.]\n\n{text[:TEXT_LIMIT]}{cut}"
+                f"[Text of {name}. The PDF itself is at {path}. Figures and "
+                f"mathematical notation do not survive extraction: open it, or "
+                f"for a course topic see those pages with get_pdf_pages.]"
+                f"\n\n{text[:TEXT_LIMIT]}{cut}"
             )
 
     office = _ooxml_text(path, ctype)
@@ -650,7 +840,7 @@ def _file_text(r: httpx.Response, name: str, title) -> str:
     # Saved, but no text could be got out of it. The path is on the machine
     # running this server, which is not necessarily where the caller can read.
     return (
-        f"No text could be extracted from {name} ({ctype}, {len(r.content)} bytes). "
+        f"No text could be extracted from {name} ({ctype}, {len(content)} bytes). "
         f"It is saved at {path} on the machine running this server; open it there."
     )
 
@@ -715,13 +905,23 @@ def _save_attachment(client, ou: int, root: Path, news_id: int, att) -> tuple:
 REFERENCE = re.compile(r'(\b(?:src|href)=")([^"]*)"')
 
 
+QUICKLINK = "/d2l/common/dialogs/quickLink/quickLink.d2l"
+
+
 def _d2l_file(value: str) -> str | None:
     """The DTU Learn file a src or href points at, as an absolute URL, or None.
-    Relative values are left alone: in index.html they are already local."""
+    A short link to a course file (quickLink.d2l?type=coursefile) counts:
+    DTU Learn redirects it to the file. Short links to anything else lead to
+    pages, not files. Relative values are left alone: in index.html they are
+    already local."""
     url = unescape(value)
-    if url.startswith("/content/"):
+    if url.startswith(("/content/", QUICKLINK)):
         url = BASE + url
-    return url if url.startswith(BASE + "/content/") else None
+    if url.startswith(BASE + "/content/"):
+        return url
+    if url.startswith(BASE + QUICKLINK) and re.search(r"[?&]type=coursefile\b", url, re.I):
+        return url
+    return None
 
 
 def _linked_dest(root: Path, url: str) -> Path:
@@ -739,7 +939,8 @@ def _save_linked(client, root: Path, url: str) -> tuple:
     # An expired session redirects to the login page, which is not the file.
     if not r.is_success or not r.url.path.startswith("/content/"):
         return url, None
-    dest = _linked_dest(root, url)
+    # Kept by where it ended up: a short link names no file of its own.
+    dest = _linked_dest(root, str(r.url))
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(r.content)
     return url, dest
@@ -1129,6 +1330,8 @@ def download_course(org_unit_id: int, ctx: Context | None = None) -> str:
     this server, with an index.html beside them that lays the course out like
     its site. Pictures and files the pages link to are fetched as well. Links
     and videos are not files; the index points at them online.
+    course_contents, unit_info, get_file and the announcement tools read
+    this copy, so run it again to bring them up to date.
     Nothing comes back as text -- for that, ask for the one topic with get_file.
     """
     row = _download(_resolve(org_unit_id), report=_reporter(ctx))
@@ -1308,6 +1511,31 @@ def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
     (root / "_search.js").write_text(
         f"window.SEARCH = {json.dumps(docs, ensure_ascii=False)};\n", encoding="utf-8"
     )
+    # What the reading tools answer from once the course is saved: the tree
+    # and announcements as D2L sent them, and where each saved file went,
+    # keyed by topic id or by "news id/file id". Written last and swapped in
+    # whole, so a copy exists only once everything above has been saved.
+    record = {
+        "ou": ou, "name": name, "saved": f"{datetime.now():%Y-%m-%d %H:%M}",
+        "modules": modules, "news": news,
+        "files": {
+            "/".join(map(str, key)) if isinstance(key, tuple) else str(key):
+                p.relative_to(root).as_posix()
+            for key, (p, _) in zip(keys, results) if p
+        },
+        # Files the course's pages link to, by the link as the page has it:
+        # a /content/ address, or a short link to a course file.
+        "linked": {url: dest.relative_to(root).as_posix() for url, dest in linked.items()},
+        # Videos are downloaded only on demand, by download_video; a refresh
+        # keeps the ones still on disk.
+        "videos": {
+            topic: path for topic, path in ((_copy(ou) or {}).get("videos") or {}).items()
+            if (root / path).exists()
+        },
+    }
+    part = root / f"_course-{ou}.json.part"
+    part.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    part.replace(root / f"_course-{ou}.json")
     _write_landing()
     # The course's bar collapses into one line that stays.
     _status(("32", "  ✓ "), ("2", prefix), ("", name), keep=True)
@@ -1355,14 +1583,16 @@ def list_assignments(org_unit_id: int) -> str:
 
 
 @mcp.tool()
-def list_announcements(org_unit_id: int) -> str:
+def list_announcements(org_unit_id: int, ctx: Context | None = None) -> str:
     """List course announcements (news items), newest first.
 
     Each one's heading carries its id, and any attached files are listed under
-    it with their file ids; get_announcement_attachment takes both.
+    it with their file ids; get_announcement_attachment takes both. Read from
+    the course's offline copy, like course_contents.
     """
-    lines = []
-    for n in _get(f"/d2l/api/le/{LE}/{_resolve(org_unit_id)}/news/"):
+    copy = _course(_resolve(org_unit_id), ctx)
+    lines = [_saved_note(copy)]
+    for n in copy["news"]:
         lines.append(
             f"## [{n['Id']}] {n['Title']} ({(n.get('StartDate') or '')[:10]})\n"
             f"{n['Body']['Text']}"
@@ -1371,17 +1601,23 @@ def list_announcements(org_unit_id: int) -> str:
             f"\nAttachment [{a['FileId']}] {a['FileName']} ({a.get('Size', '?')} bytes)"
             for a in n.get("Attachments") or []
         )
-    return "\n\n".join(lines) or "No announcements."
+    return "\n\n".join(lines) if len(lines) > 1 else "No announcements."
 
 
 @mcp.tool()
-def get_announcement_attachment(org_unit_id: int, news_id: int, file_id: int) -> str:
+def get_announcement_attachment(
+    org_unit_id: int, news_id: int, file_id: int, ctx: Context | None = None
+) -> str:
     """Fetch a file attached to an announcement: its text, or where it was saved.
 
     The ids come from list_announcements: news_id from the heading, file_id
     from the Attachment line. Handled like get_file handles a content file.
     """
     ou = _resolve(org_unit_id)
+    copy = _course(ou, ctx)
+    saved = copy["files"].get(f"{news_id}/{file_id}")
+    if saved:
+        return _saved_text(copy["root"] / saved, Path(saved).name)
     with _client() as c:
         r = c.get(f"/d2l/api/le/{LE}/{ou}/news/{news_id}/attachments/{file_id}")
     if r.status_code in (401, 403):
@@ -1396,7 +1632,7 @@ def get_announcement_attachment(org_unit_id: int, news_id: int, file_id: int) ->
         )
     r.raise_for_status()
     name = _filename(r, f"attachment-{file_id}")
-    return _file_text(r, name, name)
+    return _file_text(r.content, r.headers.get("content-type", ""), name, name)
 
 
 def _term_units(want: tuple | None = None) -> list:
@@ -1485,6 +1721,122 @@ def calendar(days: int = 7, org_unit_id: int = 0) -> str:
     return "\n".join(lines).strip()
 
 
+def _topic_parents(modules, topic_id: int, parents=()) -> tuple | None:
+    """The unit folders a topic is saved under, as download_course names them."""
+    for module in modules or []:
+        path = parents + (_safe(module.get("Title", "unit")),)
+        if any(t["TopicId"] == topic_id for t in module.get("Topics") or []):
+            return path
+        found = _topic_parents(module.get("Modules"), topic_id, path)
+        if found:
+            return found
+    return None
+
+
+def _video_link(ou: int, topic, disposition: str) -> str:
+    """A short-lived signed link to a media-service video's file.
+
+    Videos live in Brightspace's media service, not the course's file area,
+    and the session does not reach it. The player gets in the way done here:
+    the topic's page carries an anti-forgery token, which buys a short-lived
+    bearer token from DTU Learn, which buys a signed link from the media
+    service. The service only answers with the topic named as context; the
+    same request without it is refused (403)."""
+    parts = (topic.get("Url") or "").split(":")
+    if parts[:3] != ["d2l", "brightspace", "content"] or len(parts) < 7:
+        raise RuntimeError(f"'{topic.get('Title')}' is not in Brightspace's media service.")
+    region, tenant = parts[3], parts[4]
+    content, _, revision = parts[6].partition("/")
+    with _client() as c:
+        page = c.get(f"/d2l/le/lessons/{ou}/topics/{topic['TopicId']}", headers={"Accept": "text/html"})
+        xsrf = re.search(r"XSRF\.Token','([^']+)'", page.text)
+        if not xsrf:
+            raise RuntimeError(
+                "DTU Learn handed out no page token, so the session has probably "
+                "expired. Run 'uv run --script server.py login' again."
+            )
+        r = c.post("/d2l/lp/auth/oauth2/token", data={"scope": "*:*:*"},
+                   headers={"X-Csrf-Token": xsrf.group(1)})
+        r.raise_for_status()
+        token = r.json()["access_token"]
+    r = httpx.get(
+        f"https://api.{region}.content-service.brightspace.com/api/{tenant}/content/{content}"
+        f"/revisions/{revision or 'latest'}/resources/transcodes/signed-url",
+        params={"disposition": disposition, "contextType": "topic", "contextId": f"{topic['TopicId']}:{ou}"},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    if r.status_code in (401, 403):
+        raise RuntimeError(f"The media service refused '{topic.get('Title')}' (HTTP {r.status_code}).")
+    r.raise_for_status()
+    try:
+        answer = r.json()
+    except ValueError:
+        return r.text.strip().strip('"')
+    if isinstance(answer, dict):
+        answer = answer.get("value") or answer.get("url") or answer.get("Url") or answer.get("signedUrl")
+    if not isinstance(answer, str) or not answer.startswith("https://"):
+        raise RuntimeError("The media service answered without a link.")
+    return answer
+
+
+def _video_topic(org_unit_id: int, topic_id: int) -> tuple:
+    ou = _resolve(org_unit_id)
+    copy = _course(ou)
+    topic = _toc_index(copy["modules"])[0].get(topic_id)
+    if topic is None or topic.get("TypeIdentifier") != "ContentService":
+        raise RuntimeError(f"Topic {topic_id} is not a video in that course. Run course_contents.")
+    return ou, copy, topic
+
+
+def video_link(org_unit_id: int, topic_id: int) -> str:
+    """Print a short-lived link to play a video topic, for the LearnHarness view.
+
+    Not an MCP tool: the link is a credential for as long as it lasts.
+    """
+    ou, _, topic = _video_topic(org_unit_id, topic_id)
+    return _video_link(ou, topic, "inline")
+
+
+def download_video(org_unit_id: int, topic_id: int) -> str:
+    """Download a video topic into its course's offline copy, next to its unit's files.
+
+    Videos are left out of download_course, being large; this fetches one on
+    demand. The course's record notes where it went, and a refresh keeps it.
+    """
+    ou, copy, topic = _video_topic(org_unit_id, topic_id)
+    root = copy["root"]
+    dest = root.joinpath(*(_topic_parents(copy["modules"], topic_id) or ()), _safe(topic.get("Title", "video")) + ".mp4")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    # DTU_PROGRESS asks for a line per percent on stderr, "progress <bytes>
+    # <total>", for the LearnHarness plugin to show; a terminal gets the
+    # status line instead.
+    report, shown = os.environ.get("DTU_PROGRESS"), -1
+    with httpx.stream("GET", _video_link(ou, topic, "attachment"), timeout=60, follow_redirects=True) as r:
+        r.raise_for_status()
+        total, done = int(r.headers.get("content-length") or 0), 0
+        with part.open("wb") as out:
+            for chunk in r.iter_bytes(1 << 20):
+                out.write(chunk)
+                done += len(chunk)
+                if total:
+                    _status(("1", f"  {topic.get('Title')} "), ("2", f"{done / 1e6:.0f}/{total / 1e6:.0f} MB"))
+                    if report and done * 100 // total != shown:
+                        shown = done * 100 // total
+                        print(f"progress {done} {total}", file=sys.stderr, flush=True)
+    part.replace(dest)
+    _status(("32", "  ✓ "), ("", topic.get("Title", "")), keep=True)
+    # Note it in the course's record, swapped in whole like download_course's.
+    record_path = root / f"_course-{ou}.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record.setdefault("videos", {})[str(topic_id)] = dest.relative_to(root).as_posix()
+    tmp = record_path.with_name(record_path.name + ".part")
+    tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(record_path)
+    return f"Saved {dest} ({dest.stat().st_size / 1e6:.0f} MB)."
+
+
 COMMANDS = {
     f.__name__: f
     for f in (
@@ -1493,8 +1845,12 @@ COMMANDS = {
         course_contents,
         unit_info,
         get_file,
+        get_pdf_pages,
+        video_link,
+        download_video,
         list_assignments,
         list_announcements,
+        get_announcement_attachment,
         calendar,
         download_course,
         download_term,
@@ -1510,6 +1866,12 @@ def _usage() -> str:
         lines.append(f"  {name} {params}".rstrip())
         lines.append(f"      {inspect.getdoc(fn).splitlines()[0]}")
     lines += [
+        "  tools",
+        "      Print the tools as JSON, for clients that speak no MCP (LearnHarness)",
+        "  file_text <path>",
+        "      Print a saved file's text, as get_file does a topic's",
+        "  --json <command> [arguments]",
+        "      Print a command's result as MCP content blocks, images included",
         "",
         "With no command, runs as an MCP server on stdin/stdout, which is how",
         "Claude Code, Cursor and other MCP clients start it.",
@@ -1539,10 +1901,31 @@ if __name__ == "__main__":
     # A command name as the first argument runs that one thing and prints the
     # result, for pasting into claude.ai or any other chat. No server, no
     # network exposure.
+    # --json prints the result as MCP content blocks, images included, for
+    # the LearnHarness plugin. Plain output names an image instead.
+    as_json = sys.argv[1:2] == ["--json"]
+    if as_json:
+        del sys.argv[1]
     if len(sys.argv) > 1:
         name = sys.argv[1]
         if name in ("-h", "--help", "help"):
             print(_usage())
+            raise SystemExit(0)
+        if name == "file_text" and len(sys.argv) == 3:
+            # A saved file's text, as get_file gives a topic's: for files a
+            # course links to, which have no topic. Command line only; the
+            # LearnHarness plugin checks the path is one a course saved.
+            path = Path(sys.argv[2])
+            print(_saved_text(path, path.name))
+            raise SystemExit(0)
+        if name == "tools":
+            # Names, descriptions and argument schemas as MCP clients see
+            # them, so the LearnHarness plugin offers the same tools.
+            tools = anyio.run(mcp.list_tools)
+            print(json.dumps([
+                {"name": t.name, "description": t.description, "parameters": t.input_schema}
+                for t in tools
+            ], indent=1))
             raise SystemExit(0)
         if name not in COMMANDS:
             raise SystemExit(f"Unknown command {name!r}.\n\n{_usage()}")
@@ -1559,8 +1942,16 @@ if __name__ == "__main__":
             # outcomes here; a traceback only buries the message.
             _status()  # or the message lands on the end of a download's status line
             raise SystemExit(str(e))
+        except httpx.TransportError as e:
+            # No network, or DTU Learn down: also an ordinary outcome.
+            _status()
+            raise SystemExit(f"Could not reach DTU Learn or Brightspace: {e}")
         if result is not None:
-            print(result)
+            blocks = _blocks(result)
+            print(json.dumps(blocks) if as_json else "\n".join(
+                b.get("text") or f"[{b['mimeType']} image, {len(b['data']) * 3 // 4096} KB]"
+                for b in blocks
+            ))
         raise SystemExit(0)
 
     # Setting DTU_MCP_PATH switches on the remote transport that claude.ai

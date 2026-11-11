@@ -23,9 +23,11 @@ wanted = {"_flatten", "_profiles", "_term", "_pdf_text", "_TextExtractor",
           "_calendar_lines", "_local", "_safe", "_file_topics", "_index_html",
           "_d2l_file", "_linked_dest", "_relink",
           "_search_pages", "_search_entry", "_landing_html",
-          "_each", "_status", "_summary", "_code"}
+          "_each", "_status", "_summary", "_code",
+          "_copies", "_copy", "_saved_text", "_file_text", "_decode",
+          "_numbered_pages"}
 constants_extra = {"OOXML_MEMBERS"}
-constants = {"COLUMNS", "BASE", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
+constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT"}
 
 
 def needed(node):
@@ -38,6 +40,7 @@ def needed(node):
 mod = types.ModuleType("m")
 mod.__dict__.update(
     configparser=configparser,
+    mimetypes=__import__("mimetypes"),
     os=os,
     re=re,
     subprocess=subprocess,
@@ -63,7 +66,11 @@ toc = [
         "ModuleId": 1,
         "Title": "Week 1",
         "Description": {"Text": "Tuesday 1/09", "Html": ""},
-        "Topics": [{"TopicId": 11, "Title": "Slides", "TypeIdentifier": "File"}],
+        "Topics": [
+            {"TopicId": 11, "Title": "Slides (2026)", "TypeIdentifier": "File"},
+            # Copied from last year without its file: counted, not listed.
+            {"TopicId": 10, "Title": "Slides (2025)", "TypeIdentifier": "File", "IsBroken": True},
+        ],
         "Modules": [
             {
                 "ModuleId": 2,
@@ -90,8 +97,8 @@ toc = [
     {"ModuleId": 3, "Title": "Empty"},
 ]
 assert mod._flatten(toc) == [
-    "# [1] Week 1 (info)",
-    "  - [11] Slides (File)",
+    "# [1] Week 1 (info) [1 broken topic not listed]",
+    "  - [11] Slides (2026) (File)",
     "  # [2] Exercises",
     "    - [12] Sheet (Link)",
     "    - [13] Notes (Link) https://courses.compute.dtu.dk/02242/",
@@ -364,6 +371,10 @@ B = mod.BASE
 assert mod._d2l_file("/content/enforced/1-X/a.png") == B + "/content/enforced/1-X/a.png"
 assert mod._d2l_file(B + "/content/a.pdf?ou=1&amp;x=2") == B + "/content/a.pdf?ou=1&x=2"
 assert mod._d2l_file(B + "/d2l/common/dialogs/quickLink/quickLink.d2l?ou=1") is None
+# A short link to a course file is one: DTU Learn redirects it to the file.
+ql = "/d2l/common/dialogs/quickLink/quickLink.d2l?ou=1&amp;type=coursefile&amp;fileId=Notes.pdf"
+assert mod._d2l_file(ql) == B + ql.replace("&amp;", "&"), mod._d2l_file(ql)
+assert mod._d2l_file(B + "/d2l/common/dialogs/quickLink/quickLink.d2l?ou=1&type=content&rcode=x") is None
 assert mod._d2l_file("content/a.pdf") is None      # relative: already local in the index
 assert mod._d2l_file("https://elsewhere.dk/content/a.png") is None
 
@@ -449,5 +460,38 @@ assert got == """\
 
   Open /dl/index.html to see every course.""", got
 assert mod._summary([("02242", None, [("could not download", ["timed out"])])]).startswith("  ✗ 02242")
+
+# --- offline copies ------------------------------------------------------------
+# The reading tools find a course's newest copy by its id, and read saved files
+# by extension: a MATLAB .m file is text, though guess_type calls it Mathematica.
+with tempfile.TemporaryDirectory() as tmp:
+    mod.DOWNLOADS = Path(tmp)
+    assert mod._copy(326352) is None
+    for stamp, folder in enumerate(("Old name", "02231 Cryptography"), 1):
+        root = Path(tmp, folder)
+        root.mkdir()
+        record = root / "_course-326352.json"
+        record.write_text(json.dumps({"ou": 326352, "name": folder, "saved": folder,
+                                      "modules": [], "news": [], "files": {"7": "Week 1/rsa.m"}}))
+        os.utime(record, (stamp, stamp))
+    copy = mod._copy(326352)
+    assert copy["name"] == "02231 Cryptography" and copy["root"] == root, copy
+    assert mod._copy(326350) is None
+    (root / "Week 1").mkdir()
+    (root / "Week 1" / "rsa.m").write_text("n = p * q; % modulus\n")
+    assert mod._saved_text(root / copy["files"]["7"], "rsa") == "n = p * q; % modulus\n"
+    (root / "page.html").write_text("<p>Øvelse</p><p>two</p>", encoding="utf-8")
+    got = mod._saved_text(root / "page.html", "Page")
+    assert got == "[Page]\n\nØvelse\ntwo", got
+    (root / "blob.bin").write_bytes(b"\x89PNG\x00\xff")
+    got = mod._saved_text(root / "blob.bin", "blob")
+    assert got.startswith("No text could be extracted from blob.bin"), got
+assert mod._decode("æ".encode("cp1252"), "text/plain; charset=windows-1252") == "æ"
+assert mod._decode(b"x", "text/plain; charset=nonsense") == "x"
+
+# pdftotext ends every page with a form feed; get_file numbers them instead,
+# so a reader can ask get_pdf_pages for the page with the figure.
+got = mod._numbered_pages("\n  Title\n\fP = NP?\n\f\f")
+assert got == "[Page 1]\n  Title\n\n[Page 2]\nP = NP?\n\n[Page 3]\n", repr(got)
 
 print("OK")

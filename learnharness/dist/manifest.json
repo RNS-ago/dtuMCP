@@ -1,0 +1,11 @@
+{
+	"apiVersion": 1,
+	"id": "dtu-learn",
+	"name": "DTU Learn",
+	"version": "1.0.0",
+	"minAppVersion": "0.6.0",
+	"description": "DTU Learn course material for your tutors, and a view to browse it. Runs dtuMCP's server.py.",
+	"main": "main.js",
+	"backend": "backend.cjs",
+	"styles": "styles.css"
+}

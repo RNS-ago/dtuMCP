@@ -1,0 +1,189 @@
+/* Two columns as tall as the window allows (main.js measures it), each with
+   a fixed top, the checkbox or the heading, over a part that scrolls on its
+   own: the tree, or what the pane shows. */
+.dtu-learn {
+	display: grid;
+	grid-template-columns: minmax(15rem, var(--dtu-learn-left, 40%)) .75rem minmax(20rem, 1fr);
+	grid-template-rows: minmax(0, 1fr);
+	gap: .375rem;
+	box-sizing: border-box;
+	height: var(--dtu-learn-height, auto);
+	padding: 1rem 1.25rem;
+}
+.dtu-learn-tree, .dtu-learn-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+/* The bar between them, a thin line that thickens under the pointer, while
+   dragged and when focused for the arrow keys. */
+.dtu-learn-split { position: relative; cursor: col-resize; touch-action: none; outline: none; }
+.dtu-learn-split::after {
+	content: ""; position: absolute; inset: 0 calc(50% - .5px);
+	background: var(--border); border-radius: 2px;
+}
+.dtu-learn-split:hover::after, .dtu-learn-split:focus-visible::after, .dtu-learn-resizing .dtu-learn-split::after {
+	inset: 0 calc(50% - 2px); background: color-mix(in oklab, var(--foreground) 40%, transparent);
+}
+.dtu-learn-resizing { cursor: col-resize; user-select: none; }
+.dtu-learn-tree > :not(.dtu-learn-tree-scroll) { flex: none; }
+.dtu-learn-tree-scroll, .dtu-learn-scroll { flex: 1; min-height: 0; overflow: auto; }
+/* The title and its buttons, above the part of the pane that scrolls. */
+.dtu-learn-head {
+	display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+	flex: none; padding: .5rem 0; border-bottom: 1px solid var(--border);
+}
+.dtu-learn-head h2 { margin: 0; font-size: 1rem; }
+.dtu-learn-text { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .875rem; line-height: 1.55; }
+.dtu-learn-head > div { display: flex; align-items: center; gap: .25rem; }
+/* Zoomed out, the pages sit in the middle of the pane; zoomed in, they start
+   at its left edge and scroll sideways. */
+.dtu-learn-pages { display: grid; gap: .75rem; margin: .75rem auto 0; }
+.dtu-learn-page { position: relative; width: 100%; background: #fff; box-shadow: 0 0 0 1px var(--border); }
+.dtu-learn-page canvas { display: block; width: 100%; height: 100%; }
+
+/* pdf.js's text layer, the rules it needs from its viewer's pdf_viewer.css
+   (6.4.299, Apache-2.0): transparent text placed over each page's picture,
+   there to be selected and copied. */
+.dtu-learn-page .textLayer {
+	color-scheme: only light;
+	position: absolute; inset: 0; overflow: clip;
+	text-align: initial; line-height: 1; letter-spacing: normal; word-spacing: normal;
+	text-size-adjust: none; forced-color-adjust: none;
+	transform-origin: 0 0; z-index: 0;
+	--min-font-size: 1;
+	--text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+	--min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.dtu-learn-page .textLayer :is(span, br) {
+	color: transparent; position: absolute; white-space: pre; cursor: text;
+	transform-origin: 0% 0%; user-select: text;
+}
+.dtu-learn-page .textLayer > :not(.markedContent),
+.dtu-learn-page .textLayer .markedContent span:not(.markedContent) {
+	z-index: 1;
+	--font-height: 0;
+	font-size: calc(var(--text-scale-factor) * var(--font-height));
+	--scale-x: 1;
+	--rotate: 0deg;
+	transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.dtu-learn-page .textLayer .markedContent { display: contents; }
+.dtu-learn-page .textLayer span[role="img"] { user-select: none; cursor: default; }
+.dtu-learn-page .textLayer ::selection { background: rgb(0 0 255 / .25); background: color-mix(in srgb, AccentColor, transparent 50%); color: transparent; }
+.dtu-learn-page .textLayer br::selection { background: transparent; }
+.dtu-learn-page .textLayer .endOfContent {
+	display: block; position: absolute; inset: 100% 0 0; z-index: 0;
+	cursor: default; user-select: none;
+}
+.dtu-learn-page .textLayer.selecting .endOfContent { top: 0; }
+
+/* The PDF's own links, above its text so a click on one follows it. */
+.dtu-learn-links { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.dtu-learn-links a { position: absolute; pointer-events: auto; cursor: pointer; border-radius: 2px; }
+.dtu-learn-links a:hover { background: rgb(0 100 255 / .15); }
+.dtu-learn-text a { color: inherit; text-decoration: underline; cursor: pointer; }
+
+/* A unit's or an announcement's own text, from its HTML. */
+.dtu-learn-rich { font-size: .875rem; line-height: 1.55; overflow-wrap: anywhere; }
+.dtu-learn-rich :is(p, ul, ol, table, blockquote, pre) { margin: .4rem 0; }
+.dtu-learn-rich :is(h1, h2, h3, h4, h5, h6) { font-size: 1em; margin: .75rem 0 .25rem; }
+.dtu-learn-rich a { color: inherit; text-decoration: underline; cursor: pointer; }
+.dtu-learn-rich table { border-collapse: collapse; }
+.dtu-learn-rich :is(td, th) { border: 1px solid var(--border); padding: .2rem .45rem; text-align: left; vertical-align: top; }
+.dtu-learn-video { display: block; width: 100%; max-height: 70vh; margin-top: .75rem; background: #000; border-radius: 6px; }
+/* The video filling the window. LearnHarness draws its own title bar: its
+   top strip drags the window, which takes clicks there even over this, so
+   the whole player says it is not for dragging; and the window's own buttons
+   float over the top right, so Exit sits top left. */
+.dtu-learn-player.dtu-learn-fill {
+	position: fixed; inset: 0; z-index: 2147483000;
+	display: flex; align-items: center; justify-content: center; background: #000;
+	-webkit-app-region: no-drag; app-region: no-drag;
+}
+:is(.dtu-learn-fill, .dtu-learn-player:fullscreen) .dtu-learn-video {
+	width: 100%; height: 100%; max-height: none; margin: 0; border-radius: 0; object-fit: contain;
+}
+.dtu-learn-exit { display: none; }
+.dtu-learn-progress { display: block; width: 100%; height: .5rem; margin-top: .75rem; accent-color: var(--foreground); }
+.dtu-learn-fill .dtu-learn-exit {
+	display: block; position: absolute; top: 1rem; left: 1rem;
+	-webkit-app-region: no-drag; app-region: no-drag;
+	font: inherit; font-size: .8125rem; color: #fff; cursor: pointer;
+	background: rgb(0 0 0 / .55); border: 1px solid rgb(255 255 255 / .4); border-radius: 6px; padding: .3rem .7rem;
+	transition: background-color .12s ease, transform .08s ease;
+}
+.dtu-learn-fill .dtu-learn-exit:hover { background: rgb(255 255 255 / .18); border-color: rgb(255 255 255 / .7); }
+.dtu-learn-fill .dtu-learn-exit:active { background: rgb(255 255 255 / .28); transform: scale(.96); }
+.dtu-learn-contents { margin: .25rem 0; padding-left: 1.2rem; font-size: .875rem; line-height: 1.7; }
+
+/* A link's preview fills the surface: heading, address, then the page. The
+   heading leaves room on the right for the surface's own close button. */
+.dtu-learn-preview { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; padding: 1rem 1.25rem; }
+.dtu-learn-preview .dtu-learn-head { padding-right: 3rem; }
+.dtu-learn-preview .dtu-learn-head h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dtu-learn-url { margin: .25rem 0 .5rem; font-size: .75rem; overflow-wrap: anywhere; }
+.dtu-learn-preview .dtu-learn-scroll { flex: 1; min-height: 0; overflow: auto; }
+/* A framed page fills what is left under its address; its text scrolls. */
+.dtu-learn-web.framed { display: flex; flex-direction: column; height: 100%; }
+.dtu-learn-web.framed .dtu-learn-frame { flex: 1; min-height: 0; height: auto; }
+.dtu-learn-frame { display: block; width: 100%; height: 100%; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+.dtu-learn-muted { color: color-mix(in oklab, var(--foreground) 60%, transparent); }
+.dtu-learn-error { color: #d14343; }
+.dtu-learn-course { display: inline-flex; align-items: center; gap: .5rem; }
+/* Each announcement a card of its own: title, its date under it, its text. */
+.dtu-learn-news { padding-top: .75rem; }
+.dtu-learn-news > p { margin: 0 0 .75rem; }
+.dtu-learn-news article {
+	margin: 0 0 1rem; padding: .75rem 1rem;
+	border: 1px solid var(--border); border-radius: 8px;
+	background: color-mix(in oklab, var(--foreground) 3%, transparent);
+}
+.dtu-learn-news h3 { margin: 0; font-size: .95rem; }
+.dtu-learn-news article > .dtu-learn-muted { margin: .15rem 0 .6rem; font-size: .75rem; }
+.dtu-learn-news .dtu-learn-attachment { margin: .5rem 0 0; font-size: .8125rem; }
+.dtu-learn-toggle { display: flex; align-items: center; gap: .4rem; margin-bottom: .5rem; font-size: .8125rem; cursor: pointer; }
+/* Buttons that answer the pointer: a tint under it, a slight sink and a
+   deeper tint while pressed, all quick. --tint is the foreground at a share. */
+.dtu-learn, .dtu-learn-preview, .dtu-learn-player { --tint-hover: color-mix(in oklab, var(--foreground) 9%, transparent); --tint-press: color-mix(in oklab, var(--foreground) 16%, transparent); }
+
+/* Titles in the tree and in lists, which open what they name. */
+.dtu-learn-link {
+	all: unset; cursor: pointer; border-radius: 4px; padding: 0 .25rem; margin: 0 -.25rem;
+	transition: background-color .12s ease, transform .08s ease;
+}
+.dtu-learn-link:hover { background: var(--tint-hover); text-decoration: underline; text-underline-offset: 2px; }
+.dtu-learn-link:active { background: var(--tint-press); transform: translateY(.5px); }
+
+/* Download and Refresh beside a course. */
+.dtu-learn-action {
+	font: inherit; font-size: 11px; font-weight: 500; color: inherit; cursor: pointer;
+	background: color-mix(in oklab, var(--foreground) 4%, transparent);
+	border: 1px solid var(--border); border-radius: 6px; padding: .05rem .5rem;
+	box-shadow: 0 1px 0 color-mix(in oklab, var(--foreground) 12%, transparent);
+	transition: background-color .12s ease, border-color .12s ease, box-shadow .08s ease, transform .08s ease;
+}
+.dtu-learn-action:hover:not(:disabled) {
+	background: var(--tint-hover); border-color: color-mix(in oklab, var(--foreground) 35%, transparent);
+}
+.dtu-learn-action:active:not(:disabled) { background: var(--tint-press); box-shadow: none; transform: translateY(1px) scale(.97); }
+.dtu-learn-action:disabled { opacity: .5; cursor: default; }
+.dtu-learn-link:focus-visible, .dtu-learn-action:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+/* The app's own buttons above a PDF or a video (Open file, zoom, Full
+   screen, Copy link): the app draws them, but each sits in a span of ours,
+   which is :active while the button in it is pressed, so the span carries
+   the lift and the sink. Their pointer is set on the button, if there is one
+   as expected; nothing else of the app's is restyled. */
+.dtu-learn-head > div > span { display: inline-flex; transition: transform .08s ease; }
+.dtu-learn-head > div > span:hover { transform: translateY(-1px); }
+.dtu-learn-head > div > span:active { transform: translateY(0) scale(.95); }
+.dtu-learn-head > div > span > button:not(:disabled) { cursor: pointer; }
+/* No movement for whoever asks the system for less of it. */
+@media (prefers-reduced-motion: reduce) {
+	.dtu-learn *, .dtu-learn-preview *, .dtu-learn-player * { transition: none !important; }
+	.dtu-learn-link:active, .dtu-learn-action:active, .dtu-learn-head > div > span:hover,
+	.dtu-learn-head > div > span:active, .dtu-learn-fill .dtu-learn-exit:active { transform: none; }
+}
+/* Narrow, the columns stack and the app scrolls them as one page. */
+@media (max-width: 48rem) {
+	.dtu-learn { grid-template-columns: 1fr; grid-template-rows: none; height: auto; }
+	.dtu-learn-split { display: none; }
+	.dtu-learn-tree-scroll, .dtu-learn-scroll { overflow: visible; }
+}

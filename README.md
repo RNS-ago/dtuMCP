@@ -100,6 +100,92 @@ Paste its contents into:
 - **Cursor** — `~/.cursor/rules/dtu-learn.mdc`, or Settings → Rules.
 - **Claude Desktop** — a Project's custom instructions.
 
+## LearnHarness
+
+`learnharness/` is a LearnHarness plugin. It gives the teacher, practice and
+prober agents every tool below, named `dtu_list_courses`, `dtu_get_file` and
+so on, with instructions on when to use them, so `dtu-learn-prompt.md` is not
+needed there. It also adds a **DTU Learn** view to the sidebar: your courses by
+term and, for each downloaded course, its units and topics. Click a course's
+name to open it and read its announcements beside the tree, with their
+attachments; a unit's name opens it and shows its own text and what it holds.
+Unit text and announcements are shown from their HTML, so their links work,
+rebuilt from a short list of plain tags with every attribute but a link's
+address left out; scripts, styles, frames and forms are dropped, and a
+picture shows as its description. Click a topic to
+read it there too: a PDF shows its pages as they look, equations
+and figures included, and anything else its text. A PDF's text can be selected
+and copied, to quote it to your agent, and the buttons above it or Ctrl+scroll
+(a touchpad pinch) zoom it; **100%** fits it to the width again.
+
+Links work in texts, announcements and PDFs. A click previews the page inside
+LearnHarness, over the view, and closing the preview comes back to where you
+were. Ctrl+click or a middle click opens it in your browser instead, and the
+preview has **Copy link** and **Open in browser**. The preview shows the page
+itself where the site lets other apps frame it, with **Show text** for its
+text, and only its text where the site does not (GitHub, for one). A PDF's
+links to its own pages scroll there.
+
+A DTU Learn page cannot be framed: the frame has no DTU Learn session, and
+DTU's sign-in page refuses to be framed itself (`X-Frame-Options: DENY`). So a
+DTU Learn link to a topic or a unit of a downloaded course previews that topic
+or unit from the saved copy, a PDF drawn as in the pane. Short links
+(`quickLink.d2l?...&rcode=...`) name their target by a code, so the plugin asks
+DTU Learn once, with your session, where one leads. A link to a file in the
+course's file area, `/content/...` or a short link to a course file
+(`type=coursefile`), previews the copy `download_course` saved, a PDF in the
+viewer and anything else as text, with **Open file**. Anything else, such as a
+quiz, a discussion, a checklist or a course you have not downloaded, says why
+and offers to open it in your browser.
+
+A video plays in the pane, streamed from Brightspace's media service, where
+DTU Learn keeps videos apart from the course's files. Videos are large, so
+`download_course` leaves them out: **Download**, whose tooltip gives the
+video's size, shows its progress as it saves one into the course
+folder, next to its unit's files, and from then on **Open file** plays it in
+your video player, offline too, and the tree marks it `video, saved`. A course
+refresh keeps it. The media service does not take the DTU Learn session; the
+plugin does what the player does, getting a short-lived token from DTU Learn
+with your session and, with it, a signed link to the video, which names the
+topic it belongs to. If LearnHarness will not play the stream, the pane says
+so; Download and Open file still work. LearnHarness does not let a page
+element take the screen, so the player's own full-screen button is hidden;
+**Full screen** has the video fill the window instead, until Escape, a double
+click or **Exit full screen**.
+
+The bar between the tree and the pane can be dragged to share the width
+differently, or focused and moved with the arrow keys; a double click puts it
+back. The width is remembered, and a PDF is redrawn sharp at its new size. **Open file** opens a saved
+file in its usual app. **Download** or **Refresh** on a course saves or updates its offline
+copy.
+
+Install it, and again after any change to `server.py`:
+
+```bash
+learnharness/install.sh
+```
+
+That copies the plugin, `server.py` and its tool list into
+`~/.config/LearnHarness/data/plugins/dtu-learn/dist/`. If **Settings →
+Community plugins** shows a different plugins directory, pass that one as the
+argument. Restart LearnHarness, which loads plugin code only at start, and
+enable **DTU Learn** under Settings → Community plugins.
+
+The plugin runs its copy of `server.py` through `uv`. It looks for `uv` on
+`PATH`, in `~/.local/bin` and in `~/.cargo/bin`, since an app started from a
+desktop entry does not get your shell's `PATH`. It reads the same session file
+as every other client, so one `login` covers it too.
+
+PDFs are drawn with [pdf.js](https://mozilla.github.io/pdf.js/) 6.4.299
+(Apache-2.0, licence in `learnharness/dist/assets/pdfjs/`), only its two
+built modules, renamed from `.mjs` to `pdf.min.js` and `pdf.worker.min.js`
+because LearnHarness does not serve `.mjs` as JavaScript. A page is drawn when it
+comes near the screen and cleared when it is far off, so a long deck holds only
+a few pages' pixels. Left out to keep the plugin small: the character maps for
+CJK fonts, the 14 standard fonts for PDFs that do not embed theirs, and the
+JPEG 2000 decoder. Such a PDF still draws, with substitute fonts or without
+those images; if one cannot be drawn at all, its text is shown instead.
+
 ## Tools
 
 | Tool | What it returns |
@@ -108,12 +194,27 @@ Paste its contents into:
 | `course_contents(org_unit_id)` | Unit/topic tree, with their IDs and any external links |
 | `unit_info(org_unit_id, unit_id)` | One unit's own text, plus its contents |
 | `get_file(org_unit_id, topic_id)` | A topic's content, whatever kind it is (see below) |
+| `get_pdf_pages(org_unit_id, topic_id, first_page, last_page=0)` | Pages of a PDF topic as images, for figures and notation |
 | `list_assignments(org_unit_id)` | Assignment folders and due dates |
 | `list_announcements(org_unit_id)` | Course announcements |
 | `get_announcement_attachment(org_unit_id, news_id, file_id)` | A file attached to an announcement, read like `get_file` |
 | `calendar(days=7, org_unit_id=0)` | What is scheduled in the next `days` days |
 | `download_course(org_unit_id)` | The whole course saved for offline use, with an `index.html` to browse it |
 | `download_term(term="")` | Every course of a term saved the same way; the newest term if none is given |
+
+Course material is fetched once and then read from disk. `course_contents`,
+`unit_info`, `get_file`, `list_announcements` and
+`get_announcement_attachment` answer from the course's offline copy (see
+`download_course` below). The first of them to ask about a course with no
+copy downloads it, which takes a minute or two; every later call is local.
+`course_contents` and `list_announcements` start with the date the copy was
+saved. Run `download_course` again to bring a copy up to date. `calendar` and
+`list_assignments` always ask DTU Learn.
+
+Copies keep working when the session has expired or there is no network.
+`list_courses` then lists the courses saved offline, and says why DTU Learn
+could not be reached. A copy made before this existed has no `_course-<id>.json`,
+so its course is downloaded again on first use.
 
 Anywhere an `org_unit_id` is asked for, the DTU course number works too:
 `course_contents 02231` is the same as `course_contents 326352`. A course
@@ -131,7 +232,11 @@ the unit; `list_announcements` has those, with the ids of any attached files.
 content tree and saves every file under `~/Downloads/dtulearn/<course>/<unit>/`,
 eight at a time, naming each file after its topic so a second run overwrites
 instead of piling up copies. Announcement attachments go in
-`<course>/Announcements/`. Beside them it writes `index.html`, one page laid
+`<course>/Announcements/`. `_course-<id>.json` keeps the content tree, the
+announcements, where each file went, and which saved file each of the pages'
+links to the course's file area stands for; the reading tools and the
+LearnHarness view answer from it.
+Beside them it writes `index.html`, one page laid
 out like the course site, with two tabs. Content has a tree of the units on
 the left, folded until you open a branch, and on the right every unit with its
 own text and its topics, each linked to the saved file and tagged with its
@@ -165,17 +270,24 @@ numbers and in one course came to 235 MB. Reading PDFs needs `pdftotext`, as
 for `get_file`; without it PDFs are found by title only. Tabs and the tree work
 without JavaScript; the search box needs it.
 
-Links and videos hold no file, so the index links to them online. Neither do
+Links hold no file, and videos, being large, are left out; `download_video`
+saves one on demand. The index links to both online. Neither do
 broken topics: a course copied from an earlier offering keeps entries whose
-file did not come along, which D2L flags and `course_contents` prints as
-`(File, broken)`.
+file did not come along, which D2L flags. They often sit beside this year's
+topic of nearly the same title, such as `Slides from Lecture 1 (2025-09-02)`
+next to `(2026-09-01)`, so `course_contents` leaves them out and only counts
+them on their unit's line: `# [1105457] Week 1 [2 broken topics not listed]`.
+The LearnHarness view hides them too; untick **Hide broken topics** to list
+them, marked broken.
 
 Unit text, announcements and HTML pages can show pictures and link to files in
 the course's file area (`/content/...` on DTU Learn). Those are fetched too,
 kept under `<course>/_linked/` by their DTU Learn path, and the pages are
-pointed at the copies. Quicklinks from one page to another topic, quiz or tool
-stay online: D2L names their target with an opaque code, so there is no local
-file to point them at. Pictures and links on other websites stay online too.
+pointed at the copies. So are short links to a course file
+(`quickLink.d2l?...&type=coursefile`), which DTU Learn redirects to the file.
+Other short links, to another topic, a quiz or a tool, stay online: D2L names
+their target with an opaque code, so there is no local file to point them at.
+Pictures and links on other websites stay online too.
 
 `download_term` does the same for every course of a term, written like the
 headings of `list_courses` (`"Fall 2026"`, `"Jan 25"`), or the newest term
@@ -206,7 +318,8 @@ when the output is not a terminal.
 
 MCP clients get the same line as progress notifications, one per update,
 if they ask for progress when they call the tool. The counts are in the
-message; the progress number only rises.
+message; the progress number only rises. The reading tools report the same
+way while they download a course on first use.
 
 `calendar` reads the Brightspace calendar in local time: lectures and
 exercise sessions with their rooms, hand-in deadlines, and the dates material
@@ -232,8 +345,16 @@ assistant, so the content has to come back in the reply itself.
 PDFs are saved there too, but `get_file` returns their extracted text: a 34-page
 lecture deck is about 4k tokens as text against roughly 50k as page images.
 Extraction needs `pdftotext` from poppler-utils; without it, or for a scanned
-PDF with no text layer, `get_file` just returns the path. Figures and heavy
-mathematical notation do not survive extraction, so the reply names the file.
+PDF with no text layer, `get_file` just returns the path. The text heads each
+page `[Page n]`.
+
+Figures and heavy mathematical notation do not survive extraction. For those,
+`get_pdf_pages` returns chosen pages as PNG images, drawn by `pdftoppm` from
+the same poppler-utils at 1568 pixels on the long side, the most a model takes
+in before scaling an image down. A page costs about 2k tokens against roughly
+100 as text, so it takes at most 10 pages a call: read the text first, then ask
+for the pages that matter. From the command line it names each image instead
+of printing it; `--json` prints MCP content blocks with the images in base64.
 Point `DTU_BASE` at another Brightspace instance to use this elsewhere.
 
 ## How terms are worked out
@@ -263,6 +384,7 @@ uv run --script server.py list_courses
 uv run --script server.py course_contents 02231
 uv run --script server.py get_file 12345 67890
 uv run --script server.py download_term "Fall 2026"
+uv run --script server.py download_video 02231 1243820
 ```
 
 Paste the output into claude.ai or any other chat. This is also the quickest way
