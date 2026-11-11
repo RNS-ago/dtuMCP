@@ -92,6 +92,11 @@ const instructions = `The learner's DTU Learn courses (DTU's Brightspace) are av
 - org_unit_id takes the bracketed id or the DTU course number (02231). A course number taken in several terms is ambiguous; the tool lists the offerings, so ask which one unless the context settles it.
 - Course material is read from an offline copy. The first read of a course without one downloads it, which takes a minute or two, so say so before that call. dtu_course_contents and dtu_list_announcements give the date the copy was saved; call dtu_download_course when the learner asks for it to be brought up to date or about something newer. dtu_calendar and dtu_list_assignments are always live.
 - To find where something is covered, search with dtu_search_courses first: it looks inside every downloaded file and names the PDF page, so dtu_get_pdf_pages can show just that page.
+- When you point the learner to course material, add a fenced block with the language dtu-learn to your answer, one line per item: "topic <org_unit_id> <topic_id> pages <first>-<last> | <what to look at>" for a file (pages optional), "unit <org_unit_id> <unit_id> | <what to look at>" for a unit. The learner sees each as a card that opens it in their DTU Learn view, at that page. Use ids the dtu_ tools gave you; never invent them. For example:
+\`\`\`dtu-learn
+topic 326350 1289393 pages 4-10 | the 3-Sat ≤p DHC construction
+unit 326350 1222219 | Week 7's plan
+\`\`\`
 - Read a unit with dtu_unit_info before its files when asked what a week covers or what to do. Fetch only the topics you need with dtu_get_file; courses have hundreds.
 - dtu_get_file returns a file's text, with a PDF's pages headed [Page n]. Figures, diagrams and mathematical notation do not survive extraction: when they matter, look at just those pages with dtu_get_pdf_pages. Each page image costs about 2k tokens, so never ask for a whole document. Spreadsheet text is cell values only. A link returns its URL. A video has no transcript: tell the learner to watch it. dtu_course_contents leaves out topics copied from an earlier year without their files and counts them on their unit's line; if what the learner asks for is not listed and its unit has broken ones, say the material is missing from the course.
 - dtu_list_assignments does not say whether the learner submitted. Never claim a submission status.
@@ -417,6 +422,13 @@ exports.activate = ctx => {
 		return copy ? { saved: copy.saved, modules: copy.modules, files: copy.files, news: copy.news, videos: copy.videos ?? {}, base: dtuBase } : null;
 	});
 	ctx.handle("search", input => search(input?.query, !!input?.hideBroken));
+	// What a reference in a tutor's answer names: its title and its course's
+	// name, from the saved copy, or nothing when the copy lacks it.
+	ctx.handle("where", input => {
+		const copy = record(id(input?.ou));
+		const target = input?.topic !== undefined ? { topic: id(input.topic) } : { unit: id(input?.unit) };
+		return { title: copy && titleIn(copy.modules, target), course: copy?.name };
+	});
 	// A course page's live tabs, read from DTU Learn as they are opened:
 	// {items} for assignments, quizzes, groups or calendar, and the base
 	// their relative links resolve against.

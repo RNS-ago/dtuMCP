@@ -115,6 +115,14 @@ each saying which words it lacks. It also adds a **DTU Learn** view to the sideb
 term and, for each downloaded course, its units and topics. Click a course's
 name to open it beside the tree on its page, which has tabs:
 
+When a tutor points you to course material, its answer carries a card per
+item: the file's or unit's title, its course and the pages, which opens it in
+the DTU Learn view at the first of those pages, with **← Back to the session**
+above the tree. The tutors write them as a `dtu-learn` code block, a line per
+item, `topic <org unit id> <topic id> pages <a>-<b> | <what to look at>` or
+`unit <org unit id> <unit id> | ...`, which the plugin draws; a line naming
+something your saved courses lack shows as such.
+
 - **Announcements**, the one it opens on, from the saved copy, with their
   attachments.
 - **Assignments**: due and closing dates and how far off they are, group

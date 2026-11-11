@@ -51,7 +51,18 @@ const PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-
 
 export function activate(ctx) {
 	const tutor = tutorQueue(ctx);
-	ctx.registerView({ id: "courses", name: "DTU Learn", mount: (container, signal) => mount(ctx, container, signal, tutor) });
+	// Where a reference in a tutor's answer asked the view to open, and the
+	// page it was clicked on, for the way back. The view takes it on mount.
+	const opener = { target: undefined, from: undefined };
+	ctx.registerView({ id: "courses", name: "DTU Learn", mount: (container, signal) => mount(ctx, container, signal, tutor, opener) });
+	ctx.registerCodeBlock?.({
+		language: "dtu-learn",
+		mount: (container, block) => mountRefs(ctx, container, block, ref => {
+			opener.target = ref;
+			opener.from = ctx.app.pathname();
+			ctx.app.openView("courses");
+		}),
+	});
 	ctx.registerAction({ id: "open", name: "DTU Learn", icon: ICON, run: () => ctx.app.openView("courses") });
 	ctx.placeAction({ id: "sidebar-open", actionId: "open", location: "sidebar" });
 	// What the view queued for the tutor rides on the learner's next message
@@ -77,6 +88,66 @@ export function activate(ctx) {
 			};
 		},
 	});
+}
+
+// A ```dtu-learn block in a tutor's answer: a line per piece of course
+// material, "topic <org unit id> <topic id> [pages <a>-<b>] [| label]" or
+// "unit <org unit id> <unit id> [| label]", each shown as a card with its
+// title and course from the saved copy, which opens it in the DTU Learn view
+// at its first page. A line that is not one shows as it is.
+const REF = /^\s*(topic|unit)\s+(\d+)\s+(\d+)(?:\s+(?:pages?|p\.?)\s*(\d+)(?:\s*[-–]\s*(\d+))?)?\s*(?:\|\s*(.*\S))?\s*$/i;
+function parseRef(line) {
+	const found = REF.exec(line);
+	if (!found) return undefined;
+	const [, kind, ou, id, first, last, label] = found;
+	return {
+		ou: Number(ou), [kind.toLowerCase()]: Number(id),
+		...(first && { page: Number(first) }), ...(last && { last: Number(last) }), ...(label && { label }),
+	};
+}
+
+function mountRefs(ctx, container, block, open) {
+	const make = (tag, className, text) => {
+		const node = container.ownerDocument.createElement(tag);
+		if (className) node.className = className;
+		if (text !== undefined) node.textContent = text;
+		return node;
+	};
+	const lines = block.source.split("\n");
+	if (block.incomplete) lines.pop(); // the line the tutor is still writing
+	const box = make("div", "dtu-learn-refs");
+	for (const line of lines) {
+		const ref = parseRef(line);
+		if (!ref) {
+			if (line.trim()) box.append(make("p", "dtu-learn-ref-raw", line));
+			continue;
+		}
+		const card = make("button", "dtu-learn-ref");
+		card.type = "button";
+		const pages = ref.page ? (ref.last && ref.last !== ref.page ? `pages ${ref.page}–${ref.last}` : `page ${ref.page}`) : "";
+		const title = make("strong", undefined, ref.label ?? "…");
+		const facts = make("span", "dtu-learn-ref-facts", pages);
+		const go = make("span", "dtu-learn-ref-go", "Open in DTU Learn ›");
+		const text = make("span", "dtu-learn-ref-text");
+		text.append(title, facts);
+		card.append(text, go);
+		card.title = "Open it in the DTU Learn view";
+		card.addEventListener("click", () => open(ref));
+		box.append(card);
+		// Its real title and course, from the saved copy; the tutor's label
+		// says what to look at there.
+		ctx.call("where", { ou: ref.ou, topic: ref.topic, unit: ref.unit }).then(where => {
+			if (!where?.title) {
+				card.disabled = true;
+				go.textContent = "Not in your saved courses";
+				return;
+			}
+			title.textContent = where.title;
+			facts.textContent = [pages, ref.label, where.course].filter(Boolean).join(" · ");
+		}, () => {});
+	}
+	container.append(box);
+	return () => box.remove();
 }
 
 // Course material waiting for the learner's next message: {id, title,
@@ -117,7 +188,7 @@ function materialText(item) {
 		: `${from}:\n${item.text.split("\n").map(line => `> ${line}`).join("\n")}`;
 }
 
-function mount(ctx, container, signal, tutor) {
+function mount(ctx, container, signal, tutor, opener) {
 	const el = (tag, className, text) => {
 		const node = container.ownerDocument.createElement(tag);
 		if (className) node.className = className;
@@ -1654,7 +1725,31 @@ function mount(ctx, container, signal, tutor) {
 			columns: [{ key: "info", header: "Info", width: 96, align: "right" }],
 			rows: rows(),
 		}, { signal });
+		// Opened from a reference in a tutor's answer: show it, with a way back.
+		const sent = opener.target;
+		opener.target = undefined;
+		if (sent) {
+			const session = /^\/chat\/([A-Za-z0-9_-]+)/.exec(opener.from ?? "")?.[1];
+			if (session) {
+				const back = button("dtu-learn-link dtu-learn-back", "← Back to the session", () => ctx.app.openSession(session));
+				left.prepend(back);
+			}
+			openRef(sent);
+		}
 	})();
+
+	// A reference's topic or unit, in the pane and the tree, at its page.
+	async function openRef({ ou, topic, unit, page }) {
+		await load(ou);
+		const copy = courses.get(ou);
+		const found = copy && !(copy instanceof Error) && (topic !== undefined ? findTopic(copy.modules, topic) : findUnit(copy.modules, unit));
+		if (!found) {
+			main.heading("Not found").put(el("p", "dtu-learn-error", "That is not in your saved copy of the course. Refresh the course, then try again."));
+			return;
+		}
+		const name = terms.flatMap(term => term.courses).find(course => course.id === ou)?.name;
+		go({ ou, course: name, title: found.Title, target: topic !== undefined ? { topic } : { unit }, page });
+	}
 
 	return () => {
 		widget?.dispose(); // the pane's panel frees what it shows when signal aborts

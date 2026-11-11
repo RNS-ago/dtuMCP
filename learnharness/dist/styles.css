@@ -176,6 +176,30 @@
 .dtu-learn-agenda .dtu-learn-where { margin: .05rem 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dtu-learn-members-fold summary { cursor: pointer; font-size: .8125rem; margin-top: .25rem; }
 .dtu-learn-agenda .dtu-learn-rich { margin-top: .25rem; font-size: .8125rem; }
+/* Course material a tutor's answer points to: a card per item, which
+   opens it in the view. These sit in the session's transcript, outside the
+   view, so they set their own tints. */
+.dtu-learn-refs { display: grid; gap: .4rem; margin: .5rem 0; }
+.dtu-learn-ref {
+	display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+	width: 100%; box-sizing: border-box; padding: .55rem .8rem; text-align: left;
+	font: inherit; font-size: .875rem; color: inherit; cursor: pointer;
+	background: color-mix(in oklab, var(--foreground) 4%, transparent);
+	border: 1px solid var(--border); border-radius: 8px;
+	transition: background-color .12s ease, border-color .12s ease, transform .08s ease;
+}
+.dtu-learn-ref:hover:not(:disabled) { background: color-mix(in oklab, var(--foreground) 9%, transparent); border-color: color-mix(in oklab, var(--foreground) 35%, transparent); }
+.dtu-learn-ref:active:not(:disabled) { background: color-mix(in oklab, var(--foreground) 14%, transparent); transform: translateY(1px); }
+.dtu-learn-ref:disabled { cursor: default; opacity: .6; }
+.dtu-learn-ref:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.dtu-learn-ref-text { display: flex; flex-direction: column; min-width: 0; }
+.dtu-learn-ref-text strong { font-weight: 600; overflow-wrap: anywhere; }
+.dtu-learn-ref-facts { font-size: .75rem; color: color-mix(in oklab, var(--foreground) 62%, transparent); }
+.dtu-learn-ref-facts:empty { display: none; }
+.dtu-learn-ref-go { flex: none; font-size: .75rem; color: color-mix(in oklab, var(--foreground) 70%, transparent); }
+.dtu-learn-ref-raw { margin: 0; font-family: monospace; font-size: .8125rem; }
+.dtu-learn-back { margin-bottom: .5rem; font-size: .8125rem; align-self: flex-start; }
+@media (prefers-reduced-motion: reduce) { .dtu-learn-ref { transition: none; } .dtu-learn-ref:active { transform: none; } }
 /* Send to tutor: a button by the selection, and under the tree what waits
    for the learner's next message. */
 .dtu-learn { position: relative; }
