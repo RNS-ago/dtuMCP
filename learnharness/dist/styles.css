@@ -139,6 +139,45 @@
 .dtu-learn-news article > .dtu-learn-muted { margin: .15rem 0 .6rem; font-size: .75rem; }
 .dtu-learn-news .dtu-learn-attachment { margin: .5rem 0 0; font-size: .8125rem; }
 .dtu-learn-toggle { display: flex; align-items: center; gap: .4rem; margin-bottom: .5rem; font-size: .8125rem; cursor: pointer; }
+/* The search box over the tree, and its results in the tree's place. */
+.dtu-learn-search, .dtu-learn-find input {
+	display: block; width: 100%; box-sizing: border-box; margin-bottom: .5rem;
+	font: inherit; font-size: .8125rem; color: inherit;
+	background: var(--background, transparent); border: 1px solid var(--border); border-radius: 6px; padding: .35rem .6rem;
+	transition: border-color .12s ease, box-shadow .12s ease;
+}
+:is(.dtu-learn-search, .dtu-learn-find input):focus { outline: none; border-color: color-mix(in oklab, var(--foreground) 45%, transparent); box-shadow: 0 0 0 3px var(--tint-hover); }
+/* A PDF's find row, under its title: the box, the arrows, the count. */
+.dtu-learn-head { flex-wrap: wrap; }
+.dtu-learn-head > .dtu-learn-find { flex-basis: 100%; }
+.dtu-learn-find input { flex: 0 1 18rem; min-width: 8rem; margin: 0; padding: .25rem .55rem; }
+.dtu-learn-find small { margin-left: .25rem; font-size: .75rem; white-space: nowrap; }
+/* Search words marked where a result opens, and by a PDF's find. Over a PDF
+   page the text is transparent and the mark tints the picture under it. */
+mark.dtu-learn-mark { color: inherit; background: color-mix(in oklab, #f5b301 40%, transparent); border-radius: 2px; }
+.dtu-learn-page .textLayer mark.dtu-learn-mark { color: transparent; background: rgb(245 179 1 / .38); border-radius: 1px; }
+.dtu-learn-page .textLayer mark.dtu-learn-current-match { background: rgb(234 88 12 / .55); box-shadow: 0 0 0 1px rgb(234 88 12 / .9); }
+.dtu-learn-results > p { margin: 0 0 .25rem; font-size: .75rem; }
+.dtu-learn-hits { list-style: none; margin: 0; padding: 0 .25rem 0 0; }
+.dtu-learn-hits li {
+	padding: .5rem .4rem; border-bottom: 1px solid var(--border); font-size: .8125rem; line-height: 1.45;
+	cursor: pointer; border-radius: 4px; transition: background-color .12s ease;
+}
+/* The whole result answers the pointer; its title only underlines. */
+.dtu-learn-hits li:hover { background: var(--tint-hover); }
+.dtu-learn-hits li:active { background: var(--tint-press); }
+.dtu-learn-hits li:hover .dtu-learn-link { text-decoration: underline; text-underline-offset: 2px; }
+.dtu-learn-hits .dtu-learn-link:is(:hover, :active) { background: none; transform: none; }
+.dtu-learn-hit { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; font-weight: 500; }
+.dtu-learn-hit .dtu-learn-link { overflow-wrap: anywhere; }
+.dtu-learn-tag, .dtu-learn-where, .dtu-learn-snippet { color: color-mix(in oklab, var(--foreground) 60%, transparent); }
+.dtu-learn-tag { flex: none; font-size: 11px; }
+.dtu-learn-where { margin: .1rem 0 0; font-size: .75rem; }
+.dtu-learn-snippet { margin: .2rem 0 0; overflow-wrap: anywhere; }
+.dtu-learn-snippet mark { color: inherit; background: color-mix(in oklab, #f5b301 40%, transparent); border-radius: 2px; }
+/* What the pane shows, in the tree; an announcement a result opened. */
+.dtu-learn-link.dtu-learn-current { background: var(--tint-press); }
+.dtu-learn-news article.dtu-learn-found { border-color: color-mix(in oklab, var(--foreground) 55%, transparent); }
 /* Buttons that answer the pointer: a tint under it, a slight sink and a
    deeper tint while pressed, all quick. --tint is the foreground at a share. */
 .dtu-learn, .dtu-learn-preview, .dtu-learn-player { --tint-hover: color-mix(in oklab, var(--foreground) 9%, transparent); --tint-press: color-mix(in oklab, var(--foreground) 16%, transparent); }

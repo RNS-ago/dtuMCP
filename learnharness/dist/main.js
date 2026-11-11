@@ -15,6 +15,18 @@ const pdfjs = () => pdfjsLoad ??= import(new URL("./assets/pdfjs/pdf.min.js", im
 	throw error;
 });
 
+// The words of a search as one pattern, each found at the start of a word,
+// as the search over the saved courses finds them; undefined for no words.
+// \p{L}\p{N} rather than \b, which only knows ASCII and would miss "økonomi".
+// Longest first, so "network" is marked whole rather than as "net".
+const wordsPattern = query => {
+	const words = String(query ?? "").split(/\s+/).filter(Boolean).sort((a, b) => b.length - a.length);
+	if (!words.length) return undefined;
+	return new RegExp(`(?<![\\p{L}\\p{N}])(?:${words.map(word => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "giu");
+};
+
+const UP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>';
+const DOWN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
 const MINUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>';
 const PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
 
@@ -49,9 +61,20 @@ function mount(ctx, container, signal) {
 		hideBroken = box.checked;
 		try { localStorage.setItem("dtu-learn:hide-broken", hideBroken ? "1" : "0"); } catch {}
 		redraw();
+		find();
 	});
 	toggle.append(box, "Hide broken topics");
-	left.append(note, toggle, treeBox);
+	// The saved courses' search, as on their offline pages: titles, units and
+	// the text inside files. Its results take the tree's place while the box
+	// has text; "/" goes to it.
+	const search = el("input", "dtu-learn-search");
+	search.type = "search";
+	search.placeholder = "Search saved courses, inside files too (press /)";
+	search.setAttribute("aria-label", "Search the saved courses");
+	const results = el("div", "dtu-learn-tree-scroll dtu-learn-results");
+	results.setAttribute("aria-live", "polite");
+	results.hidden = true;
+	left.append(note, search, toggle, treeBox, results);
 	pane.append(el("p", "dtu-learn-muted", "Pick a unit or a topic to read it here."));
 	// The bar between the tree and the pane: drag it, or focus it and use the
 	// arrow keys, to share the width differently; a double click puts it
@@ -180,8 +203,173 @@ function mount(ctx, container, signal) {
 			load(course.id);
 			redraw();
 		}
+		mark(`c:${course.id}`);
 		main.showCourse(course);
 	}
+
+	// The tree marks the row of what the pane shows: a course's name, or a
+	// unit's or a topic's title.
+	let current;
+	const label = key => {
+		const node = cache.get(key);
+		return node?.matches(".dtu-learn-link") ? node : node?.querySelector(".dtu-learn-link");
+	};
+	const mark = key => {
+		label(current)?.classList.remove("dtu-learn-current");
+		current = key;
+		label(key)?.classList.add("dtu-learn-current");
+	};
+
+	// The units from the top of a course down to a unit, or to the one
+	// holding a topic.
+	const pathTo = (modules, target, above = []) => {
+		for (const module of modules ?? []) {
+			const here = [...above, module.ModuleId];
+			if (target.unit === module.ModuleId || (module.Topics ?? []).some(t => t.TopicId === target.topic)) return here;
+			const found = pathTo(module.Modules, target, here);
+			if (found) return found;
+		}
+		return undefined;
+	};
+
+	// Typing searches, a moment after the last key; a later search wins over
+	// one still answering. An empty box brings the tree back, scrolled to
+	// where the last result opened.
+	let asked = 0;
+	let pending;
+	function find() {
+		clearTimeout(pending);
+		const mine = ++asked;
+		const query = search.value.trim();
+		if (!query) {
+			results.replaceChildren();
+			if (results.hidden) return;
+			results.hidden = true;
+			treeBox.hidden = false;
+			win.requestAnimationFrame(() => label(current)?.scrollIntoView({ block: "nearest" }));
+			return;
+		}
+		treeBox.hidden = true;
+		results.hidden = false;
+		pending = setTimeout(async () => {
+			let answer;
+			try {
+				answer = await ctx.call("search", { query, hideBroken });
+			} catch (error) {
+				answer = error;
+			}
+			if (mine === asked && !signal.aborted) list(answer, query);
+		}, 120);
+	}
+	search.addEventListener("input", find, { signal });
+	search.addEventListener("keydown", event => {
+		if (event.key === "Enter") results.querySelector(".dtu-learn-link")?.click();
+	}, { signal });
+	// Escape leaves the search for the tree from anywhere in the view: the
+	// box, a result, the pane. Not from another text field, which has its own
+	// use for it (a PDF's find box), nor from a video filling the window, a
+	// preview or the rest of the app.
+	win.addEventListener("keydown", event => {
+		if (event.key !== "Escape" || results.hidden || !root.getClientRects().length) return;
+		const target = event.target;
+		if (target !== container.ownerDocument.body && !root.contains(target)) return;
+		if (target !== search && target.closest?.('input:not([type="checkbox"]), textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+		if (container.ownerDocument.querySelector(".dtu-learn-fill")) return;
+		event.preventDefault();
+		event.stopPropagation(); // the view's Escape, not the app's
+		search.value = "";
+		search.blur(); // so "/" comes back to it
+		find();
+	}, { capture: true, signal });
+	// "/" goes to the box from anywhere in the view, as on the offline pages,
+	// unless a text field has the keys or the view is not the one showing.
+	win.addEventListener("keydown", event => {
+		if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey || !root.getClientRects().length) return;
+		const target = event.target;
+		if (target !== container.ownerDocument.body && !root.contains(target)) return; // the app's, or a preview's
+		if (target.closest?.('input:not([type="checkbox"]), textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+		event.preventDefault();
+		search.focus();
+		search.select();
+	}, { capture: true, signal });
+
+	function list(answer, query) {
+		if (answer instanceof Error) {
+			results.replaceChildren(el("p", "dtu-learn-error", answer.message));
+			return;
+		}
+		const { total, hits } = answer;
+		const count = el("p", "dtu-learn-muted", !total ? "No results. Only downloaded courses are searched."
+			: total > hits.length ? `${total} results, the first ${hits.length} shown` : `${total} result${total === 1 ? "" : "s"}`);
+		const items = el("ul", "dtu-learn-hits");
+		for (const hit of hits) {
+			// The whole result opens it. Its title is the button, for the
+			// keyboard; its click reaches the item too. A drag that selects
+			// text, to copy it, opens nothing.
+			const item = el("li");
+			item.addEventListener("click", () => {
+				if (!container.ownerDocument.getSelection()?.isCollapsed) return;
+				go(hit, query);
+			});
+			const title = el("button", "dtu-learn-link", hit.title);
+			title.type = "button";
+			const head = el("div", "dtu-learn-hit");
+			head.append(title, el("span", "dtu-learn-tag", hit.page ? `${hit.kind} · p. ${hit.page}` : hit.kind));
+			item.append(head, el("p", "dtu-learn-where", [hit.course, hit.where].filter(Boolean).join(" › ")));
+			if (hit.snippet) {
+				const text = el("p", "dtu-learn-snippet");
+				hit.snippet.forEach((part, i) => text.append(i % 2 ? el("mark", undefined, part) : part));
+				item.append(text);
+			}
+			items.append(item);
+		}
+		results.replaceChildren(count, items);
+	}
+
+	// A result opens in the pane with the search's words marked, a PDF at
+	// the page they are on, and the tree opens down to it, so leaving the
+	// search shows where it sits. The results stay, to open the next one.
+	async function go({ ou, course: name, saved, title, target, page }, query) {
+		const term = terms.find(t => t.courses.some(c => c.id === ou));
+		const course = term?.courses.find(c => c.id === ou) ?? { id: ou, name, saved };
+		course.saved ??= saved; // downloaded by a tutor since the list was read
+		if (term) open.add(`t:${term.name}`);
+		open.add(`c:${ou}`);
+		await load(ou); // the pane needs the copy to tell a PDF or a video
+		const copy = courses.get(ou);
+		for (const unit of (copy && !(copy instanceof Error) && pathTo(copy.modules, target)) || []) open.add(`u:${ou}:${unit}`);
+		redraw();
+		mark(target.topic !== undefined ? `p:${ou}:${target.topic}` : target.unit !== undefined ? `u:${ou}:${target.unit}` : `c:${ou}`);
+		if (target.news !== undefined) main.showCourse(course, target.news, query);
+		else main.show(title, { ou, ...target, ...(page && { page }), find: query });
+	}
+
+	// Wraps each match of pattern in node's text in a mark, and returns the
+	// marks in reading order. The text is matched a text node at a time, which
+	// for a PDF is a text item at a time, as its find counts them.
+	const markWords = (node, pattern) => {
+		const marks = [];
+		if (!pattern) return marks;
+		const walker = container.ownerDocument.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+		const texts = [];
+		while (walker.nextNode()) texts.push(walker.currentNode);
+		for (const text of texts) {
+			const parts = [];
+			let last = 0;
+			for (const found of text.data.matchAll(pattern)) {
+				const mark = el("mark", "dtu-learn-mark", found[0]);
+				marks.push(mark);
+				parts.push(text.data.slice(last, found.index), mark);
+				last = found.index + found[0].length;
+			}
+			if (parts.length) text.replaceWith(...parts, text.data.slice(last));
+		}
+		return marks;
+	};
+	const unmark = node => {
+		for (const mark of node.querySelectorAll("mark.dtu-learn-mark")) mark.replaceWith(mark.textContent);
+		node.normalize(); // one text node per PDF text item again
+	};
 
 	function courseChildren(ou) {
 		const copy = courses.get(ou);
@@ -195,6 +383,7 @@ function mount(ctx, container, signal) {
 				key, content: once(key, () => button("dtu-learn-link", m.Title, () => {
 					open.add(key);
 					redraw();
+					mark(key);
 					main.show(m.Title, { ou, unit: m.ModuleId });
 				})),
 				...(children.length && { disclosure: fold(key, m.Title), children }),
@@ -203,7 +392,10 @@ function mount(ctx, container, signal) {
 		const topic = t => {
 			const key = `p:${ou}:${t.TopicId}`;
 			return {
-				key, content: once(key, () => button("dtu-learn-link", t.Title, () => main.show(t.Title, { ou, topic: t.TopicId }))),
+				key, content: once(key, () => button("dtu-learn-link", t.Title, () => {
+					mark(key);
+					main.show(t.Title, { ou, topic: t.TopicId });
+				})),
 				cells: { info: kind(t, copy) },
 			};
 		};
@@ -371,7 +563,7 @@ function mount(ctx, container, signal) {
 				}
 				return current();
 			};
-			return { slot, put, current, title };
+			return { slot, put, current, title, head };
 		}
 		const control = (slot, props) => {
 			const holder = el("span");
@@ -396,8 +588,12 @@ function mount(ctx, container, signal) {
 				const { text, file } = await ctx.call("text", request);
 				const body = el("div");
 				if (failure) body.append(el("p", "dtu-learn-error", `Could not draw the PDF (${failure.message}). Its text instead:`));
-				body.append(linkify(el("pre", "dtu-learn-text"), text));
-				if (put(body) && file) {
+				const pre = linkify(el("pre", "dtu-learn-text"), text);
+				body.append(pre);
+				const marks = markWords(pre, wordsPattern(request.find));
+				if (!put(body)) return;
+				marks[0]?.scrollIntoView({ block: "center" });
+				if (file) {
 					const button = openButton(slot, request);
 					release = () => button.dispose();
 				}
@@ -409,7 +605,7 @@ function mount(ctx, container, signal) {
 		// A unit's own text, with its links, and what it holds, its units and
 		// topics, which open here. From the saved course, so it is the text
 		// as the course page shows it, not a flattened rendition.
-		async function showUnit(title, { ou, unit }) {
+		async function showUnit(title, { ou, unit, find }) {
 			const { put } = heading(title);
 			put(el("p", "dtu-learn-muted", "Reading…"));
 			await load(ou);
@@ -437,7 +633,8 @@ function mount(ctx, container, signal) {
 				}
 				body.append(el("h3", undefined, "Contents"), list);
 			}
-			put(body);
+			const marks = markWords(body, wordsPattern(find));
+			if (put(body)) marks[0]?.scrollIntoView({ block: "center" });
 		}
 
 		// A video plays here, from Brightspace's media service through a
@@ -573,8 +770,9 @@ function mount(ctx, container, signal) {
 		}
 
 		// A course's announcements, newest first, as its copy saved them.
-		// Their attachments open here like topics.
-		async function showCourse(course) {
+		// Their attachments open here like topics. focus is one to scroll to
+		// and outline, a search result's, with query's words marked in it.
+		async function showCourse(course, focus, query) {
 			const { put } = heading(course.name);
 			if (!course.saved) {
 				put(el("p", "dtu-learn-muted", "Not downloaded yet. Download it to browse its units and read its announcements here."));
@@ -590,8 +788,10 @@ function mount(ctx, container, signal) {
 			const body = el("div", "dtu-learn-news");
 			body.append(el("p", "dtu-learn-muted", `Announcements as saved ${copy.saved}. Refresh the course for newer ones.`));
 			if (!copy.news.length) body.append(el("p", undefined, "No announcements."));
+			let found;
 			for (const news of copy.news) {
 				const item = el("article");
+				if (news.Id === focus) found = item;
 				item.append(
 					el("h3", undefined, news.Title),
 					el("p", "dtu-learn-muted", (news.StartDate ?? "").slice(0, 10)),
@@ -608,7 +808,11 @@ function mount(ctx, container, signal) {
 				}
 				body.append(item);
 			}
-			put(body);
+			if (put(body) && found) {
+				markWords(found, wordsPattern(query));
+				found.classList.add("dtu-learn-found");
+				found.scrollIntoView({ block: "start" });
+			}
 		}
 
 		// A link's page. A DTU Learn link to a topic or a unit of a saved
@@ -674,7 +878,7 @@ function mount(ctx, container, signal) {
 		// a zoom. Each page is drawn when it comes near the screen and cleared
 		// when it goes far off, so a long deck holds only a few pages' pixels.
 		async function showPdf(title, request) {
-			const { slot, put, current } = heading(title);
+			const { slot, put, current, head } = heading(title);
 			put(el("p", "dtu-learn-muted", "Opening…"));
 			// pdf.js 6 frees a document, and its worker, through the loading task;
 			// the document itself has no destroy().
@@ -688,6 +892,88 @@ function mount(ctx, container, signal) {
 				pages.style.width = `${zoom * 100}%`;
 				if (!put(pages)) return loading.destroy();
 				const ratio = container.ownerDocument.defaultView.devicePixelRatio;
+
+				// Find in the PDF, on a row under its title. Matches are counted
+				// from every page's text, read on the first search; a page marks
+				// its own when it is drawn. Both go a text item at a time, so the
+				// count and the marks agree. A search result arrives with its words.
+				const findRow = el("div", "dtu-learn-find");
+				const field = el("input");
+				field.type = "search";
+				field.placeholder = "Find in this PDF (Ctrl+F)";
+				field.setAttribute("aria-label", "Find in this PDF");
+				const count = el("small", "dtu-learn-muted");
+				findRow.append(field, count);
+				head.append(findRow);
+				let pattern; // the words being found
+				let matches = []; // { page, nth }: the nth mark on a page, in reading order
+				let at = -1; // which match is the current one
+				let follow = false; // scroll to the current match once its page has it
+				let pageTexts; // every page's text items
+				let finding = 0;
+				// The current match, marked apart, and scrolled to if it was asked for.
+				const showCurrent = box => {
+					const match = matches[at];
+					const mark = match && pages.children[match.page - 1] === box ? box.marks?.[match.nth] : undefined;
+					if (!mark) return;
+					pages.querySelector(".dtu-learn-current-match")?.classList.remove("dtu-learn-current-match");
+					mark.classList.add("dtu-learn-current-match");
+					if (follow) mark.scrollIntoView({ block: "center", inline: "nearest" });
+					follow = false;
+				};
+				// Its page is drawn, and marked, when it comes near the screen.
+				const goTo = index => {
+					if (!matches.length) return;
+					at = (index + matches.length) % matches.length;
+					count.textContent = `${at + 1} of ${matches.length}`;
+					const box = pages.children[matches[at].page - 1];
+					follow = true;
+					if (box.marks) showCurrent(box);
+					else box.scrollIntoView({ block: "start" });
+				};
+				// The first page at least partly in view.
+				const topPage = () => {
+					const top = scroller.getBoundingClientRect().top;
+					return 1 + Math.max(0, [...pages.children].findIndex(box => box.getBoundingClientRect().bottom > top));
+				};
+				// The first match is the first from fromPage on, else from the page in view.
+				const findText = async (value, fromPage) => {
+					const mine = ++finding;
+					pattern = wordsPattern(value);
+					matches = [];
+					at = -1;
+					follow = false;
+					for (const box of pages.children) {
+						const layer = box.marks && box.querySelector(".textLayer");
+						if (!layer) continue;
+						unmark(layer);
+						box.marks = markWords(layer, pattern);
+					}
+					count.textContent = pattern ? "Searching…" : "";
+					if (!pattern) return;
+					pageTexts ??= Promise.all(Array.from({ length: doc.numPages }, (_, i) => doc.getPage(i + 1)
+						.then(page => page.getTextContent())
+						.then(content => content.items.map(item => item.str ?? ""))));
+					let texts;
+					try {
+						texts = await pageTexts;
+					} catch (error) {
+						pageTexts = undefined;
+						if (mine === finding && current()) count.textContent = "Could not read its text";
+						return;
+					}
+					if (mine !== finding || !current()) return;
+					texts.forEach((items, i) => {
+						let nth = 0;
+						for (const str of items) for (const _ of str.matchAll(pattern)) matches.push({ page: i + 1, nth: nth++ });
+					});
+					if (!matches.length) {
+						count.textContent = "No matches";
+						return;
+					}
+					const start = fromPage ?? topPage();
+					goTo(Math.max(0, matches.findIndex(match => match.page >= start)));
+				};
 
 				// A page is a box holding its picture and, over it, pdf.js's text
 				// layer: the page's text, transparent, where the words are, so a
@@ -718,7 +1004,9 @@ function mount(ctx, container, signal) {
 					box.style.aspectRatio = `${base.width} / ${base.height}`;
 					box.style.setProperty("--total-scale-factor", scale);
 					box.drawnWidth = box.clientWidth;
+					box.marks = markWords(text, pattern);
 					box.replaceChildren(canvas, text, links(page, annotations));
+					showCurrent(box);
 				};
 				// The PDF's own links, over the words they sit on: to a web page,
 				// opened in the browser, or to another page of the PDF, scrolled
@@ -759,6 +1047,7 @@ function mount(ctx, container, signal) {
 				const forget = box => {
 					if (!box.wanted) return;
 					stop(box);
+					box.marks = undefined;
 					box.replaceChildren(); // frees the pixels; CSS keeps the page's place
 				};
 				// Drawing is cancelled whenever a page scrolls far off or the PDF
@@ -779,6 +1068,13 @@ function mount(ctx, container, signal) {
 					box.style.aspectRatio = `${first.width} / ${first.height}`;
 					pages.append(box);
 					observer.observe(box);
+				}
+				// A search result names the page its words are on: start there,
+				// and find them, from there on.
+				if (request.page > 1) pages.children[request.page - 1]?.scrollIntoView({ block: "start" });
+				if (request.find) {
+					field.value = request.find;
+					findText(request.find, request.page ?? 1);
 				}
 
 				// Zoom: pages are a share of the pane's width, which the buttons
@@ -816,14 +1112,50 @@ function mount(ctx, container, signal) {
 					for (const layer of pages.querySelectorAll(".textLayer.selecting")) layer.classList.remove("selecting");
 				}, { signal: listening.signal });
 
+				// Typing finds a moment after the last key; Enter goes to the next
+				// match, Shift+Enter to the one before; Escape empties the box,
+				// then leaves it. Ctrl+F (Cmd+F) comes to it from the PDF.
+				let typing;
+				field.addEventListener("input", () => {
+					clearTimeout(typing);
+					typing = setTimeout(() => findText(field.value), 150);
+				}, { signal: listening.signal });
+				field.addEventListener("keydown", event => {
+					if (event.key === "Enter") {
+						event.preventDefault();
+						clearTimeout(typing);
+						if (wordsPattern(field.value)?.source !== pattern?.source) findText(field.value);
+						else goTo(at + (event.shiftKey ? -1 : 1));
+					} else if (event.key === "Escape") {
+						event.preventDefault();
+						event.stopPropagation(); // the box's Escape, not the view's or the app's
+						if (!field.value) return field.blur();
+						field.value = "";
+						clearTimeout(typing);
+						findText("");
+					}
+				}, { signal: listening.signal });
+				const previous = control(findRow, { label: "Previous match", icon: UP, iconOnly: true, size: "icon-sm", title: "Previous match (Shift+Enter)", onClick: () => goTo(at - 1) });
+				const next = control(findRow, { label: "Next match", icon: DOWN, iconOnly: true, size: "icon-sm", title: "Next match (Enter)", onClick: () => goTo(at + 1) });
+				findRow.append(count); // after the arrows
+				win.addEventListener("keydown", event => {
+					if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "f") return;
+					const target = event.target;
+					if (!box.contains(target) && !(box === pane && target === container.ownerDocument.body)) return;
+					event.preventDefault();
+					field.focus();
+					field.select();
+				}, { capture: true, signal: listening.signal });
+
 				const button = openButton(slot, request);
 				const task = loading;
 				release = () => {
 					listening.abort();
 					clearTimeout(settle);
+					clearTimeout(typing);
 					resized.disconnect();
 					observer.disconnect();
-					for (const handle of [out, reset, into, button]) handle.dispose();
+					for (const handle of [out, reset, into, button, previous, next]) handle.dispose();
 					task.destroy();
 				};
 			} catch (error) {

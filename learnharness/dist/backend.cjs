@@ -132,6 +132,95 @@ const record = ou => {
 	return found && { ...JSON.parse(fs.readFileSync(found.file, "utf8")), root: path.dirname(found.file) };
 };
 
+// A saved course's search entries, the ones download_course writes for its
+// offline page's search box (_search.js), each with where it opens in the
+// view: {unit}, {topic}, {attachment}, {linked} or {news}. Read again only
+// when the course is downloaded again.
+// ponytail: every searched course's text stays in memory, a few MB each;
+// drop the least recent if many big courses make the app heavy.
+const searchCache = new Map(); // org unit id -> { mtime, ou, name, entries }
+function searchCourse(ou, { file, mtime }) {
+	const cached = searchCache.get(ou);
+	if (cached?.mtime === mtime) return cached;
+	const copy = JSON.parse(fs.readFileSync(file, "utf8"));
+	let docs = [];
+	try {
+		// "window.SEARCH = [...];", a script so the offline page can load it from disk.
+		const script = fs.readFileSync(path.join(path.dirname(file), "_search.js"), "utf8");
+		docs = JSON.parse(script.slice(script.indexOf("=") + 1).trim().replace(/;$/, ""));
+	} catch {} // a course saved before the search existed: refreshing it adds one
+	// Entries link as the offline page does: a saved file by its path there,
+	// a unit or an announcement by its anchor, anything else online.
+	const byPath = new Map(), byUrl = new Map(), broken = new Set();
+	for (const [key, saved] of Object.entries(copy.files ?? {})) byPath.set(saved, key.includes("/") ? { attachment: key } : { topic: Number(key) });
+	for (const saved of Object.values(copy.linked ?? {})) if (!byPath.has(saved)) byPath.set(saved, { linked: saved });
+	const walk = modules => {
+		for (const module of modules ?? []) {
+			for (const topic of module.Topics ?? []) {
+				if (topic.Url) byUrl.set(topic.Url, topic.TopicId);
+				if (topic.IsBroken) broken.add(topic.TopicId);
+			}
+			walk(module.Modules);
+		}
+	};
+	walk(copy.modules);
+	const target = href => {
+		const anchor = /^#([un])(\d+)$/.exec(href);
+		if (anchor) return anchor[1] === "u" ? { unit: Number(anchor[2]) } : { news: Number(anchor[2]) };
+		const lesson = /\/d2l\/le\/lessons\/\d+\/topics\/(\d+)/.exec(href);
+		if (lesson) return { topic: Number(lesson[1]) };
+		if (byUrl.has(href)) return { topic: byUrl.get(href) };
+		try { return byPath.get(decodeURIComponent(href)); } catch { return undefined; }
+	};
+	const entries = [];
+	for (const doc of docs) {
+		const to = target(doc.h);
+		if (!to) continue;
+		// label: the title and the units above it, so "milk description"
+		// finds the Description topic in the Milk case study.
+		entries.push({ title: doc.t, where: doc.u ?? "", kind: doc.k, text: doc.x ?? "", pages: doc.p, label: `${doc.t} ${doc.u ?? ""}`, target: to, broken: broken.has(to.topic) });
+	}
+	const course = { mtime, ou, name: copy.name, entries };
+	searchCache.set(ou, course);
+	return course;
+}
+
+// Every saved course searched for all of query's words, each found at the
+// start of a word in an entry's title, its units or its text, as the offline
+// page's search box does. Title matches first; the first 100 are returned,
+// each with the text around its first match, split so odd parts are matches,
+// and for a PDF the page that match is on.
+function search(query, hideBroken) {
+	const words = String(query ?? "").split(/\s+/).filter(Boolean).slice(0, 12);
+	if (!words.length) return { total: 0, hits: [] };
+	// \p{L}\p{N} rather than \b, which only knows ASCII and would miss "økonomi".
+	const start = "(?<![\\p{L}\\p{N}])";
+	const escape = word => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const patterns = words.map(word => new RegExp(start + escape(word), "iu"));
+	const found = [];
+	for (const [ou, saved] of copies()) {
+		const course = searchCourse(ou, saved);
+		for (const entry of course.entries) {
+			if (hideBroken && entry.broken) continue;
+			if (patterns.every(p => p.test(entry.label) || p.test(entry.text))) found.push({ course, entry, inTitle: patterns.every(p => p.test(entry.label)) });
+		}
+	}
+	found.sort((a, b) => b.inTitle - a.inTitle);
+	const mark = new RegExp(`(${start}(?:${words.map(escape).join("|")}))`, "giu");
+	const hits = found.slice(0, 100).map(({ course, entry }) => {
+		const hit = { ou: course.ou, course: course.name, saved: course.mtime, title: entry.title, where: entry.where, kind: entry.kind, target: entry.target };
+		const at = Math.min(...patterns.map(p => entry.text.search(p)).filter(i => i >= 0));
+		if (Number.isFinite(at)) {
+			if (entry.pages) hit.page = entry.pages.filter(offset => offset <= at).length;
+			const from = Math.max(0, at - 70);
+			hit.snippet = entry.text.slice(from, at + 150).split(mark);
+			if (from) hit.snippet[0] = `…${hit.snippet[0]}`;
+		}
+		return hit;
+	});
+	return { total: found.length, hits };
+}
+
 exports.activate = ctx => {
 	const server = path.join(ctx.directory, "server.py");
 	const tools = JSON.parse(fs.readFileSync(path.join(ctx.directory, "tools.json"), "utf8"));
@@ -205,6 +294,7 @@ exports.activate = ctx => {
 		// base: what the course's own relative links (/content/..., /d2l/...) are relative to.
 		return copy ? { saved: copy.saved, modules: copy.modules, files: copy.files, news: copy.news, videos: copy.videos ?? {}, base: dtuBase } : null;
 	});
+	ctx.handle("search", input => search(input?.query, !!input?.hideBroken));
 	// A unit's text ({ou, unit}), a topic's ({ou, topic}) or an announcement
 	// attachment's ({ou, attachment: "<news id>/<file id>"}).
 	ctx.handle("text", async input => {

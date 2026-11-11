@@ -153,6 +153,28 @@ element take the screen, so the player's own full-screen button is hidden;
 **Full screen** has the video fill the window instead, until Escape, a double
 click or **Exit full screen**.
 
+The search box above the tree searches every downloaded course as the
+offline pages' search box does, from the same index (`_search.js`): titles,
+the units above them, unit text, announcements and the text inside files, a
+PDF's by page. `/` goes to it from anywhere in the view. Its results take the
+tree's place, with the words marked in the text around them. A click
+anywhere on one opens it, unless it ends a drag that selects text to copy;
+Enter in the box opens the first. A result opens in the pane with the words marked in it: a PDF at
+the first match from the page the result named, a text or a unit scrolled to
+its first, an announcement scrolled to and outlined. The tree opens down to
+it, its row marked, and the results stay while you open them. Escape, from
+anywhere in the view, or emptying the box leaves the search and shows the
+tree where the result sits.
+
+A PDF has a find row under its title (Ctrl+F goes to it): it marks every
+match on the pages, counts them, and Enter or the arrows go to the next one,
+Shift+Enter to the one before. A PDF opened from a search result arrives with
+the search's words in it, so its matches can be stepped through from there.
+Both searches match words by their start, `reduc` finds "reductions", as the
+offline pages' search does. Files a course's pages link to are left out of a
+copy saved before the record listed them (`linked` in `_course-<id>.json`);
+**Refresh** the course to find them.
+
 The bar between the tree and the pane can be dragged to share the width
 differently, or focused and moved with the arrow keys; a double click puts it
 back. The width is remembered, and a PDF is redrawn sharp at its new size. **Open file** opens a saved
