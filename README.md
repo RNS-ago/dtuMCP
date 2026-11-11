@@ -112,7 +112,7 @@ Paste its contents into:
 | `list_announcements(org_unit_id)` | Course announcements |
 | `get_announcement_attachment(org_unit_id, news_id, file_id)` | A file attached to an announcement, read like `get_file` |
 | `calendar(days=7, org_unit_id=0)` | What is scheduled in the next `days` days |
-| `download_course(org_unit_id)` | Every file in a course, saved to disk |
+| `download_course(org_unit_id)` | The whole course saved for offline use, with an `index.html` to browse it |
 
 Anywhere an `org_unit_id` is asked for, the DTU course number works too:
 `course_contents 02231` is the same as `course_contents 326352`. A course
@@ -126,13 +126,32 @@ welcome message — which `course_contents` marks with `(info)` and `unit_info`
 returns in full. Announcements are separate and belong to the course rather than
 the unit; `list_announcements` has those, with the ids of any attached files.
 
-`download_course` walks the whole content tree and saves every file under
-`~/Downloads/dtulearn/<course>/<unit>/`, eight at a time, naming each file
-after its topic so a second run overwrites instead of piling up copies. It
-returns a count, not text — use `get_file` for the content of one topic.
-Links and videos hold no file, and neither do broken topics: a course copied
-from an earlier offering keeps entries whose file did not come along, which
-D2L flags and `course_contents` prints as `(File, broken)`.
+`download_course` makes an offline copy of a course. It walks the whole
+content tree and saves every file under `~/Downloads/dtulearn/<course>/<unit>/`,
+eight at a time, naming each file after its topic so a second run overwrites
+instead of piling up copies. Announcement attachments go in
+`<course>/Announcements/`. Beside them it writes `index.html`, one page laid
+out like the course site, with two tabs. Content has a folding tree of the
+units on the left and, on the right, every unit with its own text and its
+topics, each linked to the saved file and tagged with its type. Announcements
+has every announcement with its attachments. Open that page in a browser to
+read the course without a connection. It needs no script and follows the
+system's dark mode.
+
+Links and videos hold no file, so the index links to them online. Neither do
+broken topics: a course copied from an earlier offering keeps entries whose
+file did not come along, which D2L flags and `course_contents` prints as
+`(File, broken)`.
+
+Unit text, announcements and HTML pages can show pictures and link to files in
+the course's file area (`/content/...` on DTU Learn). Those are fetched too,
+kept under `<course>/_linked/` by their DTU Learn path, and the pages are
+pointed at the copies. Quicklinks from one page to another topic, quiz or tool
+stay online: D2L names their target with an opaque code, so there is no local
+file to point them at. Pictures and links on other websites stay online too.
+
+The tool returns a count, not text — use `get_file` for the content of one
+topic.
 
 `calendar` reads the Brightspace calendar in local time: lectures and
 exercise sessions with their rooms, hand-in deadlines, and the dates material

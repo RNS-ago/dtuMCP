@@ -30,10 +30,10 @@ from datetime import datetime, timedelta, timezone
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from html import unescape
+from html import escape, unescape
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 from mcp.server.mcpserver import MCPServer
@@ -656,7 +656,8 @@ def _file_text(r: httpx.Response, name: str, title) -> str:
 def _safe(name: str) -> str:
     """A title becomes a directory or file name, so drop what a filesystem
     would choke on and keep the rest recognisable."""
-    return re.sub(r'[\\/:*?"<>|]+', "_", name).strip(". ")[:80] or "untitled"
+    # Strip after cutting, or a long course name ends in ", " once cut at 80.
+    return re.sub(r'[\\/:*?"<>|]+', "_", name)[:80].strip(" .,") or "untitled"
 
 
 def _file_topics(modules, parents=()):
@@ -695,25 +696,244 @@ def _save_topic(client, ou: int, root: Path, parents: tuple, topic) -> tuple:
     return dest, None
 
 
+def _save_attachment(client, ou: int, root: Path, news_id: int, att) -> tuple:
+    name = att["FileName"]
+    dest = root / "Announcements" / f"{news_id}-{_safe(Path(name).stem)}{Path(name).suffix}"
+    try:
+        r = client.get(f"/d2l/api/le/{LE}/{ou}/news/{news_id}/attachments/{att['FileId']}")
+        r.raise_for_status()
+    except httpx.HTTPError as e:
+        return None, f"{name}: {e}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(r.content)
+    return dest, None
+
+
+# A src or href in teacher HTML, and the course file area D2L serves files from.
+REFERENCE = re.compile(r'(\b(?:src|href)=")([^"]*)"')
+
+
+def _d2l_file(value: str) -> str | None:
+    """The DTU Learn file a src or href points at, as an absolute URL, or None.
+    Relative values are left alone: in index.html they are already local."""
+    url = unescape(value)
+    if url.startswith("/content/"):
+        url = BASE + url
+    return url if url.startswith(BASE + "/content/") else None
+
+
+def _linked_dest(root: Path, url: str) -> Path:
+    """Where a file a page links to is kept: its D2L path, under _linked/."""
+    parts = [unquote(p) for p in urlparse(url).path.split("/")[2:] if p] or ["untitled"]
+    name = Path(parts.pop())
+    return root.joinpath("_linked", *map(_safe, parts), _safe(name.stem) + name.suffix)
+
+
+def _save_linked(client, root: Path, url: str) -> tuple:
+    try:
+        r = client.get(url)  # only ever a BASE URL, so the cookie stays on D2L
+    except httpx.HTTPError:
+        return url, None
+    # An expired session redirects to the login page, which is not the file.
+    if not r.is_success or not r.url.path.startswith("/content/"):
+        return url, None
+    dest = _linked_dest(root, url)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(r.content)
+    return url, dest
+
+
+def _relink(html: str, page: Path, linked: dict) -> str:
+    """Point a page's DTU Learn pictures and file links at the copies in linked."""
+    def swap(m):
+        dest = linked.get(_d2l_file(m.group(2)))
+        if dest is None:
+            return m.group(0)
+        return m.group(1) + quote(Path(os.path.relpath(dest, page.parent)).as_posix()) + '"'
+    return REFERENCE.sub(swap, html)
+
+
+def _index_html(name: str, ou: int, modules, news, saved: dict) -> str:
+    """The page that stands in for the course site offline: the announcements,
+    then every unit's own text and topics. saved maps a topic id, or a
+    (news id, file id) pair for an attachment, to its path relative to the page.
+    Anything not saved links back to DTU Learn, which needs a connection."""
+    # Teacher HTML points at /content/... on D2L, which would mean
+    # file:///content/... here. Make it absolute; _relink then swaps in
+    # the local copies of whatever it could fetch.
+    def rich(field):  # D2L stores rich text in a plain and an HTML rendition
+        field = field or {}
+        html = field.get("Html") or f"<p>{escape(field.get('Text') or '')}</p>"
+        return re.sub(r'\b(src|href)="/(?!/)', rf'\1="{BASE}/', html)
+
+    def item(href, label, tag, online=False):
+        cls = ' class="tag online"' if online else ' class="tag"'
+        return (f'<li><a href="{escape(href)}">{escape(label)}</a>'
+                f"<span{cls}>{escape(tag)}</span></li>")
+
+    def topic(t):
+        tid, url, kind = t["TopicId"], t.get("Url") or "", t.get("TypeIdentifier", "?")
+        title = t.get("Title", "?")
+        if tid in saved:
+            return item(saved[tid], title, Path(unquote(saved[tid])).suffix[1:].upper() or "file")
+        if kind == "ContentService":
+            kind = _urn_kind(url)
+        if t.get("IsBroken"):
+            kind += ", broken"
+        href = url if url.startswith("http") else f"{BASE}/d2l/le/lessons/{ou}/topics/{tid}"
+        return item(href, title, f"{kind} · online", online=True)
+
+    def tree(modules, depth=0):
+        """The sidebar: every unit, nested, linking to its section."""
+        for m in modules or []:
+            a = f'<a href="#u{m["ModuleId"]}">{escape(m.get("Title", "?"))}</a>'
+            if m.get("Modules"):
+                # Top level open, deeper levels folded, so a big course fits.
+                yield f"<li><details{' open' if depth == 0 else ''}><summary>{a}</summary><ul>"
+                yield from tree(m["Modules"], depth + 1)
+                yield "</ul></details></li>"
+            else:
+                yield f"<li>{a}</li>"
+
+    def units(modules, depth=2):
+        for m in modules or []:
+            h = min(depth, 6)
+            yield f'<section id="u{m["ModuleId"]}"><h{h}>{escape(m.get("Title", "?"))}</h{h}>'
+            if _description(m):
+                yield f'<div class="text">{rich(m.get("Description"))}</div>'
+            if m.get("Topics"):
+                yield '<ul class="topics">' + "".join(map(topic, m["Topics"])) + "</ul>"
+            yield from units(m.get("Modules"), depth + 1)
+            yield "</section>"
+
+    def announcements():
+        for n in news:
+            yield (f'<article id="n{n["Id"]}"><h2>{escape(n.get("Title", "?"))}</h2>'
+                   f'<time>{(n.get("StartDate") or "")[:10]}</time>'
+                   f'<div class="text">{rich(n.get("Body"))}</div>')
+            files = n.get("Attachments") or []
+            if files:
+                yield '<ul class="topics">' + "".join(
+                    item(saved[(n["Id"], a["FileId"])], a["FileName"], "attachment")
+                    if (n["Id"], a["FileId"]) in saved
+                    else f'<li>{escape(a["FileName"])}<span class="tag online">download failed</span></li>'
+                    for a in files
+                ) + "</ul>"
+            yield "</article>"
+
+    return "\n".join([
+        '<!doctype html><html lang="en"><meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        f"<title>{escape(name)}</title><style>{INDEX_CSS}</style>",
+        f"<header><h1>{escape(name)}</h1>",
+        f'<p>Saved from DTU Learn on {datetime.now():%Y-%m-%d}</p>',
+        '<div class="tabs" role="tablist">',
+        '<input type="radio" name="tab" id="t-content" checked><label for="t-content">Content</label>',
+        f'<input type="radio" name="tab" id="t-news"><label for="t-news">Announcements ({len(news)})</label>',
+        "</div></header>",
+        f'<div id="p-content" class="panel"><nav aria-label="Units"><ul>{"".join(tree(modules))}</ul></nav>',
+        '<main>', *units(modules), "</main></div>",
+        '<div id="p-news" class="panel"><main>',
+        *(announcements() if news else ["<p>No announcements.</p>"]),
+        "</main></div>",
+    ])
+
+
+# The tabs are radio buttons, so they work with no script and from the keyboard.
+# System colours (Canvas, CanvasText, LinkText) follow the reader's dark mode.
+INDEX_CSS = """
+:root{color-scheme:light dark;--line:color-mix(in srgb,CanvasText 14%,transparent);
+--muted:color-mix(in srgb,CanvasText 62%,transparent)}
+*{box-sizing:border-box}
+body{margin:0;background:Canvas;color:CanvasText;font:16px/1.5 system-ui,sans-serif}
+header{padding:1rem 1rem 0;border-bottom:1px solid var(--line)}
+h1{margin:0;font-size:1.5rem}
+header p{margin:.2rem 0 .6rem;color:var(--muted);font-size:.9rem}
+.tabs{display:flex;gap:.25rem}
+.tabs input{position:absolute;opacity:0}
+.tabs label{padding:.5rem .9rem;cursor:pointer;color:var(--muted);border-bottom:3px solid transparent}
+.tabs input:checked+label{color:CanvasText;font-weight:600;border-color:LinkText}
+.tabs input:focus-visible+label{outline:2px solid LinkText;outline-offset:-2px}
+.panel{display:none}
+body:has(#t-content:checked) #p-content{display:grid;grid-template-columns:18rem minmax(0,1fr)}
+body:has(#t-news:checked) #p-news{display:block}
+nav{position:sticky;top:0;align-self:start;max-height:100vh;overflow:auto;
+padding:1rem;border-right:1px solid var(--line);font-size:.92rem}
+nav ul{list-style:none;margin:0;padding-left:1rem}
+nav>ul{padding-left:0}
+nav li{margin:.15rem 0}
+nav a{color:inherit;text-decoration:none}
+nav ul:has(details)>li>a{display:block;padding-left:1.1em}
+nav a:hover{color:LinkText;text-decoration:underline}
+summary{cursor:pointer}
+main{padding:1rem;max-width:60rem;min-width:0}
+section{scroll-margin-top:1rem;margin-bottom:1.5rem}
+section section{margin:1rem 0 0;padding-left:1rem;border-left:2px solid var(--line)}
+h2,h3,h4,h5,h6{margin:0 0 .5rem}
+.text{overflow-x:auto}
+.text img{max-width:100%;height:auto}
+.topics{list-style:none;margin:.5rem 0;padding:0}
+.topics li{display:flex;gap:.5rem;align-items:baseline;padding:.35rem 0;border-bottom:1px solid var(--line)}
+.tag{margin-left:auto;flex:none;font-size:.75rem;padding:0 .45rem;border:1px solid var(--line);
+border-radius:.3rem;color:var(--muted)}
+.tag.online{border-style:dashed}
+article{padding:1rem 0;border-bottom:1px solid var(--line)}
+article h2{font-size:1.15rem;margin:0}
+time{color:var(--muted);font-size:.9rem}
+@media (max-width:45rem){
+body:has(#t-content:checked) #p-content{grid-template-columns:1fr}
+nav{position:static;max-height:none;border-right:0;border-bottom:1px solid var(--line)}}
+"""
+
+
 @mcp.tool()
 def download_course(org_unit_id: int) -> str:
-    """Download every file in a course to disk, mirroring its unit tree.
+    """Save a course for offline use: its files, unit text and announcements.
 
     Files land in ~/Downloads/dtulearn/<course>/<unit>/, on the machine running
-    this server. Links and videos are not files and are only counted. Nothing
-    comes back as text -- for that, ask for the one topic with get_file.
+    this server, with an index.html beside them that lays the course out like
+    its site. Pictures and files the pages link to are fetched as well. Links
+    and videos are not files; the index points at them online.
+    Nothing comes back as text -- for that, ask for the one topic with get_file.
     """
     ou = _resolve(org_unit_id)
     modules = _get(f"/d2l/api/le/{LE}/{ou}/content/toc").get("Modules")
+    news = _get(f"/d2l/api/le/{LE}/{ou}/news/")
     jobs = list(_file_topics(modules))
-    if not jobs:
-        return "That course has no files to download."
+    atts = [(n["Id"], a) for n in news for a in n.get("Attachments") or []]
 
-    root = DOWNLOADS / _safe(_course_name(ou))
+    name = _course_name(ou)
+    root = DOWNLOADS / _safe(name)
+    root.mkdir(parents=True, exist_ok=True)
     # ponytail: eight at a time; a course is a few hundred files at most, so
     # nothing here needs a rate limiter or a resumable queue.
     with _client() as c, ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda job: _save_topic(c, ou, root, *job), jobs))
+        results += pool.map(lambda job: _save_attachment(c, ou, root, *job), atts)
+
+        keys = [t["TopicId"] for _, t in jobs] + [(nid, a["FileId"]) for nid, a in atts]
+        index = {
+            key: quote(p.relative_to(root).as_posix())
+            for key, (p, _) in zip(keys, results) if p
+        }
+        # The index and every saved HTML page can show pictures and link to
+        # files in D2L's file area. Fetch each of those once, then point the
+        # pages at the copies.
+        pages = {root / "index.html": _index_html(name, ou, modules, news, index)}
+        for p, _ in results:
+            if p and p.suffix.lower() in (".html", ".htm"):
+                try:
+                    pages[p] = p.read_bytes().decode("utf-8")
+                except UnicodeDecodeError:
+                    pass  # not ours to mangle; it keeps its online links
+        refs = {
+            url for html in pages.values() for m in REFERENCE.finditer(html)
+            if (url := _d2l_file(m.group(2)))
+        }
+        linked = dict(pool.map(lambda url: _save_linked(c, root, url), refs))
+    linked = {url: dest for url, dest in linked.items() if dest}
+    for page, html in pages.items():
+        page.write_text(_relink(html, page, linked), encoding="utf-8")
 
     saved = [p for p, err in results if p]
     failed = [err for p, err in results if err]
@@ -724,7 +944,15 @@ def download_course(org_unit_id: int) -> str:
     skipped = ", ".join(
         f"{n} {kind}" for kind, n in sorted(kinds.items()) if kind != "File"
     )
-    out = [f"Saved {len(saved)} files under {root}"]
+    out = [
+        f"Saved {len(saved)} files under {root}, plus {len(linked)} pictures and "
+        f"files the pages link to. Open {root / 'index.html'} to browse."
+    ]
+    if len(refs) > len(linked):
+        out.append(
+            f"{len(refs) - len(linked)} pictures or linked files could not be "
+            "fetched; the pages keep their online links for those."
+        )
     if skipped:
         out.append(f"Nothing to download for: {skipped}.")
     if failed:

@@ -3,13 +3,14 @@ import ast
 import configparser
 import datetime as datetime_module
 import os
+from urllib.parse import quote, unquote, urlparse
 import re
 import subprocess
 import tempfile
 import time
 import types
 import zipfile
-from html import unescape
+from html import escape, unescape
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -17,9 +18,10 @@ from pathlib import Path
 tree = ast.parse(open("server.py").read())
 wanted = {"_flatten", "_profiles", "_term", "_pdf_text", "_TextExtractor",
           "_html_text", "_urn_kind", "_ooxml_text", "_description",
-          "_calendar_lines", "_local", "_safe", "_file_topics"}
+          "_calendar_lines", "_local", "_safe", "_file_topics", "_index_html",
+          "_d2l_file", "_linked_dest", "_relink"}
 constants_extra = {"OOXML_MEMBERS"}
-constants = {"BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
+constants = {"BASE", "REFERENCE", "INDEX_CSS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS"}
 
 
 def needed(node):
@@ -39,6 +41,10 @@ mod.__dict__.update(
     HTMLParser=HTMLParser,
     zipfile=zipfile,
     unescape=unescape,
+    escape=escape,
+    quote=quote,
+    unquote=unquote,
+    urlparse=urlparse,
     datetime=datetime_module.datetime,
 )
 exec(
@@ -278,5 +284,61 @@ assert [(p, t["TopicId"]) for p, t in mod._file_topics(tree)] == [
 assert mod._safe("Lecture 1/2: a*b?") == "Lecture 1_2_ a_b_"
 assert mod._safe("...") == "untitled"
 assert len(mod._safe("x" * 200)) == 80
+assert mod._safe("a" * 78 + ", Fall") == "a" * 78
+
+# --- _index_html ----------------------------------------------------------
+page = mod._index_html(
+    "Course <1>", 7,
+    [{"ModuleId": 1, "Title": "Week 1",
+      "Description": {"Text": "", "Html": '<p>Room <b>101</b></p><img src="/content/x.png"><a href="//cdn.x/y">'},
+      "Topics": [
+          {"TopicId": 11, "Title": "Slides", "TypeIdentifier": "File"},
+          {"TopicId": 12, "Title": "Site", "TypeIdentifier": "Link", "Url": "https://x.dk"},
+          {"TopicId": 13, "Title": "Old", "TypeIdentifier": "File", "IsBroken": True},
+      ],
+      "Modules": [{"ModuleId": 2, "Title": "Sub", "Topics": []}]}],
+    [{"Id": 5, "Title": "Hi", "StartDate": "2026-09-01T10:00",
+      "Body": {"Text": "a < b", "Html": ""},
+      "Attachments": [{"FileId": 9, "FileName": "a.pdf"}, {"FileId": 8, "FileName": "b.pdf"}]}],
+    {11: "Week%201/Slides.pdf", (5, 9): "Announcements/5-a.pdf"},
+)
+for want in [
+    "<title>Course &lt;1&gt;</title>",
+    "<p>Room <b>101</b></p>",                       # unit HTML kept as is
+    '<img src="https://learn.inside.dtu.dk/content/x.png">',  # D2L path made absolute
+    '<a href="//cdn.x/y">',                         # protocol-relative left alone
+    '<a href="Week%201/Slides.pdf">Slides</a><span class="tag">PDF</span></li>',  # saved file, local link
+    '<a href="https://x.dk">Site</a><span class="tag online">Link · online</span>',
+    '/d2l/le/lessons/7/topics/13">Old</a><span class="tag online">File, broken · online</span>',
+    '<section id="u2"><h3>Sub</h3>',                # nested unit one level down
+    # sidebar tree: top level open, linking to the sections
+    '<li><details open><summary><a href="#u1">Week 1</a></summary><ul><li><a href="#u2">Sub</a></li></ul></details></li>',
+    "Announcements (1)</label>",
+    "<p>a &lt; b</p>",                              # plain text escaped
+    '<a href="Announcements/5-a.pdf">a.pdf</a>',
+    'b.pdf<span class="tag online">download failed</span>',
+]:
+    assert want in page, (want, page)
+assert "No announcements." in mod._index_html("C", 7, [], [], {})
+
+# --- _d2l_file, _linked_dest, _relink ---------------------------------------
+B = mod.BASE
+assert mod._d2l_file("/content/enforced/1-X/a.png") == B + "/content/enforced/1-X/a.png"
+assert mod._d2l_file(B + "/content/a.pdf?ou=1&amp;x=2") == B + "/content/a.pdf?ou=1&x=2"
+assert mod._d2l_file(B + "/d2l/common/dialogs/quickLink/quickLink.d2l?ou=1") is None
+assert mod._d2l_file("content/a.pdf") is None      # relative: already local in the index
+assert mod._d2l_file("https://elsewhere.dk/content/a.png") is None
+
+root = Path("/r")
+assert mod._linked_dest(root, B + "/content/enforced/1-X/W%201/a%20b.pdf") == \
+    root / "_linked/enforced/1-X/W 1/a b.pdf"
+assert mod._linked_dest(root, B + "/content/") == root / "_linked/untitled"
+
+page = '<img src="https://learn.inside.dtu.dk/content/p.png"> <a href="/content/f.pdf">f</a> <a href="https://x.dk">x</a>'
+got = mod._relink(page, root / "Week 1/page.html", {
+    B + "/content/p.png": root / "_linked/p.png",
+    B + "/content/f.pdf": root / "_linked/my f.pdf",
+})
+assert got == '<img src="../_linked/p.png"> <a href="../_linked/my%20f.pdf">f</a> <a href="https://x.dk">x</a>', got
 
 print("OK")
