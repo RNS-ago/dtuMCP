@@ -5,8 +5,9 @@
 """MCP server for DTU Learn (D2L Brightspace) course material.
 
 Auth: run `uv run --script server.py login`. That lists the Firefox
-profiles it finds, opens DTU Learn in the one you pick, waits for you
-to sign in, lifts the session cookies out of that profile's cookie database and
+profiles it finds and your default browser, opens DTU Learn in the one you
+pick, waits for you to sign in, lifts the session cookies out of that
+profile's cookie database (or has you paste them, for the default browser) and
 saves them to ~/.config/dtumcp/cookie.
 
 DTU_COOKIE still overrides the saved file if you would rather paste a Cookie
@@ -53,8 +54,14 @@ logging.getLogger("httpx").setLevel(logging.WARNING)  # one INFO line per reques
 
 # Chromium browsers (Chrome, Brave, Edge) encrypt their cookies with a key in
 # the desktop keyring, and LibreWolf never writes session cookies to disk, so
-# only Firefox is listed here.
+# only Firefox is listed here. Any other browser can still be used through the
+# default browser entry, by pasting its cookies.
 BROWSERS = {
+    # %APPDATA% is unset off Windows, so this never matches there.
+    "Firefox (Windows)": (
+        [os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Mozilla Firefox", "firefox.exe")],
+        os.path.join(os.environ.get("APPDATA", "~/AppData/Roaming"), "Mozilla", "Firefox"),
+    ),
     "Firefox": (["firefox"], "~/.mozilla/firefox"),
     "Firefox (snap)": (["firefox"], "~/snap/firefox/common/.mozilla/firefox"),
     "Firefox (flatpak)": (
@@ -95,18 +102,17 @@ def _profiles() -> list[tuple[str, list[str], Path]]:
     return found
 
 
-def _pick_profile() -> tuple[str, list[str], Path]:
+def _pick_profile() -> tuple[str, list[str], Path | None]:
+    """The browser to sign in with, as _profiles has it; a profile of None is
+    the default browser, whose cookies login has you paste."""
     found = _profiles()
-    if not found:
-        raise RuntimeError(
-            "No Firefox profile found. Set DTU_FIREFOX_PROFILE to "
-            "your profile directory."
-        )
+    if not os.environ.get("DTU_FIREFOX_PROFILE"):
+        found.append(("Default browser (you copy the cookies over)", [], None))
     if len(found) == 1:
         return found[0]
     print("Browsers found:")
     for i, (label, _, path) in enumerate(found, 1):
-        print(f"  {i}. {label}  [{path}]")
+        print(f"  {i}. {label}" + (f"  [{path}]" if path else ""))
     while True:
         choice = input("Sign in with which one? [1]: ").strip() or "1"
         if choice.isdigit() and 1 <= int(choice) <= len(found):
@@ -152,7 +158,7 @@ def _pdf_text(path: Path) -> str | None:
         done = subprocess.run(
             ["pdftotext", "-layout", "-q", str(path), "-"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",  # what pdftotext writes; text=True would guess cp1252 on Windows
             timeout=120,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -239,6 +245,20 @@ def _cookies_from_firefox(profile: Path) -> str:
     return "; ".join(f"{name}={value}" for name, value in jar.items())
 
 
+def _pasted_cookies() -> str:
+    """The session cookies, copied by hand out of the browser's developer
+    tools: only Firefox's can be read off the disk."""
+    print(
+        "\nCopy the session cookies over: open the browser's developer tools "
+        "(F12), then Storage (Firefox) or Application (Chrome, Edge) → Cookies "
+        f"→ {BASE}, and paste each value here."
+    )
+    jar = {name: input(f"{name}: ").strip() for name in ("d2lSessionVal", "d2lSecureSessionVal")}
+    if not all(jar.values()):
+        raise SystemExit("Both cookies are needed. Run login again once you have them.")
+    return "; ".join(f"{name}={value}" for name, value in jar.items())
+
+
 def login() -> None:
     """Open DTU Learn, wait for you to sign in, then save the session cookies."""
     label, command, profile = _pick_profile()
@@ -255,16 +275,18 @@ def login() -> None:
         )
     else:
         webbrowser.open(url)
-    input("Press Enter once you are logged in: ")
-
-    cookie = _cookies_from_firefox(profile)
-    if "d2lSessionVal" not in cookie:
-        raise SystemExit(
-            f"No DTU Learn session cookie in {label}. Check that you signed in "
-            "there and that the login finished. The browser rewrites its "
-            "session-restore file every ~15 seconds, so if the login just "
-            "completed, wait a moment and run login again."
-        )
+    if profile is None:
+        cookie = _pasted_cookies()
+    else:
+        input("Press Enter once you are logged in: ")
+        cookie = _cookies_from_firefox(profile)
+        if "d2lSessionVal" not in cookie:
+            raise SystemExit(
+                f"No DTU Learn session cookie in {label}. Check that you signed in "
+                "there and that the login finished. The browser rewrites its "
+                "session-restore file every ~15 seconds, so if the login just "
+                "completed, wait a moment and run login again."
+            )
     COOKIE_FILE.parent.mkdir(parents=True, exist_ok=True)
     COOKIE_FILE.parent.chmod(0o700)
     COOKIE_FILE.write_text(cookie)
@@ -849,7 +871,7 @@ def _safe(name: str) -> str:
     """A title becomes a directory or file name, so drop what a filesystem
     would choke on and keep the rest recognisable."""
     # Strip after cutting, or a long course name ends in ", " once cut at 80.
-    return re.sub(r'[\\/:*?"<>|]+', "_", name)[:80].strip(" .,") or "untitled"
+    return re.sub(r'[\x00-\x1f\\/:*?"<>|]+', "_", name)[:80].strip(" .,") or "untitled"
 
 
 def _file_topics(modules, parents=()):
@@ -2024,6 +2046,10 @@ def _usage() -> str:
 
 
 if __name__ == "__main__":
+    # On Windows a pipe gets the locale's code page and \r\n line ends, which
+    # the LearnHarness plugin, reading UTF-8 lines, would garble or fail to match.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", newline="\n")
     # A command name as the first argument runs that one thing and prints the
     # result, for pasting into claude.ai or any other chat. No server, no
     # network exposure.

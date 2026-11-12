@@ -18,7 +18,7 @@ from pathlib import Path
 
 # Load the functions under test without importing the mcp dependency.
 tree = ast.parse(open("server.py").read())
-wanted = {"_flatten", "_profiles", "_term", "_pdf_text", "_TextExtractor",
+wanted = {"_flatten", "_profiles", "_pick_profile", "_term", "_pdf_text", "_TextExtractor",
           "_html_text", "_urn_kind", "_ooxml_text", "_description",
           "_calendar_lines", "_local", "_safe", "_file_topics", "_index_html",
           "_d2l_file", "_linked_dest", "_relink",
@@ -244,6 +244,17 @@ with tempfile.TemporaryDirectory() as tmp:
     # No profiles.ini anywhere means nothing found, not a crash.
     (firefox / "profiles.ini").unlink()
     assert mod._profiles() == []
+    # With no Firefox at all, login goes straight to the default browser.
+    assert mod._pick_profile()[2] is None
+
+    # Windows keeps profiles under %APPDATA%, which is ~/AppData/Roaming.
+    windows = Path(tmp) / "AppData" / "Roaming" / "Mozilla" / "Firefox"
+    (windows / "t8zsz31d.default-release").mkdir(parents=True)
+    (windows / "t8zsz31d.default-release" / "cookies.sqlite").touch()
+    (windows / "profiles.ini").write_text(INI)
+    assert [(label, path) for label, _, path in mod._profiles()] == [
+        ("Firefox (Windows): default-release (default)", windows / "t8zsz31d.default-release"),
+    ], mod._profiles()
 
 # --- _calendar_lines ------------------------------------------------------
 os.environ["TZ"] = "Europe/Copenhagen"

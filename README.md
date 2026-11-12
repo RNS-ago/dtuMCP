@@ -11,10 +11,17 @@ authenticates with your own browser session cookies instead.
 uv run --script server.py login
 ```
 
-That lists the Firefox profiles it finds (regular, snap and flatpak
-installs) and asks which one to use. It opens DTU Learn in that
-profile. Sign in, press Enter in the terminal, and the session cookies land in `~/.config/dtumcp/cookie` (mode 600). It prints your
+That lists the Firefox profiles it finds (regular, snap and flatpak installs
+on Linux, the regular install on Windows) and your default browser, and asks
+which one to use. It opens DTU Learn in that profile. Sign in, press Enter in
+the terminal, and the session cookies land in `~/.config/dtumcp/cookie` (mode
+600; `%USERPROFILE%\.config\dtumcp\cookie` on Windows). It prints your
 course list to confirm.
+
+With the default browser, the cookies cannot be read off the disk, so `login`
+asks you to paste them: open the developer tools (F12), then Storage (Firefox)
+or Application (Chrome, Edge) → Cookies → `https://learn.inside.dtu.dk`, and
+copy the values of `d2lSessionVal` and `d2lSecureSessionVal`.
 
 `d2lSessionVal` is a session cookie, and Firefox never writes those to
 `cookies.sqlite` — they live in memory, mirrored into
@@ -31,9 +38,10 @@ One `login` covers every client: they all read the same file.
 Sessions expire after a few hours of inactivity or at logout. When a tool says
 the session was rejected, run `login` again.
 
-Firefox only: Chromium browsers (Chrome, Brave, Edge) encrypt their cookies
-with a key kept in the desktop keyring, and LibreWolf never writes session
-cookies to disk. The list puts each install's `[Install...]` profile from `profiles.ini` first and marks it
+Only Firefox's cookies are read for you: Chromium browsers (Chrome, Brave,
+Edge) encrypt theirs with a key kept in the desktop keyring, and LibreWolf
+never writes session cookies to disk. Use the default browser entry for those.
+The list puts each install's `[Install...]` profile from `profiles.ini` first and marks it
 `(default)` — that is the one the browser actually launches, while the
 `Default=1` flag often points at a stale older profile. Set
 `DTU_FIREFOX_PROFILE` to a profile directory to skip the scan.
@@ -47,7 +55,8 @@ machine. Nothing listens on a port and nothing is exposed to the network.
 
 Use the **absolute path to `uv`**. Anything launched from a desktop icon or a
 `.desktop` entry does not inherit your shell's `PATH`, so a bare `uv` fails with
-`spawn uv ENOENT`. `which uv` gives you the path to use.
+`spawn uv ENOENT`. `which uv` gives you the path to use; on Windows,
+`where uv` (usually `C:\Users\you\.local\bin\uv.exe`).
 
 **Claude Code** — registers for the CLI and the VS Code extension at once:
 
@@ -261,11 +270,12 @@ copy.
 Install it, and again after any change to `server.py`:
 
 ```bash
-learnharness/install.sh
+uv run learnharness/install.py
 ```
 
 That copies the plugin, `server.py` and its tool list into
-`~/.config/LearnHarness/data/plugins/dtu-learn/dist/`. If **Settings →
+`~/.config/LearnHarness/data/plugins/dtu-learn/dist/`
+(`%APPDATA%\LearnHarness\data\plugins\dtu-learn\dist\` on Windows). If **Settings →
 Community plugins** shows a different plugins directory, pass that one as the
 argument. Restart LearnHarness, which loads plugin code only at start, and
 enable **DTU Learn** under Settings → Community plugins.
@@ -330,7 +340,9 @@ the unit; `list_announcements` has those, with the ids of any attached files.
 `download_course` makes an offline copy of a course. It walks the whole
 content tree and saves every file under `~/Downloads/dtulearn/<course>/<unit>/`,
 eight at a time, naming each file after its topic so a second run overwrites
-instead of piling up copies. Announcement attachments go in
+instead of piling up copies. Windows limits a path to 260 characters unless
+long paths are switched on (`LongPathsEnabled` in the registry), and a deeply
+nested course can pass that. Announcement attachments go in
 `<course>/Announcements/`. `_course-<id>.json` keeps the content tree, the
 announcements, where each file went, and which saved file each of the pages'
 links to the course's file area stands for; the reading tools and the
@@ -443,7 +455,9 @@ assistant, so the content has to come back in the reply itself.
 
 PDFs are saved there too, but `get_file` returns their extracted text: a 34-page
 lecture deck is about 4k tokens as text against roughly 50k as page images.
-Extraction needs `pdftotext` from poppler-utils; without it, or for a scanned
+Extraction needs `pdftotext` from poppler-utils (on Windows, `scoop install
+poppler`, or a [poppler-windows](https://github.com/oschwartz10612/poppler-windows)
+release with its `bin` folder on `PATH`); without it, or for a scanned
 PDF with no text layer, `get_file` just returns the path. The text heads each
 page `[Page n]`.
 

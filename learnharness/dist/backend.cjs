@@ -1,6 +1,6 @@
 // Gives LearnHarness's tutors the dtuMCP tools and answers the DTU Learn view.
 // Every call runs server.py's command line once. server.py and tools.json (its
-// tool list) sit beside this file; install.sh copies them here.
+// tool list) sit beside this file; install.py copies them here.
 const { execFile, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -114,6 +114,13 @@ const roleInstructions = {
 	teacher: `When the topic comes from a DTU course, scope it from the course before your own knowledge: read its pages on the topic (dtu_search_courses, then dtu_get_file or dtu_get_pdf_pages). Its real definitions are candidate unconditional truths; its lecture order is evidence of what rests on what; its notation is what the map and every question use. Where it skips a motivation, the method still applies: supply it, then tie it back to how the course puts it. In the approach you present, cite the pages with a dtu-learn block. If dtu_calendar shows a lecture, hand-in or quiz on the topic coming up, mention it so the learner can choose the scope; it does not change the pace. When a step is done, point to the course's own exercises on it (exercise sheets, problem sheets, old exams) with a dtu-learn block.`,
 	practice: `When the session's material is a DTU course topic, pose problems in the course's style and notation. Draw on its exercise sheets, problem sheets and old exams (dtu_search_courses "exercise", "exam" and the topic): adapt rather than copy a problem whose solution the course publishes, and check your model solution against the course's suggested solutions where they exist. Never pose a question from an open graded hand-in or quiz. In your closing words after concluding a problem drawn from the course, cite its source with a dtu-learn block.`,
 };
+
+// Extensions Windows runs rather than shows when told to open a file, so a
+// course's .exe or .js would start on one click. Empty off Windows.
+const WINDOWS_RUNS = new Set(process.platform !== "win32" ? [] : [
+	...(process.env.PATHEXT ?? "").toLowerCase().split(";").filter(Boolean),
+	".lnk", ".url", ".msi", ".hta", ".scr", ".cpl", ".reg", ".jar",
+]);
 
 // The id arguments the view sends, checked before they reach a command line.
 const id = value => {
@@ -636,8 +643,17 @@ exports.activate = ctx => {
 	});
 	// Opens a saved file ({ou, topic}) or a link ({url}) in its usual app.
 	ctx.handle("open", async input => {
-		const target = typeof input?.url === "string" ? webAddress(input.url) : savedFile(input);
-		const child = spawn(process.platform === "darwin" ? "open" : "xdg-open", [target], { detached: true, stdio: "ignore", env });
+		const link = typeof input?.url === "string";
+		const target = link ? webAddress(input.url) : savedFile(input);
+		if (!link && WINDOWS_RUNS.has(path.extname(target).toLowerCase())) {
+			throw new Error(`Not opened: Windows would run ${path.basename(target)} as a program. It is saved at ${target}.`);
+		}
+		// PowerShell reads the target from the environment, so no character in
+		// a file name or a link needs quoting for a command line.
+		const [command, args] = process.platform === "win32"
+			? ["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "[Diagnostics.Process]::Start($env:DTU_OPEN)"]]
+			: [process.platform === "darwin" ? "open" : "xdg-open", [target]];
+		const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true, env: { ...env, DTU_OPEN: target } });
 		child.unref();
 		await new Promise((resolve, reject) => child.once("spawn", resolve).once("error", reject));
 	});
