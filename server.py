@@ -1,14 +1,14 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["mcp[cli]>=2", "httpx"]
+# dependencies = ["mcp[cli]>=2", "httpx", "websockets>=12"]
 # ///
 """MCP server for DTU Learn (D2L Brightspace) course material.
 
 Auth: run `uv run --script server.py login`. That lists the Firefox
-profiles it finds and your default browser, opens DTU Learn in the one you
-pick, waits for you to sign in, lifts the session cookies out of that
-profile's cookie database (or has you paste them, for the default browser) and
-saves them to ~/.config/dtumcp/cookie.
+profiles it finds, Chrome and your default browser, opens DTU Learn in the
+one you pick, waits for you to sign in, lifts the session cookies out of that
+profile's cookie database (asks Chrome for them, or has you paste them, for
+the default browser) and saves them to ~/.config/dtumcp/cookie.
 
 DTU_COOKIE still overrides the saved file if you would rather paste a Cookie
 header from devtools yourself.
@@ -42,6 +42,7 @@ import anyio
 import httpx
 from mcp.server.mcpserver import Context, Image, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from websockets.sync.client import connect as websocket
 
 BASE = os.environ.get("DTU_BASE", "https://learn.inside.dtu.dk")
 LP, LE = "1.63", "1.97"
@@ -52,10 +53,10 @@ mcp = MCPServer("dtu-learn")
 logging.getLogger("httpx").setLevel(logging.WARNING)  # one INFO line per request
 
 
-# Chromium browsers (Chrome, Brave, Edge) encrypt their cookies with a key in
-# the desktop keyring, and LibreWolf never writes session cookies to disk, so
-# only Firefox is listed here. Any other browser can still be used through the
-# default browser entry, by pasting its cookies.
+# The Firefox installs whose cookie databases login reads. LibreWolf never
+# writes session cookies to disk, so it is not one; Chrome is asked over its
+# DevTools instead (see CHROMES), and any other browser can still be used
+# through the default browser entry, by pasting its cookies.
 BROWSERS = {
     # %APPDATA% is unset off Windows, so this never matches there.
     "Firefox (Windows)": (
@@ -102,21 +103,44 @@ def _profiles() -> list[tuple[str, list[str], Path]]:
     return found
 
 
-def _pick_profile() -> tuple[str, list[str], Path | None]:
-    """The browser to sign in with, as _profiles has it; a profile of None is
-    the default browser, whose cookies login has you paste."""
-    found = _profiles()
+# Chrome encrypts its cookie database, on Windows with a key only Chrome
+# itself may use, and by default keeps session cookies such as d2lSessionVal
+# in memory only. So login asks the running browser over the DevTools
+# protocol, which Chrome serves only for a profile other than your usual one:
+# DTU Learn gets a profile of its own, kept for next time.
+CHROME_PROFILE = COOKIE_FILE.parent / "chrome"
+CHROMES = ["google-chrome", "google-chrome-stable", *(
+    os.path.join(os.environ[root], "Google", "Chrome", "Application", "chrome.exe")
+    for root in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA") if root in os.environ
+)]
+
+
+def _pick_browser() -> tuple:
+    """The browser to sign in with: Firefox profiles, then Chrome, then the
+    default browser. Returns its label, the command that opens a URL in it
+    ([] for the default browser) and what reads its session cookies after."""
+    found = [
+        (label, [*command, "--profile", str(path)] if command else [],
+         partial(_cookies_from_firefox, path), path)
+        for label, command, path in _profiles()
+    ]
     if not os.environ.get("DTU_FIREFOX_PROFILE"):
-        found.append(("Default browser (you copy the cookies over)", [], None))
+        chrome = next(filter(None, map(shutil.which, CHROMES)), None)
+        if chrome:
+            found.append(("Chrome, in a window of its own", [
+                chrome, f"--user-data-dir={CHROME_PROFILE}", "--remote-debugging-port=0",
+                "--no-first-run", "--no-default-browser-check",
+            ], _cookies_from_chrome, CHROME_PROFILE))
+        found.append(("Default browser (you copy the cookies over)", [], _pasted_cookies, None))
     if len(found) == 1:
-        return found[0]
+        return found[0][:3]
     print("Browsers found:")
-    for i, (label, _, path) in enumerate(found, 1):
+    for i, (label, _, _, path) in enumerate(found, 1):
         print(f"  {i}. {label}" + (f"  [{path}]" if path else ""))
     while True:
         choice = input("Sign in with which one? [1]: ").strip() or "1"
         if choice.isdigit() and 1 <= int(choice) <= len(found):
-            return found[int(choice) - 1]
+            return found[int(choice) - 1][:3]
         print(f"Enter a number from 1 to {len(found)}.")
 
 
@@ -245,6 +269,29 @@ def _cookies_from_firefox(profile: Path) -> str:
     return "; ".join(f"{name}={value}" for name, value in jar.items())
 
 
+def _cookies_from_chrome() -> str:
+    """Ask the Chrome that login started for DTU Learn's cookies, over the
+    DevTools protocol (see CHROME_PROFILE), then close it."""
+    try:
+        port, path = (CHROME_PROFILE / "DevToolsActivePort").read_text().split()[:2]
+    except (OSError, ValueError):
+        raise SystemExit("Chrome did not start with DTU Learn's profile. Run login again.")
+    host = urlparse(BASE).hostname
+    try:
+        with websocket(f"ws://127.0.0.1:{port}{path}", max_size=None) as ws:
+            ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
+            while (reply := json.loads(ws.recv())).get("id") != 1:
+                pass  # an event, not the answer
+            # The window was only for signing in; the profile keeps the sign-in.
+            ws.send(json.dumps({"id": 2, "method": "Browser.close"}))
+    except OSError:
+        raise SystemExit("Chrome was closed before its cookies could be read. Run login again and leave its window open.")
+    return "; ".join(
+        f"{c['name']}={c['value']}" for c in reply["result"]["cookies"]
+        if c["domain"] in (host, f".{host}")
+    )
+
+
 def _pasted_cookies() -> str:
     """The session cookies, copied by hand out of the browser's developer
     tools: only Firefox's can be read off the disk."""
@@ -261,34 +308,32 @@ def _pasted_cookies() -> str:
 
 def login() -> None:
     """Open DTU Learn, wait for you to sign in, then save the session cookies."""
-    label, command, profile = _pick_profile()
+    label, command, read = _pick_browser()
+    # Before the browser starts: Chrome's profile for DTU Learn goes in here too.
+    COOKIE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    COOKIE_FILE.parent.chmod(0o700)
     url = f"{BASE}/d2l/home"
     print(f"Opening {url} in {label}. Sign in there, then return to this terminal.")
     if command and shutil.which(command[0]):
         # Naming the profile makes the browser open the URL in that profile,
         # handing it to the running window if there is one.
         subprocess.Popen(
-            [*command, "--profile", str(profile), url],
+            [*command, url],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
     else:
         webbrowser.open(url)
-    if profile is None:
-        cookie = _pasted_cookies()
-    else:
-        input("Press Enter once you are logged in: ")
-        cookie = _cookies_from_firefox(profile)
-        if "d2lSessionVal" not in cookie:
-            raise SystemExit(
-                f"No DTU Learn session cookie in {label}. Check that you signed in "
-                "there and that the login finished. The browser rewrites its "
-                "session-restore file every ~15 seconds, so if the login just "
-                "completed, wait a moment and run login again."
-            )
-    COOKIE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    COOKIE_FILE.parent.chmod(0o700)
+    input("Press Enter once you are logged in: ")
+    cookie = read()
+    if "d2lSessionVal" not in cookie:
+        raise SystemExit(
+            f"No DTU Learn session cookie in {label}. Check that you signed in "
+            "there and that the login finished. Firefox rewrites its "
+            "session-restore file every ~15 seconds, so if the login just "
+            "completed, wait a moment and run login again."
+        )
     COOKIE_FILE.write_text(cookie)
     COOKIE_FILE.chmod(0o600)
     print(f"Saved session to {COOKIE_FILE}\n")

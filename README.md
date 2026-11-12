@@ -12,11 +12,21 @@ uv run --script server.py login
 ```
 
 That lists the Firefox profiles it finds (regular, snap and flatpak installs
-on Linux, the regular install on Windows) and your default browser, and asks
-which one to use. It opens DTU Learn in that profile. Sign in, press Enter in
+on Linux, the regular install on Windows), then Chrome if it is installed,
+then your default browser, and asks which one to use. It opens DTU Learn in that profile. Sign in, press Enter in
 the terminal, and the session cookies land in `~/.config/dtumcp/cookie` (mode
 600; `%USERPROFILE%\.config\dtumcp\cookie` on Windows). It prints your
 course list to confirm.
+
+Chrome opens in a window of its own, on a profile kept in
+`~/.config/dtumcp/chrome`. Chrome encrypts its cookie database (on Windows with
+a key only Chrome itself may use) and keeps session cookies in memory, so
+`login` asks the running browser for them over its DevTools protocol, which
+Chrome serves only for a profile other than your usual one. Sign in there,
+press Enter, and `login` closes the window once it has the cookies. The profile
+stays, so DTU's sign-in may remember you next time; it holds your sign-in, so
+keep it as private as the cookie file. While that window is open, other
+programs on this computer can reach its DevTools port too.
 
 With the default browser, the cookies cannot be read off the disk, so `login`
 asks you to paste them: open the developer tools (F12), then Storage (Firefox)
@@ -38,10 +48,8 @@ One `login` covers every client: they all read the same file.
 Sessions expire after a few hours of inactivity or at logout. When a tool says
 the session was rejected, run `login` again.
 
-Only Firefox's cookies are read for you: Chromium browsers (Chrome, Brave,
-Edge) encrypt theirs with a key kept in the desktop keyring, and LibreWolf
-never writes session cookies to disk. Use the default browser entry for those.
-The list puts each install's `[Install...]` profile from `profiles.ini` first and marks it
+Other browsers (Edge, Brave, LibreWolf, which never writes session cookies to
+disk) go through the default browser entry. The list puts each install's `[Install...]` profile from `profiles.ini` first and marks it
 `(default)` — that is the one the browser actually launches, while the
 `Default=1` flag often points at a stale older profile. Set
 `DTU_FIREFOX_PROFILE` to a profile directory to skip the scan.

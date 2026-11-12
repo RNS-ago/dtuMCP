@@ -18,7 +18,7 @@ from pathlib import Path
 
 # Load the functions under test without importing the mcp dependency.
 tree = ast.parse(open("server.py").read())
-wanted = {"_flatten", "_profiles", "_pick_profile", "_term", "_pdf_text", "_TextExtractor",
+wanted = {"_flatten", "_profiles", "_pick_browser", "_pasted_cookies", "_cookies_from_chrome", "_term", "_pdf_text", "_TextExtractor",
           "_html_text", "_urn_kind", "_ooxml_text", "_description",
           "_calendar_lines", "_local", "_safe", "_file_topics", "_index_html",
           "_d2l_file", "_linked_dest", "_relink",
@@ -40,6 +40,9 @@ def needed(node):
 mod = types.ModuleType("m")
 mod.__dict__.update(
     configparser=configparser,
+    shutil=__import__("shutil"),
+    partial=__import__("functools").partial,
+    CHROMES=[],  # a Chrome on the machine running the tests is not one to list
     mimetypes=__import__("mimetypes"),
     os=os,
     re=re,
@@ -244,8 +247,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # No profiles.ini anywhere means nothing found, not a crash.
     (firefox / "profiles.ini").unlink()
     assert mod._profiles() == []
-    # With no Firefox at all, login goes straight to the default browser.
-    assert mod._pick_profile()[2] is None
+    # With no Firefox or Chrome, login goes straight to the default browser.
+    assert mod._pick_browser()[2] is mod._pasted_cookies
 
     # Windows keeps profiles under %APPDATA%, which is ~/AppData/Roaming.
     windows = Path(tmp) / "AppData" / "Roaming" / "Mozilla" / "Firefox"
@@ -255,6 +258,30 @@ with tempfile.TemporaryDirectory() as tmp:
     assert [(label, path) for label, _, path in mod._profiles()] == [
         ("Firefox (Windows): default-release (default)", windows / "t8zsz31d.default-release"),
     ], mod._profiles()
+
+# --- _cookies_from_chrome -------------------------------------------------
+# Asked over DevTools at the port Chrome wrote down: the answer comes after
+# any event, only DTU Learn's cookies are kept, and the window is closed.
+with tempfile.TemporaryDirectory() as tmp:
+    mod.CHROME_PROFILE = Path(tmp)
+    (Path(tmp) / "DevToolsActivePort").write_text("41234\n/devtools/browser/abc\n")
+    sent, replies = [], iter([{"method": "Target.targetCreated"}, {"id": 1, "result": {"cookies": [
+        {"name": "d2lSessionVal", "value": "s", "domain": "learn.inside.dtu.dk"},
+        {"name": "d2lSecureSessionVal", "value": "t", "domain": ".learn.inside.dtu.dk"},
+        {"name": "ESTSAUTH", "value": "x", "domain": ".login.microsoftonline.com"},
+    ]}}])
+
+    class Socket:
+        def __init__(self, url, **_):
+            sent.append(url)
+        __enter__ = lambda self: self
+        __exit__ = lambda self, *exc: None
+        send = lambda self, text: sent.append(json.loads(text)["method"])
+        recv = lambda self: json.dumps(next(replies))
+
+    mod.websocket = Socket
+    assert mod._cookies_from_chrome() == "d2lSessionVal=s; d2lSecureSessionVal=t"
+    assert sent == ["ws://127.0.0.1:41234/devtools/browser/abc", "Storage.getCookies", "Browser.close"], sent
 
 # --- _calendar_lines ------------------------------------------------------
 os.environ["TZ"] = "Europe/Copenhagen"
