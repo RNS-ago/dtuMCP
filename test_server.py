@@ -26,16 +26,16 @@ wanted = {"_flatten", "_profiles", "_pick_browser", "_pasted_cookies", "_cookies
           "_each", "_status", "_summary", "_code",
           "_copies", "_copy", "_data_dir", "_saved_text", "_file_text", "_decode",
           "_numbered_pages", "_poppler", "_picture_pages", "_page_marks", "_math_pages",
-          "_figure_shape", "_drawing_pages", "_displayed", "_rule", "_script", "_nest",
+          "_figure_shape", "_delimiters", "_delimiter", "_drawing_pages", "_displayed", "_rule", "_script", "_nest",
           "_rebuild_page", "_write_math_text", "_math_text", "_pdf_objects", "_pdf_stream",
-          "_utf16", "_cmap_entries", "_cmap", "_tex_maps", "_save", "_rich", "_group_rows",
+          "_utf16", "_cmap_entries", "_cmap", "_tex_maps", "_unmapped_fonts", "_font_pages", "_word_boxes", "_save", "_rich", "_group_rows",
           "_humps", "_parts", "_terms", "_index", "_drop_course", "_index_course", "_sync_index",
           "_search_docs", "_search", "_search_answer", "search_courses"}
 constants_extra = {"OOXML_MEMBERS"}
 constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT", "INDEX_VERSION", "INDEX_SCHEMA", "INDEX_WEIGHTS",
              "MATH_FONT", "SVG", "SVG_HIDDEN", "NUMBER",
-             "OMX", "CAPITALS", "TEX_GLYPHS", "PIECES", "PDF_OBJECT", "HEX",
-             "BIG_OPERATORS", "DELIMITER_PIECES", "ACCENTS", "MATH_TEXT", "MATH_NOTATION"}
+             "OMX", "CAPITALS", "TEX_GLYPHS", "CAMBRIA", "OFFICE_NARY", "PIECES", "PDF_OBJECT", "HEX",
+             "BIG_OPERATORS", "DELIMITER_PIECES", "WORD_BOX", "ACCENTS", "MATH_TEXT", "MATH_NOTATION"}
 
 
 def needed(node):
@@ -652,6 +652,30 @@ sy = pdf((1, b"<< /Type /Catalog >>"), (3, b"<< /Type /Font /BaseFont /XY+CMSY10
          (4, b"<< /Length %d >>\nstream\n%s\nendstream" % (len(cmap), cmap)))
 entries = mod._cmap_entries(mod._pdf_stream(mod._pdf_objects(mod._tex_maps(sy))[4]))
 assert (entries[ord("N")], entries[0x32], entries[ord("P")]) == ("𝒩", "∈", "𝒫"), entries
+# Office's Cambria Math, whose map has two-byte codes, gets its ∏ (ෑ, ς) and
+# ∑ (෍, σ) back; its other entries, the 𝑖 here, stay, in a two-byte map.
+cmap = (b"1 begincodespacerange <0000> <FFFF> endcodespacerange "
+        b"4 beginbfchar <0101> <0DD1> <0102> <03C3> <0103> <D835DC56> <0104> <0DCD> endbfchar")
+office = pdf((1, b"<< /Type /Catalog >>"), (3, b"<< /Type /Font /BaseFont /BCDGEE+CambriaMath /ToUnicode 4 0 R >>"),
+             (4, b"<< /Length %d >>\nstream\n%s\nendstream" % (len(cmap), cmap)))
+fixed = mod._pdf_stream(mod._pdf_objects(mod._tex_maps(office))[4])
+assert mod._cmap_entries(fixed) == {0x101: "∏", 0x102: "∑", 0x103: "𝑖", 0x104: "∑"}, fixed
+assert b"<0000> <FFFF>" in fixed and b"<0101> <220F>" in fixed
+# A font whose map names few of the glyphs its widths list, with no encoding
+# to fall back on, as PowerPoint for the Mac embeds Cambria Math, is unreadable;
+# one with an /Encoding or a fuller map is not. Its pages are the ones using it.
+cmap = b"1 beginbfchar <21> <0028> endbfchar"
+mac = pdf((1, b"<< /Type /Catalog >>"), (4, b"<< /Length %d >>\nstream\n%s\nendstream" % (len(cmap), cmap)),
+          (3, b"<< /Type /Font /Subtype /TrueType /BaseFont /AAAAAW+CambriaMath /FirstChar 33 /LastChar 38 "
+              b"/Widths [500 500 0 500 500 500] /ToUnicode 4 0 R >>"),
+          (5, b"<< /Type /Font /Subtype /TrueType /BaseFont /AAAAAX+Calibri /FirstChar 33 /LastChar 38 "
+              b"/Encoding /WinAnsiEncoding /Widths 6 0 R /ToUnicode 4 0 R >>"), (6, b"[500 500 500 500 500 500]"))
+assert mod._unmapped_fonts(mac) == {"AAAAAW+CambriaMath"}
+xml = ("<pdf2xml><page number='1'><fontspec id='0' size='20' family='AAAAAW+CambriaMath'/>"
+       "<text font='0'> </text></page><page number='2'><text font='0'>8</text></page>"
+       "<page number='3'><fontspec id='1' size='20' family='AAAAAX+Calibri'/><text font='1'>a</text></page></pdf2xml>")
+assert mod._font_pages(xml, {"AAAAAW+CambriaMath"}) == {2} and mod._font_pages("<", {"x"}) == set()
+assert mod._numbered_pages("a\fb\f", {"math": [2], "symbols": [2]}) == "[Page 1]\na\n\n[Page 2, has math, unreadable symbols]\nb"
 # bfrange entries are read too, as a run and as a list.
 assert mod._cmap_entries(b"beginbfrange <41> <43> <0061> <44> <45> [<03B1> <03B2>] endbfrange") == {
     0x41: "a", 0x42: "b", 0x43: "c", 0x44: "α", 0x45: "β"}
@@ -687,6 +711,66 @@ lines = [" ".join(line.split()) for line in mod._rebuild_page(page, fonts, rules
 assert lines == ["x_i + y^2 e^{−1^2}", "z = (a+b)/2", "A B", "1 2", "s = ∑_{i=1}^n x", "exp(−1)"], lines
 assert mod._nest([]) == ""
 
+# Drawn brackets (in points, here at scale 1) go into the formula beside them:
+# "{" inside the run pdftohtml spans across its gap, at the run's space, "}"
+# after it, carrying the superscript; "(" beside plain text only is dropped.
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 120, 24, 0, "H: 0,1"), run(95, 232, 8, 17, 1, "∗"), run(100, 410, 50, 24, 2, "from"),
+]) + "</page>")
+fonts = {"0": (24, "AB+CambriaMath"), "1": (17, "AB+CambriaMath"), "2": (24, "AB+Calibri")}
+drawn = [("{", 156, 100, 164, 126), ("}", 222, 100, 230, 126), ("(", 395, 100, 403, 126)]
+lines = [" ".join(line.split()) for line in mod._rebuild_page(page, fonts, [], 1, drawn).splitlines()]
+assert lines == ["H: {0,1}^∗ from"], lines
+
+# Office runs a ∏ into the text before it; split off, it takes its limits
+# set beside it, the upper one nearer the line above. A script is small next
+# to its base, though the page's text (here 27) is smaller than the base (36).
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(250, 100, 160, 39, 1, "rounds is"), run(300, 100, 160, 39, 0, "= 1 − ∏"),
+    run(330, 260, 40, 28, 2, "𝑖=1"), run(280, 260, 45, 28, 2, "𝑞−1"),
+    run(500, 100, 900, 27, 1, "plenty of text at the page's own size, which is 27"),
+    run(600, 100, 100, 36, 0, "𝑀𝐷𝐻𝑎𝑠ℎ"), run(615, 200, 15, 26, 2, "ℎ"),
+]) + "</page>")
+fonts = {"0": (39, "AB+CambriaMath"), "1": (27, "AB+Calibri"), "2": (26, "AB+CambriaMath")}
+lines = [" ".join(line.split()) for line in mod._rebuild_page(page, fonts, [], 1).splitlines()]
+assert lines[1] == "= 1 − ∏^{𝑞−1}_{𝑖=1}" and lines[3] == "𝑀𝐷𝐻𝑎𝑠ℎ_ℎ", lines
+# A slide's two columns share a line, so a script says sub or super by the
+# text it follows, not by the line (02231 RSA p7). A diagram's label just
+# under a formula's last script stays off it (RSA p4: m_k, then labels m_2).
+fonts = {"0": (42, "AB+CambriaMath"), "1": (36, "AB+CambriaMath"), "2": (27, "AB+CambriaMath"),
+         "3": (26, "AB+CambriaMath"), "4": (20, "AB+CambriaMath"), "5": (31, "AB+CambriaMath")}
+page = mod.ET.fromstring("<page number='1' width='1400' height='800'>" + "".join([
+    run(400, 100, 900, 27, 2, "plenty of text at the page's own size, which is 27"),
+    run(582, 164, 69, 36, 1, "1.  "), run(582, 233, 20, 36, 1, "𝑦"), run(582, 273, 103, 36, 1, "= ℎ(𝑚"),
+    run(582, 388, 32, 36, 1, "|𝑦"), run(582, 464, 15, 36, 1, ")"),
+    run(569, 778, 47, 27, 2, "5.  "), run(569, 824, 15, 27, 2, "𝑦"), run(580, 839, 11, 20, 4, "3"),
+    run(569, 859, 138, 27, 2, "= ℎ(0110|𝑦"), run(580, 996, 11, 20, 4, "2"), run(569, 1009, 11, 27, 2, ")"),
+]) + "</page>")
+text = " ".join(mod._rebuild_page(page, fonts, [], 1).split())
+assert "𝑦_3 = ℎ(0110|𝑦_2)" in text, text
+page = mod.ET.fromstring("<page number='1' width='1400' height='800'>" + "".join([
+    run(100, 100, 900, 42, 0, "plenty of text at the page's own size, which is 42"),
+    run(499, 782, 87, 42, 0, "… |𝑚"), run(516, 869, 19, 31, 5, "𝑘"),
+    run(561, 359, 23, 27, 2, "𝑚"), run(572, 382, 11, 20, 4, "2"),
+    run(561, 885, 23, 27, 2, "𝑚"), run(572, 908, 12, 20, 4, "𝑘"),
+]) + "</page>")
+lines = [" ".join(line.split()) for line in mod._rebuild_page(page, fonts, [], 1).splitlines()]
+assert lines[-2:] == ["… |𝑚_𝑘", "𝑚_2 𝑚_𝑘"], lines
+# A bracket inside a run goes between the words pdftotext -bbox places it
+# between, though by letter count it falls nearer the next space.
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + run(100, 100, 300, 39, 0, "ab cd efghijklmno") + "</page>")
+words = [(100, 100, 300, 139, "ab"), (310, 100, 330, 139, "cd"), (340, 100, 400, 139, "efghijklmno")]
+assert mod._rebuild_page(page, fonts, [], 1, [("(", 302, 100, 308, 140)], words).strip() == "ab (cd efghijklmno"
+assert mod._rebuild_page(page, fonts, [], 1, [("(", 302, 100, 308, 140)]).strip() == "ab cd (efghijklmno"
+# A bar a tenth as thick as its text, a piece of TeX's \underbrace, is no fraction bar.
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 10, 16, 0, "a"), run(122, 100, 10, 16, 0, "b")]) + "</page>")
+fonts = {"0": (18, "AB+CMR12")}
+assert mod._rebuild_page(page, fonts, [(98, 112, 119, 0.4)], 1).strip() == "a/b"
+assert mod._rebuild_page(page, fonts, [(98, 112, 119, 2.2)], 1).split() == ["a", "b"]
+assert mod._word_boxes('<page width="960.0" height="540">\n<word xMin="1.5" yMin="2" xMax="3" yMax="4">a&amp;b</word>'
+                       '</page><page width="612">') == [(960.0, [(1.5, 2.0, 3.0, 4.0, "a&b")]), (612.0, [])]
+
 # The rebuilt pages are kept beside the PDF with its size, and read back only
 # while the PDF is that size; get_file's text then takes them for those pages.
 with tempfile.TemporaryDirectory() as tmp:
@@ -702,9 +786,27 @@ with tempfile.TemporaryDirectory() as tmp:
     assert not side.exists() and mod._math_text(notes) == {}
 assert mod._math_pages("") == (set(), 0)
 
+# Word and PowerPoint draw a formula's growing brackets as filled outlines:
+# "(" and ")" in one path, closed by a lone moveto; "{", "]" and a "|". A T
+# (a logo's letter), a squat curve or a path with a part that is no bracket
+# is none, nor is an outline drawn unfilled.
+paren = "M 10 0 C 2 10 2 30 10 40 L 12 40 C 5 30 5 10 12 0 Z M 32 0 C 40 10 40 30 32 40 L 30 40 C 37 30 37 10 30 0 Z M 30 0"
+brace = ("M 10 0 C 5 0 5 2 5 8 L 5 16 L 0 20 L 5 24 L 5 32 C 5 38 5 40 10 40 L 10 38 C 7 38 7 36 7 32 "
+         "L 7 24 L 2 20 L 7 16 L 7 8 C 7 4 7 2 10 2 Z")
+shapes = {paren: "()", brace: "{", "M 0 0 L 6 0 L 6 40 L 0 40 L 0 38 L 4 38 L 4 2 L 0 2 Z": "]",
+          "M 0 0 L 2 0 L 2 30 L 0 30 Z": "|", "M 0 0 L 12 0 L 12 3 L 7.5 3 L 7.5 30 L 4.5 30 L 4.5 3 L 0 3 Z": "",
+          "M 0 0 C 8 0 8 10 0 10 L 0 8 C 6 8 6 2 0 2 Z": "", paren + " M 50 0 L 60 0 L 60 3 Z": ""}
+for d, want in shapes.items():
+    got = mod._delimiters(mod.ET.fromstring(f'<path fill="black" d="{d}"/>'))
+    assert "".join(c for c, *_ in got) == want, (d, got)
+assert mod._delimiters(mod.ET.fromstring(f'<path fill="none" stroke="black" d="{brace}"/>')) == []
+assert mod._delimiters(mod.ET.fromstring(f'<path fill="black" d="{brace}"/>'))[0][1:] == (0, 0, 10, 40)
+
 # pdftocairo -svg, 4 pages: a rounded box and a header rule (the template)
 # and a bullet on every page; a graph's node and edges on page 2; a diagonal
-# drawn through a transform on page 3; only a table's level lines on page 4.
+# drawn through a transform on page 3; only a table's level lines on page 4,
+# and a formula's drawn brackets, which are no figure.
+brackets = f'<path fill="rgb(0%, 0%, 0%)" transform="matrix(1, 0, 0, 1, 300, 150)" d="{paren}"/>'
 template = ('<path d="M 10 10 C 10 5 15 5 20 5 L 400 5 C 405 5 405 10 405 10 L 405 100 L 10 100 Z"/>'
             '<path d="M 0 2 L 450 2"/><path d="M 30 50 L 34 52 L 30 54 Z"/>')
 svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="454" height="255"><defs>
@@ -713,15 +815,16 @@ svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="454" height="255"><defs
 <page>{template}<path d="M 100 100 C 104 100 104 108 100 108 C 96 108 96 100 100 100 Z"/>
 <path d="M 100 100 L 160 150 L 220 100"/></page>
 <page>{template}<path transform="matrix(0.5, 0, 0, -0.5, 100, 200)" d="M 0 0 L 80 60"/></page>
-<page>{template}<path d="M 50 150 L 250 150 M 50 170 L 250 170 M 150 140 L 150 180"/></page>
+<page>{template}<path d="M 50 150 L 250 150 M 50 170 L 250 170 M 150 140 L 150 180"/>{brackets}</page>
 </pageSet></svg>"""
 with tempfile.TemporaryDirectory() as tmp:
     drawn = Path(tmp) / "pages.svg"
     drawn.write_text(svg, encoding="utf-8")
     assert mod._drawing_pages(drawn)[0] == {2, 3}, mod._drawing_pages(drawn)
     assert mod._drawing_pages(drawn)[2] == 454.0
+    assert mod._drawing_pages(drawn)[3] == [[], [], [], [("(", 302, 150, 312, 190), (")", 330, 150, 340, 190)]]
     drawn.write_text("<svg", encoding="utf-8")
-    assert mod._drawing_pages(drawn) == (set(), [], 0.0)
+    assert mod._drawing_pages(drawn) == (set(), [], 0.0, [])
 
 # The Groups tab: the learner's own group in each category, its members named
 # from the class list (whose ids are strings), a category without one marked so.

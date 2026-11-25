@@ -260,6 +260,10 @@ online.
   - *math*: 20 or more characters set in math fonts (TeX's, or any font named
     for math), or a displayed formula: a line with math that starts well right
     of the margin, as a centred formula does. Read with `pdftohtml`.
+  - *unreadable symbols*: text in a font whose character map names under half
+    of its glyphs, as PowerPoint for the Mac embeds Cambria Math. Text tools
+    then write its codes instead, so `L^Σ_{CPA−0}` reads `L^8_{6!7$0}`. Only
+    the page image shows those symbols.
 
   These are worked out once per PDF while a course downloads (a few seconds
   for a long deck) and kept in its `_course-<id>.json`; a copy saved before
@@ -273,8 +277,12 @@ online.
   `<file>.pdf.math.json` beside the PDF, read by `get_file` in place of those
   pages. A page whose rebuild has fewer letters than `pdftotext`'s text, such
   as a scan whose hidden OCR layer `pdftohtml` skips, keeps `pdftotext`'s.
-  Matrices, aligned columns of equations and figures made of text keep their
-  layout only roughly: look at those pages.
+  Word and PowerPoint draw the brackets that grow to fit a formula, as in
+  `{0,1}^λ` or `H(m)`, as shapes rather than characters, so no text tool sees
+  them; the pass knows `( ) [ ] { } |` by their outlines in the SVG and puts
+  them back next to the formula they enclose.
+  Matrices, cases, aligned columns of equations and figures made of text keep
+  their layout only roughly: look at those pages.
 - **`get_pdf_pages`** draws pages with `pdftoppm` at 1568 pixels on the long
   side, the most a model takes in before scaling down. A page costs about 2k
   tokens against roughly 100 as text, so it takes at most 10 per call: read the

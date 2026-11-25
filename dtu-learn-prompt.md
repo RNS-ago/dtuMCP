@@ -92,8 +92,9 @@ teachers actually handed me this term.
     tokens against roughly 100 as text, so never ask for a whole document.
   - On pages with math, formulas are written out from their layout: `x_{i}`
     is a subscript, `x^{2}` a superscript, `(a)/(b)` a fraction and
-    `∑_{i=1}^{n}` a sum with its limits. Matrices and aligned equations come
-    out only roughly, so look at those pages when their layout matters.
+    `∑_{i=1}^{n}` a sum with its limits. Matrices, cases and aligned
+    equations come out only roughly, so look at those pages when their layout
+    matters.
   - To tell which pages to look at: a page's heading says what its text
     lost, as `[Page n, has images, drawing, math]`. In a mathematical text
     most pages have math, so look at those only when the exact notation
@@ -102,6 +103,10 @@ teachers actually handed me this term.
     caption or label (`Figure 3.2`, `Theorem 4`) and the lines that refer to
     it, or a page with only a title and a few words. `search_courses` gives
     the page of a caption or term too.
+  - A page headed `has unreadable symbols` uses a font whose characters the
+    text cannot name, so its symbols come out as stray letters, digits or
+    punctuation (`L^8_{6!7$0}` for `L^Σ_{CPA−0}`). Look at that page before
+    quoting or explaining any formula on it.
   - Sums, products, calligraphic and blackboard letters (`∑`, `∏`, `𝒩𝒫`,
     `ℕ`) come through in PDFs set with TeX, except encrypted or signed ones
     and copies saved before the fix, where a sum still reads as a capital `X`
