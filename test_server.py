@@ -26,9 +26,10 @@ wanted = {"_flatten", "_profiles", "_pick_browser", "_pasted_cookies", "_cookies
           "_each", "_status", "_summary", "_code",
           "_copies", "_copy", "_saved_text", "_file_text", "_decode",
           "_numbered_pages", "_rich", "_group_rows",
-          "_word_pattern", "_word_matches", "_has_word", "_search_docs", "_best_pages", "_searchable", "_search", "search_courses"}
+          "_humps", "_parts", "_terms", "_index", "_drop_course", "_index_course", "_sync_index",
+          "_search_docs", "_search", "_search_answer", "search_courses"}
 constants_extra = {"OOXML_MEMBERS"}
-constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT", "OPTIONAL_HYPHEN", "_SEARCHABLE"}
+constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT", "INDEX_VERSION", "INDEX_SCHEMA", "INDEX_WEIGHTS"}
 
 
 def needed(node):
@@ -59,7 +60,8 @@ mod.__dict__.update(
     unquote=unquote,
     urlparse=urlparse,
     datetime=datetime_module.datetime,
-    bisect_right=__import__("bisect").bisect_right,
+    sqlite3=__import__("sqlite3"),
+    closing=__import__("contextlib").closing,
     mcp=types.SimpleNamespace(tool=lambda: lambda f: f),
 )
 exec(
@@ -558,47 +560,58 @@ assert rows[0]["description"] == {"text": "Pick one", "html": "<p>Pick one</p>"}
 assert mod._rich(None) == {"text": "", "html": ""}
 
 # --- search_courses -------------------------------------------------------------
-# The search over the _search.js index download_course writes, as the plugin's.
-words = lambda word, text: [m.group() for m in mod._word_matches(mod._word_pattern(word), text)]
-assert words("reduc", "Reductions, not unreduced") == ["Reduc"]
-assert words("cycle", "HamiltonCycle and cycles") == ["Cycle", "cycle"]
-assert words("3SAT", "3-SAT is 3SAT") == ["3-SAT", "3SAT"] and words("3-SAT", "3SAT") == ["3SAT"]
-assert words("økonomi", "Søkonomi, økonomi") == ["økonomi"]
+# The index splits out what its tokenizer does not: humps of joined-up names,
+# numbers and letters, and hyphenated words written as one.
+assert mod._parts("HamiltonCycle and 3-SAT, plain") == "Hamilton Cycle 3SAT"
+assert mod._parts("3SAT økonomiØkonomi") == "3 SAT økonomi Økonomi"
+assert mod._terms("reduc 3-SAT O(n) - x") == [("reduc", '"reduc"*'), ("3-SAT", '"3SAT"*'), ("O(n)", '"O n"'), ("x", '"x"')], mod._terms("reduc 3-SAT O(n) - x")
 with tempfile.TemporaryDirectory() as tmp:
     mod.DOWNLOADS = Path(tmp)
     assert mod.search_courses("anything").startswith("No course is downloaded yet")
     root = Path(tmp, "02249 Hard Problems")
     root.mkdir()
-    (root / "_course-326400.json").write_text(json.dumps({
+    record = root / "_course-326400.json"
+    record.write_text(json.dumps({
         "ou": 326400, "name": "02249 Hard Problems, Fall 2026", "saved": "x", "news": [],
         "modules": [{"ModuleId": 5, "Title": "Week 1", "Topics": [
-            {"TopicId": 11, "Title": "Book"}, {"TopicId": 12, "Title": "Old", "IsBroken": True}]}],
-        "files": {"11": "Week 1/book.pdf", "12": "Week 1/old.pdf", "3/4": "news/att.pdf"},
+            {"TopicId": 11, "Title": "Book"}, {"TopicId": 12, "Title": "Old", "IsBroken": True},
+            {"TopicId": 13, "Title": "Slides"}]}],
+        "files": {"11": "Week 1/book.pdf", "12": "Week 1/old.pdf", "13": "Week 1/slides.pdf", "3/4": "news/att.pdf"},
         "linked": {}}))
+    filler = " ".join(["graphs"] * 300)
     docs = [mod._search_entry("Book", quote("Week 1/book.pdf"), "PDF",
-                              ["Intro to reductions", "Hamilton cycle", "Hamilton cycle: 3-SAT reduces to HamiltonCycle"], "Week 1"),
+                              ["Intro to reductions", f"Hamilton cycle {filler}", "3-SAT reduces to HamiltonCycle",
+                               f"a Hamilton cycle again {filler}"], "Week 1"),
             mod._search_entry("Old", quote("Week 1/old.pdf"), "PDF", ["Hamilton cycle"]),
+            mod._search_entry("Slides", quote("Week 1/slides.pdf"), "PDF", ["Hamilton cycle", "more"], "Week 1"),
             mod._search_entry("Week 1", "#u5", "unit", ["Read about 3SAT"]),
-            mod._search_entry("Slides", quote("news/att.pdf"), "PDF", ["SAT"]),
+            mod._search_entry("Notes", quote("news/att.pdf"), "PDF", ["SAT"]),
             mod._search_entry("Gone", "elsewhere.pdf", "PDF", ["Hamilton cycle"])]
     (root / "_search.js").write_text(f"window.SEARCH = {json.dumps(docs)};\n")
     got = mod.search_courses("hamilton cycle", 2249)
-    # The broken topic and the entry pointing at nothing are left out; page 3
-    # has both words twice over, page 2 once.
-    assert got.startswith("1 match:"), got
-    assert "[1] Book (PDF, page 3; also pages 2)" in got and "org_unit_id 326400, topic_id 11" in got, got
-    assert "02249 Hard Problems, Fall 2026 › Week 1" in got, got
+    # The broken topic and the entry pointing at nothing are left out. The
+    # short slide beats the book; the book's page with both words in the
+    # fewest other words is its best, and the joined-up name is found.
+    assert got.startswith("2 matches:"), got
+    assert got.index("[1] Slides (PDF, page 1)") < got.index("[2] Book (PDF, page 3; also pages 2, 4)"), got
+    assert "org_unit_id 326400, topic_id 13" in got and "02249 Hard Problems, Fall 2026 › Week 1" in got, got
     got = mod.search_courses("3sat hamilton")
-    assert got.startswith("1 with every word, then 1 with some of them"), got
+    assert got.startswith("1 with every word, then 2 with some of them"), got
     assert "unit_id 5 (unit_info)" in got and "lacks: hamilton" in got, got
     got = mod.search_courses("sat")
     assert "announcement attachment 3, file 4 (get_announcement_attachment)" in got, got
     assert mod.search_courses("nothere").startswith('No matches for "nothere" in the downloaded courses.')
-    # Read once per download: a new index counts only once the record changes.
+    found = mod._search("cycle", hide_broken=False, partial=False)
+    # A snippet's odd parts are its matches; the broken topic counts now.
+    slides = next(h for h in found["hits"] if h["title"] == "Slides")
+    assert found["total"] == 3 and slides["snippet"] == ["Hamilton ", "cycle", ""], found
+    # Indexed again only once the record changes, as a new download leaves it.
     (root / "_search.js").write_text(f"window.SEARCH = {json.dumps([mod._search_entry('Fresh', '#u5', 'unit', ['quokka'])])};\n")
     assert mod.search_courses("quokka").startswith("No matches")
-    os.utime(root / "_course-326400.json", (time.time() + 5, time.time() + 5))
+    os.utime(record, (time.time() + 5, time.time() + 5))
     assert mod.search_courses("quokka").startswith("1 match:")
+    record.unlink()
+    assert mod.search_courses("quokka").startswith("No course is downloaded yet")
     try:
         mod.search_courses("x", 2231)
         assert False

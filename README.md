@@ -128,10 +128,9 @@ teaching, hand-ins and quizzes left for you to do under the course's own rules
 on generative AI. The prober finds where the course is from its calendar and
 current unit, the teacher plans from the course's material and points to its
 exercises, and the practice agent draws on its exercise sheets and old exams
-but never poses an open graded question. They also get `dtu_search_courses`, the plugin's own copy of the MCP's `search_courses`:
-the view's search, below, over every downloaded course, returning each match's
-course, units, the PDF page with the most of the words (and others with as
-many) and the ids the other tools take, so a tutor can find where something is
+but never poses an open graded question. They also get `dtu_search_courses`, the MCP's `search_courses`
+(see [Search](#search)), returning each match's
+course, units, its best PDF page (and others as good) and the ids the other tools take, so a tutor can find where something is
 covered and then read just that page. Course material has its own words for
 things, so after the matches with every word it lists ones with some of them,
 each saying which words it lacks. It also adds a **DTU Learn** view to the sidebar: your courses by
@@ -221,10 +220,11 @@ element take the screen, so the player's own full-screen button is hidden;
 **Full screen** has the video fill the window instead, until Escape, a double
 click or **Exit full screen**.
 
-The search box above the tree searches every downloaded course as the
-offline pages' search box does, from the same index (`_search.js`): titles,
+The search box above the tree searches every downloaded course through the
+MCP's index (see [Search](#search)): titles,
 the units above them, unit text, announcements and the text inside files, a
-PDF's by page. `/` goes to it from anywhere in the view. Its results take the
+PDF's by page. The plugin keeps one `server.py search_serve` process for its
+searches, which takes about a second to start on the first. `/` goes to it from anywhere in the view. Its results take the
 tree's place, with the words marked in the text around them. A click
 anywhere on one opens it, unless it ends a drag that selects text to copy;
 Enter in the box opens the first. A result opens in the pane with the words marked in it: a PDF at
@@ -238,11 +238,7 @@ A PDF has a find row under its title (Ctrl+F goes to it): it marks every
 match on the pages, counts them, and Enter or the arrows go to the next one,
 Shift+Enter to the one before. A PDF opened from a search result arrives with
 the search's words in it, so its matches can be stepped through from there.
-Both searches match words by their start, `reduc` finds "reductions", as the
-offline pages' search does, and also at the start of each part of a joined-up
-name, so `cycle` finds "HamiltonCycle"; a hyphen between a number and letters
-is optional either way, so `3SAT` and `3-SAT` find each other. A PDF result
-opens at the page with the most of the words. Files a course's pages link to are left out of a
+A PDF result opens at its best page. Files a course's pages link to are left out of a
 copy saved before the record listed them (`linked` in `_course-<id>.json`);
 **Refresh** the course to find them.
 
@@ -478,6 +474,34 @@ in before scaling an image down. A page costs about 2k tokens against roughly
 for the pages that matter. From the command line it names each image instead
 of printing it; `--json` prints MCP content blocks with the images in base64.
 Point `DTU_BASE` at another Brightspace instance to use this elsewhere.
+
+## Search
+
+`search_courses`, the plugin's search box and its Coverage tab search one
+SQLite full-text index over every downloaded course, `_search.sqlite` in the
+downloads folder, with a row per PDF page and one per other item. It is filled
+from the `_search.js` each download writes, at the end of the download, and
+checked before each search: a course downloaded again since is indexed again,
+one whose folder is gone is dropped. Deleting the file is safe; the next search
+rebuilds it, about 0.8 s a course. It comes to about two and a half times the
+course text: 25 MB for four courses, 198 MB for 32, of which 55 MB are the
+lookups that keep two- and three-letter words fast.
+
+Each word matches the start of a word, so `reduc` finds "reductions", and also
+each part of a joined-up name or of a number with letters, so `cycle` finds
+"HamiltonCycle" and `sat` finds "3SAT"; a hyphenated word is also found
+written as one, so `3SAT` and `3-SAT` find each other. A one-letter word
+matches only itself. Items with every word come first, then those with some,
+each saying which words it lacks. Among them an item ranks by its best page:
+how many of the words that page holds, then its BM25 score, which counts a
+word for more the rarer it is across the courses, and for more in a title (8×)
+or the units above it (3×) than in the text, and favours a short page, so a
+slide on the subject beats a book that mentions it in passing. A search takes
+5–50 ms with 32 courses, 0.2 s for a word as common as `the`.
+
+The offline pages' search box (above) does not use the index: a page opened
+from disk cannot read SQLite, so it scans `_search.js` itself, matching word
+starts only.
 
 ## How terms are worked out
 

@@ -31,7 +31,7 @@ import webbrowser
 import zipfile
 from datetime import datetime, timedelta, timezone
 from collections import Counter
-from bisect import bisect_right
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache, partial
 from itertools import count
@@ -1639,6 +1639,14 @@ def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
     part.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
     part.replace(root / f"_course-{ou}.json")
     _write_landing()
+    # Indexed now rather than on the first search, which would wait for it.
+    # A failure here costs nothing: the next search indexes the course.
+    try:
+        say("indexing for search")
+        with closing(_index()) as db:
+            _sync_index(db)
+    except sqlite3.Error:
+        pass
     # The course's bar collapses into one line that stays.
     _status(("32", "  ✓ "), ("2", prefix), ("", name), keep=True)
 
@@ -1667,61 +1675,154 @@ def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
     return _code(name), counts, problems
 
 
-# The search below is the LearnHarness plugin's (backend.cjs), over the same
-# _search.js index the offline pages' search box reads, so a search finds the
-# same things in all three places.
-OPTIONAL_HYPHEN = "[-‐]?"
+# Course search: one SQLite full-text (FTS5) index over every saved course,
+# _search.sqlite in DOWNLOADS, with a row per page of a PDF and one per other
+# entry. It is filled from the _search.js each download writes, which the
+# offline pages go on searching by themselves, and brought up to date before
+# every search: a course whose record changed since it was indexed is indexed
+# again, and one whose folder is gone is dropped.
+INDEX_VERSION = 2
+INDEX_SCHEMA = (
+    "DROP TABLE IF EXISTS courses",
+    "DROP TABLE IF EXISTS docs",
+    "DROP TABLE IF EXISTS pages",
+    "CREATE TABLE courses (ou INTEGER PRIMARY KEY, name TEXT, folder TEXT, mtime REAL)",
+    "CREATE TABLE docs (id INTEGER PRIMARY KEY, ou INTEGER, title TEXT, place TEXT, kind TEXT,"
+    " target TEXT, broken INTEGER, pages INTEGER)",
+    "CREATE INDEX docs_ou ON docs (ou)",
+    # parts holds the word parts the tokenizer does not split out; see _parts.
+    # Every search word is a prefix, and one of two or three letters ("co",
+    # "the") would otherwise merge the entries of every word it starts, for
+    # the search and again for each snippet: 1 s for "co" over 32 courses
+    # becomes 0.2 s, for 40% more index.
+    "CREATE VIRTUAL TABLE pages USING fts5(title, place, body, parts, doc UNINDEXED, page UNINDEXED,"
+    " prefix='2 3')",
+    f"PRAGMA user_version = {INDEX_VERSION}",
+)
+# bm25's weights for a match in the title, the units above it, the text and
+# the word parts: a word in a title says more about a page than one in it.
+INDEX_WEIGHTS = "8.0, 3.0, 1.0, 0.5"
 
 
-def _word_pattern(word: str) -> re.Pattern:
-    """One search word as a case-blind pattern. A hyphen in the word, or between
-    its digits and letters, is optional in the text either way: "3SAT" and
-    "3-SAT" find each other. Where a match may start is _word_matches' call."""
-    chars = word.strip("-")
-    parts = []
-    for i, ch in enumerate(chars):
-        if ch == "-":
-            parts.append(OPTIONAL_HYPHEN)
-            continue
-        prev = chars[i - 1] if i else ""
-        if prev.isalnum() and ch.isalnum() and prev.isdigit() != ch.isdigit():
-            parts.append(OPTIONAL_HYPHEN)
-        parts.append(re.escape(ch))
-    return re.compile("".join(parts), re.IGNORECASE)
+def _humps(word: str) -> list[str]:
+    """A word cut where a joined-up name starts a new part, lower case to
+    upper ("Hamilton", "Cycle"), and between digits and letters ("3", "SAT")."""
+    cuts = [i for i in range(1, len(word))
+            if (word[i - 1].islower() and word[i].isupper()) or word[i - 1].isdigit() != word[i].isdigit()]
+    return [word[a:b] for a, b in zip([0, *cuts], [*cuts, len(word)])]
 
 
-def _word_matches(pattern: re.Pattern, text: str):
-    """Pattern's matches that start a word, or a hump of a joined-up name in
-    any case ("cycle" in "HamiltonCycle"), so "reduc" finds "reductions" but
-    "sat" does not find "unsat"."""
-    at = 0
-    while found := pattern.search(text, at):
-        i = found.start()
-        if i == 0 or not text[i - 1].isalnum() or (text[i - 1].islower() and text[i].isupper()):
-            yield found
-            at = found.end()
-        else:
-            at = i + 1
+def _parts(text: str) -> str:
+    """The words in text the tokenizer would not find by themselves, so a
+    search finds them: the parts of a joined-up name or of a number with
+    letters ("Cycle" in "HamiltonCycle", "SAT" in "3SAT"), and a hyphenated
+    word written as one ("3SAT" for "3-SAT"), which a search word with its
+    hyphens dropped meets."""
+    out = []
+    for word in re.findall(r"[^\W_]+(?:[-‐][^\W_]+)*", text):
+        pieces = re.split(r"[-‐]", word)
+        if len(pieces) > 1:
+            out.append("".join(pieces))
+        for piece in pieces:
+            if len(humps := _humps(piece)) > 1:
+                out += humps
+    return " ".join(out)
 
 
-def _has_word(pattern: re.Pattern, text: str) -> bool:
-    return next(_word_matches(pattern, text), None) is not None
+def _terms(query) -> list[tuple[str, str]]:
+    """query's words, at most 12, each with its FTS5 term: the word's hyphens
+    dropped, as _parts joins hyphenated words, what is left cut where the
+    tokenizer cuts it, and matched at the start of a word, except a word that
+    ends in one letter or digit, which as a prefix would match nearly every
+    page ("O(n)" is the word o then the word n)."""
+    terms = []
+    for word in str(query).split():
+        tokens = re.findall(r"[^\W_]+", re.sub(r"(?<=[^\W_])[-‐](?=[^\W_])", "", word))
+        if tokens:
+            terms.append((word, '"' + " ".join(tokens) + '"' + "*" * (len(tokens[-1]) > 1)))
+    return terms[:12]
+
+
+def _index() -> sqlite3.Connection:
+    """The search index, made or remade when it is missing or of an older layout."""
+    DOWNLOADS.mkdir(parents=True, exist_ok=True)
+    # Autocommit, with transactions begun by hand: the MCP server, the
+    # plugin's search process and the command line may all write it at once.
+    db = sqlite3.connect(DOWNLOADS / "_search.sqlite", timeout=60, isolation_level=None)
+    db.execute("PRAGMA journal_mode = WAL")  # searches read while a course is indexed
+    if db.execute("PRAGMA user_version").fetchone()[0] != INDEX_VERSION:
+        db.execute("BEGIN IMMEDIATE")
+        if db.execute("PRAGMA user_version").fetchone()[0] != INDEX_VERSION:
+            for statement in INDEX_SCHEMA:
+                db.execute(statement)
+        db.execute("COMMIT")
+    return db
+
+
+def _drop_course(db: sqlite3.Connection, ou: int) -> None:
+    db.execute("DELETE FROM pages WHERE doc IN (SELECT id FROM docs WHERE ou = ?)", (ou,))
+    db.execute("DELETE FROM docs WHERE ou = ?", (ou,))
+    db.execute("DELETE FROM courses WHERE ou = ?", (ou,))
+
+
+def _index_course(db: sqlite3.Connection, ou: int, record: Path, mtime: float) -> None:
+    """Index one saved course afresh, in one transaction, so a search sees
+    the old rows or the new, never half of them."""
+    copy = json.loads(record.read_text(encoding="utf-8")) | {"root": record.parent}
+    entries = _search_docs(copy)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        if db.execute("SELECT 1 FROM courses WHERE ou = ? AND mtime = ?", (ou, mtime)).fetchone():
+            db.execute("ROLLBACK")  # another process indexed it while this one read
+            return
+        _drop_course(db, ou)
+        db.execute("INSERT INTO courses VALUES (?, ?, ?, ?)", (ou, copy["name"], record.parent.name, mtime))
+        for e in entries:
+            starts = e["pages"] or [0]
+            doc = db.execute(
+                "INSERT INTO docs (ou, title, place, kind, target, broken, pages) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ou, e["title"], e["where"], e["kind"], json.dumps(e["target"]), e["broken"], len(starts)),
+            ).lastrowid
+            text = e["text"]
+            for n, (a, b) in enumerate(zip(starts, [*starts[1:], len(text)]), 1):
+                body = text[a:b].strip()
+                db.execute("INSERT INTO pages VALUES (?, ?, ?, ?, ?, ?)",
+                           (e["title"], e["where"], body, _parts(f"{e['title']} {e['where']} {body}"), doc, n))
+        db.execute("COMMIT")
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+
+
+def _sync_index(db: sqlite3.Connection) -> None:
+    """Bring the index up to date with the saved courses: download_course
+    writes a course's record last, so a record newer than its index means
+    the course was downloaded again."""
+    newest = {int(p.stem.removeprefix("_course-")): p for p in _copies()}  # oldest first, so the newest wins, as in _copy
+    indexed = dict(db.execute("SELECT ou, mtime FROM courses"))
+    for ou in indexed.keys() - newest.keys():
+        db.execute("BEGIN IMMEDIATE")
+        _drop_course(db, ou)
+        db.execute("COMMIT")
+    for ou, record in newest.items():
+        if indexed.get(ou) != (mtime := record.stat().st_mtime):
+            _index_course(db, ou, record, mtime)
 
 
 def _search_docs(copy: dict) -> list[dict]:
     """A saved course's search entries as download_course wrote them, each with
-    what it points at: ("topic", id), ("unit", id), ("news", id),
-    ("attachment", "news id/file id") or ("linked", path), and whether its
+    what it points at, as {"topic": id}, {"unit": id}, {"news": id},
+    {"attachment": "news id/file id"} or {"linked": path}, and whether its
     topic is broken. Entries pointing at nothing the copy knows are left out."""
     try:
         script = (copy["root"] / "_search.js").read_text(encoding="utf-8")
         docs = json.loads(script[script.index("=") + 1:].strip().removesuffix(";"))
     except (OSError, ValueError):
         return []  # a course saved before the search existed: downloading it again adds one
-    by_path = {saved: ("attachment", key) if "/" in key else ("topic", int(key))
+    by_path = {saved: {"attachment": key} if "/" in key else {"topic": int(key)}
                for key, saved in (copy.get("files") or {}).items()}
     for saved in (copy.get("linked") or {}).values():
-        by_path.setdefault(saved, ("linked", saved))
+        by_path.setdefault(saved, {"linked": saved})
     by_url, broken = {}, set()
 
     def walk(modules):
@@ -1737,143 +1838,111 @@ def _search_docs(copy: dict) -> list[dict]:
 
     def target(href: str):
         if anchor := re.fullmatch(r"#([un])(\d+)", href):
-            return ("unit" if anchor[1] == "u" else "news", int(anchor[2]))
+            return {"unit" if anchor[1] == "u" else "news": int(anchor[2])}
         if lesson := re.search(r"/d2l/le/lessons/\d+/topics/(\d+)", href):
-            return ("topic", int(lesson[1]))
+            return {"topic": int(lesson[1])}
         if href in by_url:
-            return ("topic", by_url[href])
+            return {"topic": by_url[href]}
         return by_path.get(unquote(href))
 
     entries = []
     for doc in docs:
         if not (to := target(doc.get("h", ""))):
             continue
-        # label: the title and the units above it, so "milk description"
-        # finds the Description topic in the Milk case study.
         entries.append({"title": doc.get("t", ""), "where": doc.get("u", ""), "kind": doc.get("k", ""),
                         "text": doc.get("x", ""), "pages": doc.get("p"), "target": to,
-                        "label": f'{doc.get("t", "")} {doc.get("u", "")}',
-                        "broken": to[0] == "topic" and to[1] in broken})
+                        "broken": to.get("topic") in broken})
     return entries
 
 
-# What each search reads, by course record: kept while the server runs and
-# read again only when the course is downloaded again, which rewrites the
-# record last. shortcut: every searched course's text stays in memory, ~10 MB
-# for four courses; drop the least recent if a degree's worth makes it heavy.
-_SEARCHABLE = {}  # record path -> (mtime, course, entries)
+def _search(query, only: int = 0, limit: int = 15, partial: bool = True, hide_broken: bool = True) -> dict:
+    """The saved courses searched for query's words, ranked. A course
+    material item (a file, a unit's text, an announcement) ranks by how many
+    of the words it has, then by its best page: how many of the words that
+    one page holds, then its BM25 score, which weighs a word by how rare it
+    is across the courses and a page by how short it is, so a short slide
+    on the subject beats a book that mentions it often. Without partial,
+    only items with every word. Returns total and complete (how many matched,
+    and with every word) and the first limit hits, as the plugin's view
+    shows them: the item, its course, what it points at, its best PDF page
+    and others as good, the words it lacks, and a snippet split so that its
+    odd parts are matches."""
+    terms = _terms(query)
+    if not terms:
+        return {"total": 0, "complete": 0, "hits": []}
+    anything = " OR ".join(term for _, term in terms)
+    with closing(_index()) as db:
+        _sync_index(db)
+        courses = {ou: (name, mtime) for ou, name, mtime in db.execute("SELECT ou, name, mtime FROM courses")}
+        docs = {row[0]: row for row in db.execute(
+            "SELECT id, ou, title, place, kind, target, broken, pages FROM docs"
+            + " WHERE ou = ?" * bool(only), (only,) if only else ())}
+        rows = {rowid: [doc, page, score, set()] for rowid, doc, page, score in db.execute(
+            f"SELECT rowid, doc, page, bm25(pages, {INDEX_WEIGHTS}) FROM pages WHERE pages MATCH ?", (anything,))
+            if doc in docs and not (hide_broken and docs[doc][6])}
+        for i, (_, term) in enumerate(terms):
+            for (rowid,) in db.execute("SELECT rowid FROM pages WHERE pages MATCH ?", (term,)):
+                if rowid in rows:
+                    rows[rowid][3].add(i)
+        by_doc = {}
+        for rowid, (doc, page, score, words) in rows.items():
+            by_doc.setdefault(doc, []).append((len(words), score, page, rowid, words))
+        found = []
+        for doc, pages in by_doc.items():
+            words = set().union(*(p[4] for p in pages))
+            if partial or len(words) == len(terms):
+                pages.sort(key=lambda p: (-p[0], p[1]))  # most of the words, then the best score
+                found.append((len(words), pages[0][0], pages[0][1], doc, pages, words))
+        found.sort(key=lambda f: (-f[0], -f[1], f[2]))
+        hits = []
+        for _, on_page, _, doc, pages, words in found[:limit]:
+            _, ou, title, place, kind, target, _, count = docs[doc]
+            name, mtime = courses[ou]
+            hit = {"ou": ou, "course": name, "saved": mtime * 1000, "title": title, "where": place,
+                   "kind": kind, "target": json.loads(target), "pageCount": count}
+            if missing := [word for i, (word, _) in enumerate(terms) if i not in words]:
+                hit["missing"] = missing
+            if count > 1:
+                hit["page"] = pages[0][2]
+                if also := sorted([p[2] for p in pages[1:] if p[0] == on_page][:5]):
+                    hit["also"] = also
+            hit["row"] = pages[0][3]
+            hits.append(hit)
+        # The hits' snippets in one query rather than one each.
+        rows = [hit.pop("row") for hit in hits]
+        snippets = dict(db.execute(
+            "SELECT rowid, snippet(pages, 2, char(2), char(3), '…', 32) FROM pages "
+            f"WHERE pages MATCH ? AND rowid IN ({', '.join('?' * len(rows))})", (anything, *rows)))
+        for hit, row in zip(hits, rows):
+            if snippet := snippets.get(row):
+                hit["snippet"] = re.split("[\x02\x03]", snippet)
+    return {"total": len(found), "complete": sum(1 for f in found if f[0] == len(terms)), "hits": hits}
 
 
-def _searchable(record: Path) -> tuple[dict, list]:
-    """A saved course's ou, name and folder, and its search entries."""
-    mtime = record.stat().st_mtime
-    cached = _SEARCHABLE.get(record)
-    if cached and cached[0] == mtime:
-        return cached[1:]
-    copy = json.loads(record.read_text(encoding="utf-8")) | {"root": record.parent}
-    course = {"ou": copy["ou"], "name": copy["name"], "root": record.parent}
-    _SEARCHABLE[record] = (mtime, course, _search_docs(copy))
-    return _SEARCHABLE[record][1:]
-
-
-def _best_pages(entry: dict, patterns: list) -> tuple[int, int, list[int]]:
-    """The page of a PDF entry with the most of the words, then the most
-    matches; where its first match is; and the other pages with as many of
-    the words, at most five."""
-    tally = {}  # page -> [words, hits, first offset]
-    for i, pattern in enumerate(patterns):
-        for found in _word_matches(pattern, entry["text"]):
-            t = tally.setdefault(bisect_right(entry["pages"], found.start()), [set(), 0, found.start()])
-            t[0].add(i)
-            t[1] += 1
-            t[2] = min(t[2], found.start())
-    ranked = sorted(tally.items(), key=lambda kv: (-len(kv[1][0]), -kv[1][1]))
-    best, (words, _, first) = ranked[0]
-    return best, first, sorted([n for n, t in ranked[1:] if len(t[0]) == len(words)][:5])
-
-
-def _search(query: str, courses: dict, limit: int = 15) -> tuple[list, int, int]:
-    """Every course in courses (org unit id -> _searchable's pair) searched for query's words in an entry's title, its
-    units or its text, skipping broken topics: those with every word first,
-    title matches among them first, then by how often the words occur; then
-    those with some of the words, the most first. Returns the first limit
-    hits, how many matched at all, and how many had every word."""
-    words = [w for w in str(query).split() if any(c.isalnum() for c in w)][:12]
-    if not words:
-        return [], 0, 0
-    patterns = [_word_pattern(w) for w in words]
-    found = []
-    for copy, entries in courses.values():
-        for entry in entries:
-            if entry["broken"]:
-                continue
-            has = [_has_word(p, entry["label"]) or _has_word(p, entry["text"]) for p in patterns]
-            if any(has):
-                # Capped, so one long book does not bury everything else.
-                often = sum(min(20, sum(1 for _ in _word_matches(p, entry["text"]))) for p in patterns)
-                in_title = all(_has_word(p, entry["label"]) for p in patterns)
-                found.append((copy, entry, has, in_title, often))
-    found.sort(key=lambda f: (-sum(f[2]), -f[3], -f[4]))
-    hits = []
-    for copy, entry, has, _, _ in found[:limit]:
-        text = entry["text"]
-        hit = {"ou": copy["ou"], "course": copy["name"], "title": entry["title"], "where": entry["where"],
-               "kind": entry["kind"], "target": entry["target"],
-               "missing": [w for w, h in zip(words, has) if not h]}
-        starts = [m.start() for p in patterns if (m := next(_word_matches(p, text), None))]
-        if starts:
-            at = min(starts)
-            if entry["pages"]:
-                hit["page"], at, hit["also"] = _best_pages(entry, patterns)
-            start = max(0, at - 70)
-            hit["snippet"] = ("…" if start else "") + text[start:at + 150]
-        hits.append(hit)
-    return hits, len(found), sum(1 for f in found if all(f[2]))
-
-
-@mcp.tool()
-def search_courses(query: str, org_unit_id: int = 0, limit: int = 15) -> str:
-    """Search the downloaded courses for words: titles, unit text, announcements
-    and the text inside files, a PDF's page by page. Use it to find where
-    something is covered before reading files one by one.
-    Every word must appear; each matches the start of a word or of a part of a
-    joined-up name, so "reduc" finds "reductions" and "cycle" finds
-    "HamiltonCycle", and "3SAT" and "3-SAT" find each other. Course material
-    uses its own terms and abbreviations: when a search comes back thin, try
-    those, or fewer words. When nothing has every word, it returns what has
-    the most of them and says which words each lacks.
-    Each match comes with its course, the units above it, its kind, the PDF
-    page with the most matches and other pages with as many words, the ids
-    that get_file, unit_info, get_pdf_pages or get_announcement_attachment
-    take, and the text around the match.
-    org_unit_id limits it to one course (an org unit id or a DTU course
-    number); left out, every downloaded course. limit is at most 50.
-    Only downloaded courses are searched; download_course adds one.
-    """
-    newest = {int(p.stem.removeprefix("_course-")): p for p in _copies()}  # oldest first, so the newest wins, as in _copy
-    # By folder, as the plugin lists them, so equal matches come in the same order.
-    courses = {ou: _searchable(p) for ou, p in sorted(newest.items(), key=lambda kv: kv[1].parent.name)}
-    names = {ou: course["name"] for ou, (course, _) in courses.items()}
+def _search_answer(query, org_unit_id: int = 0, limit: int = 15) -> tuple[str, dict]:
+    """search_courses' text, and the search it shows, for the plugin's tool card."""
+    with closing(_index()) as db:
+        _sync_index(db)
+        names = dict(db.execute("SELECT ou, name FROM courses ORDER BY folder"))
     only = org_unit_id
     if 0 < org_unit_id <= 99999:
         # A course number, as _resolve tells them apart, matched to the saved courses.
-        code = f"{org_unit_id:05d} "
-        matches = [ou for ou, name in names.items() if name.startswith(code)]
+        code = f"{org_unit_id:05d}"
+        matches = [ou for ou, name in names.items() if name.startswith(code + " ")]
         if len(matches) != 1:
             raise RuntimeError(
-                f"Course {code.strip()} is downloaded for several terms: "
-                f"{', '.join(map(str, matches))}. Pass the org unit id." if matches else
-                f"Course {code.strip()} is not downloaded. Run list_courses and download_course.")
+                f"Course {code} is downloaded for several terms: {', '.join(map(str, matches))}. "
+                "Pass the org unit id." if matches else
+                f"Course {code} is not downloaded. Run list_courses and download_course.")
         only = matches[0]
-    if only:
-        courses = {only: courses[only]} if only in courses else {}
-    hits, total, complete = _search(query, courses, min(50, max(1, limit)))
+    found = _search(query, only, min(50, max(1, limit)))
+    total, hits, complete = found["total"], found["hits"], found["complete"]
     if not total:
         if not names:
-            return "No course is downloaded yet, so there is nothing to search. download_course saves one."
+            return "No course is downloaded yet, so there is nothing to search. download_course saves one.", found
         saved = "; ".join(f"[{ou}] {name}" for ou, name in names.items())
         return (f'No matches for "{query}" in {f"course {only}" if only else "the downloaded courses"}. '
-                f"Downloaded: {saved}.")
+                f"Downloaded: {saved}."), found
     shown = f"; the best {len(hits)} shown" if total > len(hits) else ""
     if complete == total:
         lines = [f"{total} match{'' if total == 1 else 'es'}{shown}:"]
@@ -1884,7 +1953,7 @@ def search_courses(query: str, org_unit_id: int = 0, limit: int = 15) -> str:
         lines = [f'Nothing has every word of "{query}". These have the most of them, each saying '
                  f"which it lacks; try the course's own words for those{shown}:"]
     for i, hit in enumerate(hits, 1):
-        kind, key = hit["target"]
+        (kind, key), = hit["target"].items()
         ou = hit["ou"]
         ids = {
             "topic": f"org_unit_id {ou}, topic_id {key}",
@@ -1895,14 +1964,37 @@ def search_courses(query: str, org_unit_id: int = 0, limit: int = 15) -> str:
         }.get(kind, f"org_unit_id {ou}; a file the course's pages link to, not readable with the tools")
         pages = ""
         if hit.get("page"):
-            pages = f", page {hit['page']}" + (f"; also pages {', '.join(map(str, hit['also']))}" if hit["also"] else "")
-        lacks = f" — lacks: {', '.join(hit['missing'])}" if hit["missing"] else ""
+            pages = f", page {hit['page']}" + (f"; also pages {', '.join(map(str, hit['also']))}" if "also" in hit else "")
+        lacks = f" — lacks: {', '.join(hit['missing'])}" if "missing" in hit else ""
         lines += ["", f"[{i}] {hit['title']} ({hit['kind']}{pages}){lacks}",
                   f"    {' › '.join(filter(None, (hit['course'], hit['where'])))}",
                   f"    {ids}"]
         if "snippet" in hit:
-            lines.append(f"    {hit['snippet']}")
-    return "\n".join(lines)
+            lines.append(f"    {''.join(hit['snippet'])}")
+    return "\n".join(lines), found
+
+
+@mcp.tool()
+def search_courses(query: str, org_unit_id: int = 0, limit: int = 15) -> str:
+    """Search the downloaded courses for words: titles, unit text, announcements
+    and the text inside files, a PDF's page by page. Use it to find where
+    something is covered before reading files one by one.
+    Each word matches the start of a word or of a part of a joined-up name, so
+    "reduc" finds "reductions", "cycle" finds "HamiltonCycle", and "3SAT" and
+    "3-SAT" find each other. Matches with every word come first, best first:
+    words on one page, in a title, and rare in the courses count for more.
+    Then come those with some of the words, each saying which it lacks.
+    Course material uses its own terms and abbreviations: when a search comes
+    back thin, try those, or fewer words.
+    Each match comes with its course, the units above it, its kind, its best
+    PDF page and others as good, the ids that get_file, unit_info,
+    get_pdf_pages or get_announcement_attachment take, and the text around
+    the match.
+    org_unit_id limits it to one course (an org unit id or a DTU course
+    number); left out, every downloaded course. limit is at most 50.
+    Only downloaded courses are searched; download_course adds one.
+    """
+    return _search_answer(query, org_unit_id, limit)[0]
 
 
 @mcp.tool()
@@ -2335,6 +2427,8 @@ def _usage() -> str:
     lines += [
         "  tools",
         "      Print the tools as JSON, for clients that speak no MCP (LearnHarness)",
+        "  search_serve",
+        "      Answer JSON search requests a line at a time, for LearnHarness",
         "  file_text <path>",
         "      Print a saved file's text, as get_file does a topic's",
         "  --json <command> [arguments]",
@@ -2388,6 +2482,28 @@ if __name__ == "__main__":
             # LearnHarness plugin checks the path is one a course saved.
             path = Path(sys.argv[2])
             print(_saved_text(path, path.name))
+            raise SystemExit(0)
+        if name == "search_serve":
+            # The LearnHarness plugin's searches: a JSON request a line on
+            # stdin, its answer a line on stdout, from one process that stays,
+            # rather than a process per keystroke in the view's search box.
+            # {"id", "tool": true, "query", "org_unit_id", "limit"} answers as
+            # search_courses does, with the search for the tool card; any
+            # other {"id", "query", "only", "limit", "partial", "hideBroken"}
+            # answers with the search alone.
+            for line in sys.stdin:
+                ask = json.loads(line)
+                try:
+                    if ask.get("tool"):
+                        text, found = _search_answer(ask.get("query", ""), int(ask.get("org_unit_id") or 0),
+                                                     int(ask.get("limit") or 15))
+                        answer = {"text": text, "found": found}
+                    else:
+                        answer = _search(ask.get("query", ""), int(ask.get("only") or 0), int(ask.get("limit") or 100),
+                                         bool(ask.get("partial")), bool(ask.get("hideBroken")))
+                    print(json.dumps({"id": ask.get("id"), "result": answer}, ensure_ascii=False), flush=True)
+                except Exception as e:  # one bad search must not end the process
+                    print(json.dumps({"id": ask.get("id"), "error": str(e) or type(e).__name__}), flush=True)
             raise SystemExit(0)
         if name == "tools":
             # Names, descriptions and argument schemas as MCP clients see
