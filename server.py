@@ -64,6 +64,8 @@ def _data_dir() -> Path:
 
 DOWNLOADS = Path(os.environ.get("DTU_DOWNLOADS") or _data_dir()).expanduser()
 COOKIE_FILE = Path(os.environ.get("DTU_COOKIE_FILE", "~/.config/dtumcp/cookie")).expanduser()
+# How to run this again, for messages: the installed command, or the script.
+RUN = "dtumcp" if Path(sys.argv[0]).stem == "dtumcp" else "uv run --script server.py"
 
 mcp = MCPServer("dtu-learn")
 logging.getLogger("httpx").setLevel(logging.WARNING)  # one INFO line per request
@@ -362,7 +364,7 @@ def _client() -> httpx.Client:
         cookie = COOKIE_FILE.read_text().strip()
     if not cookie:
         raise RuntimeError(
-            "No DTU Learn session. Run: uv run --script server.py login"
+            f"No DTU Learn session. Run: {RUN} login"
         )
     # In the cookie jar, not a Cookie header: httpx drops that header on every
     # redirect, so a short link to a course file, which redirects to the
@@ -388,7 +390,7 @@ def _get(path: str, **params):
     if r.status_code in (401, 403):
         raise RuntimeError(
             "DTU Learn refused that (HTTP %d). Either the session has expired — "
-            "run 'uv run --script server.py login' again — or this is one of the "
+            f"run '{RUN} login' again — or this is one of the "
             "things it keeps from students, such as an old course's calendar."
             % r.status_code
         )
@@ -703,7 +705,7 @@ def _topic_fetch(ou: int, topic, client=None):
             c.close()
     if r.status_code in (401, 403):
         raise RuntimeError(
-            "Session rejected (HTTP %d). Run 'uv run --script server.py login' again."
+            f"Session rejected (HTTP %d). Run '{RUN} login' again."
             % r.status_code
         )
     if r.status_code == 404:
@@ -2068,7 +2070,7 @@ def get_announcement_attachment(
         r = c.get(f"/d2l/api/le/{LE}/{ou}/news/{news_id}/attachments/{file_id}")
     if r.status_code in (401, 403):
         raise RuntimeError(
-            "Session rejected (HTTP %d). Run 'uv run --script server.py login' again."
+            f"Session rejected (HTTP %d). Run '{RUN} login' again."
             % r.status_code
         )
     if r.status_code == 404:
@@ -2199,7 +2201,7 @@ def _video_link(ou: int, topic, disposition: str) -> str:
         if not xsrf:
             raise RuntimeError(
                 "DTU Learn handed out no page token, so the session has probably "
-                "expired. Run 'uv run --script server.py login' again."
+                f"expired. Run '{RUN} login' again."
             )
         r = c.post("/d2l/lp/auth/oauth2/token", data={"scope": "*:*:*"},
                    headers={"X-Csrf-Token": xsrf.group(1)})
@@ -2433,7 +2435,7 @@ COMMANDS = {
 
 def _usage() -> str:
     """Build the help text from the same docstrings the MCP tools advertise."""
-    lines = ["Usage: uv run --script server.py [command] [arguments]", "", "Commands:"]
+    lines = [f"Usage: {RUN} [command] [arguments]", "", "Commands:"]
     for name, fn in COMMANDS.items():
         params = " ".join(f"<{p}>" for p in inspect.signature(fn).parameters if p != "ctx")
         lines.append(f"  {name} {params}".rstrip())
@@ -2464,15 +2466,15 @@ def _usage() -> str:
         f"  DTU_PORT             Port for the HTTP server [{os.environ.get('DTU_PORT', 8000)}]",
         "",
         "Examples:",
-        "  uv run --script server.py login",
-        "  uv run --script server.py list_courses",
-        "  uv run --script server.py course_contents 326350",
-        '  uv run --script server.py download_term "Fall 2026"',
+        f"  {RUN} login",
+        f"  {RUN} list_courses",
+        f"  {RUN} course_contents 326350",
+        f'  {RUN} download_term "Fall 2026"',
     ]
     return "\n".join(lines)
 
 
-if __name__ == "__main__":
+def main() -> None:
     # On Windows a pipe gets the locale's code page and \r\n line ends, which
     # the LearnHarness plugin, reading UTF-8 lines, would garble or fail to match.
     for stream in (sys.stdout, sys.stderr):
@@ -2579,3 +2581,7 @@ if __name__ == "__main__":
                 allowed_origins=["https://claude.ai"],
             ),
         )
+
+
+if __name__ == "__main__":
+    main()

@@ -8,8 +8,7 @@ authenticates with your own browser session cookies instead.
 ## Setup
 
 The server needs [uv](https://docs.astral.sh/uv/getting-started/installation/),
-which fetches Python and the server's dependencies itself. Install it, then
-clone this repository.
+which fetches Python and the server's dependencies itself.
 
 Linux and macOS:
 
@@ -23,18 +22,29 @@ Windows, in PowerShell (or `winget install --id=astral-sh.uv -e`):
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Open a new terminal afterwards so it finds `uv`. Run `login` below from a
-terminal before starting any client: the first run sets up Python and the
-server's dependencies, which fails when the Microsoft Store build of Claude
-starts it, since a Store app's programs cannot write to `AppData` for real. Every `uv run` command in this
-README works the same in PowerShell, cmd or a Linux shell, run from the
-repository folder. For PDF text and page images, also install poppler (see
-[Tools](#tools)).
-
-Then sign in:
+Open a new terminal so it finds `uv`, then install the server as a `dtumcp`
+command, which uv puts in `~/.local/bin` (`%USERPROFILE%\.local\bin` on
+Windows):
 
 ```bash
-uv run --script server.py login
+uv tool install git+https://github.com/RNS-ago/dtuMCP
+```
+
+Run the same command with `--reinstall` to update it. To work on the code,
+install from a clone instead, with `uv tool install -e .` in its folder: the
+command then runs the clone's `server.py`, so a `git pull` or an edit takes
+effect at the next start. From a clone, `uv run --script server.py` also works
+in place of `dtumcp` everywhere below.
+
+Install it from a terminal, not from inside a client: the Microsoft Store build
+of Claude cannot set up Python for the programs it starts, since a Store app's
+programs cannot write to `AppData` for real. For PDF text and page images,
+also install poppler (see [Tools](#tools)).
+
+Then sign in, from any folder:
+
+```bash
+dtumcp login
 ```
 
 That lists the Firefox profiles it finds (regular, snap and flatpak installs
@@ -87,33 +97,30 @@ header from devtools.
 Each of these starts the server over stdio, as a child process on your own
 machine. Nothing listens on a port and nothing is exposed to the network.
 
-Use the **absolute path to `uv`** and to `server.py`. Anything launched from a
-desktop icon, the Start menu or a `.desktop` entry may not inherit your shell's
-`PATH`, so a bare `uv` fails with `spawn uv ENOENT`. `which uv` gives you the
-path to use; on Windows, `where.exe uv` (usually
-`C:\Users\you\.local\bin\uv.exe`). Replace `you` and `repos\dtuMCP` below with
-your user name and where you cloned the repository.
+Use the **absolute path to `dtumcp`**. Anything launched from a desktop icon,
+the Start menu or a `.desktop` entry may not inherit your shell's `PATH`, so a
+bare `dtumcp` fails with `spawn dtumcp ENOENT`. `command -v dtumcp` prints the
+path to use; on Windows, `(Get-Command dtumcp).Source` in PowerShell (usually
+`C:\Users\you\.local\bin\dtumcp.exe`).
 
-**Claude Code** — registers for the CLI and the VS Code extension at once.
-Run it from the repository folder: the shell fills in where `uv` and
-`server.py` are, so the saved config holds full paths wherever you cloned it.
+**Claude Code** — registers for the CLI and the VS Code extension at once. The
+shell fills in the path, so the saved config holds it in full.
 
 Linux and macOS:
 
 ```bash
-claude mcp add --scope user dtu-learn -- "$(command -v uv)" run --script "$PWD/server.py"
+claude mcp add --scope user dtu-learn -- "$(command -v dtumcp)"
 ```
 
 Windows, in PowerShell:
 
 ```powershell
-claude mcp add --scope user dtu-learn -- (Get-Command uv).Source run --script "$PWD\server.py"
+claude mcp add --scope user dtu-learn -- (Get-Command dtumcp).Source
 ```
 
-The JSON configs below take full paths: their variable support (`${userHome}`
-in Cursor, none documented in Claude Desktop) is unreliable on Windows. From
-the repository folder, `echo "$(command -v uv)" "$PWD/server.py"` (PowerShell:
-`(Get-Command uv).Source; "$PWD\server.py"`) prints the two paths to paste.
+The JSON configs below take the full path written out, with `you` replaced by
+your user name: their variable support (`${userHome}` in Cursor, none
+documented in Claude Desktop) is unreliable on Windows.
 
 **Cursor** — `~/.cursor/mcp.json` (`%USERPROFILE%\.cursor\mcp.json` on
 Windows) for every project, or `.cursor/mcp.json` in one project. Then
@@ -123,8 +130,7 @@ Customize → MCP and toggle `dtu-learn` on.
 {
   "mcpServers": {
     "dtu-learn": {
-      "command": "/home/you/.local/bin/uv",
-      "args": ["run", "--script", "/home/you/repos/dtuMCP/server.py"]
+      "command": "/home/you/.local/bin/dtumcp"
     }
   }
 }
@@ -136,8 +142,7 @@ On Windows, double every backslash in JSON (or use forward slashes):
 {
   "mcpServers": {
     "dtu-learn": {
-      "command": "C:\\Users\\you\\.local\\bin\\uv.exe",
-      "args": ["run", "--script", "C:\\Users\\you\\repos\\dtuMCP\\server.py"]
+      "command": "C:\\Users\\you\\.local\\bin\\dtumcp.exe"
     }
   }
 }
@@ -153,12 +158,11 @@ holds your preferences. Settings → Developer → Edit Config opens it:
   Store install
   `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json`
 
-Both paths must exist on your machine: a Linux path left in on Windows fails
-with `spawn /home/you/.local/bin/uv ENOENT`, or, in `args`, with `can't open
-file 'C:\\home\\you\\repos\\dtuMCP\\server.py'`.
+The path must exist on your machine: a Linux path left in on Windows fails
+with `spawn /home/you/.local/bin/dtumcp ENOENT`.
 
-**Quit the client fully and reopen it after any change** — to the config or to
-`server.py`. An MCP server is spawned once at startup and held for the life of
+**Quit the client fully and reopen it after any change** — to the config, to
+`server.py` or by `uv tool install --reinstall`. An MCP server is spawned once at startup and held for the life of
 the client, so a running one keeps executing the copy of `server.py` it loaded
 when it started. Editing the file changes nothing until the client restarts.
 
@@ -593,7 +597,7 @@ up under `## No term`.
 From the repository folder:
 
 ```bash
-uv run test_server.py
+uv run --no-project test_server.py
 ```
 
 ## Local CLI (paste into any AI)
@@ -601,12 +605,12 @@ uv run test_server.py
 Run a tool directly and print the result. Nothing listens, nothing is exposed.
 
 ```bash
-uv run --script server.py --help
-uv run --script server.py list_courses
-uv run --script server.py course_contents 02231
-uv run --script server.py get_file 12345 67890
-uv run --script server.py download_term "Fall 2026"
-uv run --script server.py download_video 02231 1243820
+dtumcp --help
+dtumcp list_courses
+dtumcp course_contents 02231
+dtumcp get_file 12345 67890
+dtumcp download_term "Fall 2026"
+dtumcp download_video 02231 1243820
 ```
 
 Paste the output into claude.ai or any other chat. This is also the quickest way
@@ -641,7 +645,7 @@ Linux and macOS:
 export DTU_MCP_PATH="/$(openssl rand -hex 16)/mcp"
 export DTU_ALLOWED_HOST='<random>.trycloudflare.com'
 echo "https://$DTU_ALLOWED_HOST$DTU_MCP_PATH"
-uv run --script server.py
+dtumcp
 ```
 
 Windows (PowerShell):
@@ -650,7 +654,7 @@ Windows (PowerShell):
 $env:DTU_MCP_PATH = "/$([guid]::NewGuid().ToString('N'))/mcp"
 $env:DTU_ALLOWED_HOST = '<random>.trycloudflare.com'
 "https://$env:DTU_ALLOWED_HOST$env:DTU_MCP_PATH"
-uv run --script server.py
+dtumcp
 ```
 
 3. On claude.ai: **Customize → Connectors → + → Add custom connector**, paste

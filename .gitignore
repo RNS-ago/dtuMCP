@@ -8,3 +8,7 @@ __pycache__/
 cookie
 chrome/
 downloads/
+
+# uv tool install and uv build
+.venv/
+/dist/

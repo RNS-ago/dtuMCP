@@ -640,4 +640,9 @@ with tempfile.TemporaryDirectory() as tmp:
 mod.sys = __import__("sys")  # tests above stand in their own
 assert mod._data_dir().parts[-2:] == ("dtumcp", "courses")
 
+# pyproject.toml (uv tool install) and server.py's inline metadata (uv run
+# --script) must ask for the same dependencies.
+deps = lambda text: re.search(r"dependencies = (\[.*?\])", text).group(1)
+assert deps(open("pyproject.toml", encoding="utf-8").read()) == deps(open("server.py", encoding="utf-8").read())
+
 print("OK")

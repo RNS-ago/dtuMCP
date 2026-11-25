@@ -178,6 +178,6 @@ reference.
 - The calendar of a course from an earlier term is often closed to students,
   and comes back refused rather than empty. Say so instead of retrying.
 - If a tool says the session was rejected or has expired, tell me to run
-  `uv run --script server.py login` in a terminal, in the dtuMCP folder. You cannot do
+  `dtumcp login` in a terminal. You cannot do
   it yourself: it opens a browser and waits for me to sign in. Courses already
   downloaded can still be read meanwhile.
