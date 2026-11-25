@@ -1,10 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = ["mcp[cli]>=2", "httpx", "websockets>=12"]
-# [tool.uv]
-# # The Microsoft Store Python redirects writes under AppData to a private
-# # folder no other program sees, so the saved courses would vanish from view.
-# python-preference = "only-managed"
 # ///
 """MCP server for DTU Learn (D2L Brightspace) course material.
 
@@ -57,11 +53,11 @@ LP, LE = "1.63", "1.97"
 def _data_dir() -> Path:
     """Where the saved courses live by default: the platform's place for an
     app's own data, which, unlike Downloads, nobody clears out by hand."""
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or "~/AppData/Local"
-    elif sys.platform == "darwin":
+    if sys.platform == "darwin":
         base = "~/Library/Application Support"
     else:
+        # Windows too, not AppData: Microsoft Store apps (Python, Claude) and
+        # what they start write AppData to a private folder only they can see.
         base = os.environ.get("XDG_DATA_HOME") or "~/.local/share"
     return Path(base, "dtumcp", "courses").expanduser()
 

@@ -85,7 +85,7 @@ teachers actually handed me this term.
   - Any other format is saved and only the path comes back.
 - `download_course(org_unit_id)` — save every file of a course to disk on the
   machine running the server, under `<course>/<unit>/` in its data folder
-  (`~/.local/share/dtumcp/courses` on Linux, `%LOCALAPPDATA%\dtumcp\courses`
+  (`~/.local/share/dtumcp/courses` on Linux, `%USERPROFILE%\.local\share\dtumcp\courses`
   on Windows).
   It returns counts, not content. Broken topics, links and videos have no
   file and are only counted.

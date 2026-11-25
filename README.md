@@ -23,9 +23,10 @@ Windows, in PowerShell (or `winget install --id=astral-sh.uv -e`):
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Open a new terminal afterwards so it finds `uv`. The first run downloads a
-Python of uv's own, never the system's: the Microsoft Store Python would hide
-the saved courses in a private folder of its own. Every `uv run` command in this
+Open a new terminal afterwards so it finds `uv`. Run `login` below from a
+terminal before starting any client: the first run sets up Python and the
+server's dependencies, which fails when the Microsoft Store build of Claude
+starts it, since a Store app's programs cannot write to `AppData` for real. Every `uv run` command in this
 README works the same in PowerShell, cmd or a Linux shell, run from the
 repository folder. For PDF text and page images, also install poppler (see
 [Tools](#tools)).
@@ -401,8 +402,11 @@ number offered in more than one term is ambiguous, so the error lists the
 offerings and their ids instead of picking one.
 
 Saved courses and files are kept in the data folder: `~/.local/share/dtumcp/courses`
-on Linux (or under `$XDG_DATA_HOME`), `%LOCALAPPDATA%\dtumcp\courses` on Windows
-and `~/Library/Application Support/dtumcp/courses` on macOS. `DTU_DOWNLOADS`
+on Linux (or under `$XDG_DATA_HOME`), `%USERPROFILE%\.local\share\dtumcp\courses`
+on Windows and `~/Library/Application Support/dtumcp/courses` on macOS. Not
+`AppData` on Windows: Microsoft Store apps, such as the Store's Python and
+Claude, and the programs they start write there to a private folder that
+nothing else sees. `DTU_DOWNLOADS`
 names another.
 A unit (D2L calls it a module) is one of the `#` groups in a course tree. Most
 carry text of their own — a week's schedule, instructions for the exercises, a

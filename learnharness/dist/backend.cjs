@@ -11,11 +11,10 @@ const home = os.homedir();
 // and that is where uv usually lives.
 const env = { ...process.env, PATH: [process.env.PATH, `${home}/.local/bin`, `${home}/.cargo/bin`].join(path.delimiter) };
 // Where server.py keeps the saved courses, as its DOWNLOADS: the platform's
-// place for an app's data.
+// place for an app's data, ~/.local/share on Windows too.
 const downloads = process.env.DTU_DOWNLOADS ? process.env.DTU_DOWNLOADS.replace(/^~(?=$|[\\/])/, home)
 	: path.join(
-		process.platform === "win32" ? process.env.LOCALAPPDATA || path.join(home, "AppData", "Local")
-			: process.platform === "darwin" ? path.join(home, "Library", "Application Support")
+		process.platform === "darwin" ? path.join(home, "Library", "Application Support")
 			: process.env.XDG_DATA_HOME || path.join(home, ".local", "share"),
 		"dtumcp", "courses");
 const agents = ["teacher", "practice", "prober"];
