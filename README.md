@@ -134,12 +134,19 @@ On Windows, double every backslash in JSON (or use forward slashes):
 }
 ```
 
-**Claude Desktop** — same `mcpServers` block, merged into the existing config
-rather than replacing it, since that file also holds your preferences:
+**Claude Desktop** — same `mcpServers` block (the Windows one on Windows),
+merged into the existing config rather than replacing it, since that file also
+holds your preferences. Settings → Developer → Edit Config opens it:
 
 - Linux: `~/.config/Claude/claude_desktop_config.json`
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`, or for the Microsoft
+  Store install
+  `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json`
+
+Both paths must exist on your machine: a Linux path left in on Windows fails
+with `spawn /home/you/.local/bin/uv ENOENT`, or, in `args`, with `can't open
+file 'C:\\home\\you\\repos\\dtuMCP\\server.py'`.
 
 **Quit the client fully and reopen it after any change** — to the config or to
 `server.py`. An MCP server is spawned once at startup and held for the life of
