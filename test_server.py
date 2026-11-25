@@ -640,6 +640,21 @@ with tempfile.TemporaryDirectory() as tmp:
 mod.sys = __import__("sys")  # tests above stand in their own
 assert mod._data_dir().parts[-2:] == ("dtumcp", "courses")
 
+# --- _file_text: a PDF with no text says why ------------------------------
+with tempfile.TemporaryDirectory() as tmp:
+    scan = Path(tmp) / "scan.pdf"
+    scan.write_bytes(b"%PDF-1.4 not really")
+    real = mod.shutil
+    try:
+        mod.shutil = types.SimpleNamespace(which=lambda name: None)
+        got = mod._file_text(b"", "application/pdf", "scan.pdf", "Scan", scan)
+        assert "pdftotext, from poppler, is not installed" in got, got
+        mod.shutil = types.SimpleNamespace(which=lambda name: "/usr/bin/" + name)
+        got = mod._file_text(b"", "application/pdf", "scan.pdf", "Scan", scan)
+        assert "no text layer" in got and "get_pdf_pages" in got, got
+    finally:
+        mod.shutil = real
+
 # pyproject.toml (uv tool install) and server.py's inline metadata (uv run
 # --script) must ask for the same dependencies.
 deps = lambda text: re.search(r"dependencies = (\[.*?\])", text).group(1)

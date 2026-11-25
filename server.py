@@ -913,6 +913,11 @@ def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None =
                 f"for a course topic see those pages with get_pdf_pages.]"
                 f"\n\n{text[:TEXT_LIMIT]}{cut}"
             )
+        # Say why, or a missing pdftotext reads as a PDF made of images.
+        why = ("pdftotext, from poppler, is not installed on the machine running this server"
+               if not shutil.which("pdftotext") else
+               "it has no text layer, as a scanned PDF has none; get_pdf_pages shows its pages as images")
+        return f"No text could be extracted from {name}: {why}. It is saved at {path}."
 
     office = _ooxml_text(path, ctype)
     if office:
