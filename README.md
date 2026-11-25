@@ -534,7 +534,8 @@ PDFs are saved there too, but `get_file` returns their extracted text: a 34-page
 lecture deck is about 4k tokens as text against roughly 50k as page images.
 Extraction needs `pdftotext` from poppler-utils (`sudo apt install
 poppler-utils` on Debian and Ubuntu, `brew install poppler` on macOS; on
-Windows, `scoop install poppler`, or a [poppler-windows](https://github.com/oschwartz10612/poppler-windows)
+Windows, `winget install --id oschwartz10612.Poppler -e`, `scoop install
+poppler`, or a [poppler-windows](https://github.com/oschwartz10612/poppler-windows)
 release with its `bin` folder on `PATH`); without it, or for a scanned
 PDF with no text layer, `get_file` just returns the path. The text heads each
 page `[Page n]`.
