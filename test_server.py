@@ -21,13 +21,14 @@ tree = ast.parse(open("server.py").read())
 wanted = {"_flatten", "_profiles", "_pick_browser", "_pasted_cookies", "_cookies_from_chrome", "_term", "_pdf_text", "_TextExtractor",
           "_html_text", "_urn_kind", "_ooxml_text", "_description",
           "_calendar_lines", "_local", "_safe", "_file_topics", "_index_html",
-          "_d2l_file", "_linked_dest", "_relink",
+          "_d2l_file", "_linked_dest", "_dedupe_linked", "_relink",
           "_search_pages", "_search_entry", "_landing_html",
           "_each", "_status", "_summary", "_code",
           "_copies", "_copy", "_saved_text", "_file_text", "_decode",
-          "_numbered_pages", "_rich", "_group_rows"}
+          "_numbered_pages", "_rich", "_group_rows",
+          "_word_pattern", "_word_matches", "_has_word", "_search_docs", "_best_pages", "_searchable", "_search", "search_courses"}
 constants_extra = {"OOXML_MEMBERS"}
-constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT"}
+constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT", "OPTIONAL_HYPHEN", "_SEARCHABLE"}
 
 
 def needed(node):
@@ -40,6 +41,7 @@ def needed(node):
 mod = types.ModuleType("m")
 mod.__dict__.update(
     configparser=configparser,
+    filecmp=__import__("filecmp"),
     shutil=__import__("shutil"),
     partial=__import__("functools").partial,
     CHROMES=[],  # a Chrome on the machine running the tests is not one to list
@@ -57,6 +59,8 @@ mod.__dict__.update(
     unquote=unquote,
     urlparse=urlparse,
     datetime=datetime_module.datetime,
+    bisect_right=__import__("bisect").bisect_right,
+    mcp=types.SimpleNamespace(tool=lambda: lambda f: f),
 )
 exec(
     compile(ast.Module([n for n in tree.body if needed(n)], []), "server.py", "exec"),
@@ -552,5 +556,70 @@ assert rows[0]["mine"]["name"] == "project 2" and rows[1]["mine"] is None, rows
 assert [(m["name"], m["me"]) for m in rows[0]["mine"]["members"]] == [("Ada L", False), ("Me", True)], rows[0]
 assert rows[0]["description"] == {"text": "Pick one", "html": "<p>Pick one</p>"}
 assert mod._rich(None) == {"text": "", "html": ""}
+
+# --- search_courses -------------------------------------------------------------
+# The search over the _search.js index download_course writes, as the plugin's.
+words = lambda word, text: [m.group() for m in mod._word_matches(mod._word_pattern(word), text)]
+assert words("reduc", "Reductions, not unreduced") == ["Reduc"]
+assert words("cycle", "HamiltonCycle and cycles") == ["Cycle", "cycle"]
+assert words("3SAT", "3-SAT is 3SAT") == ["3-SAT", "3SAT"] and words("3-SAT", "3SAT") == ["3SAT"]
+assert words("økonomi", "Søkonomi, økonomi") == ["økonomi"]
+with tempfile.TemporaryDirectory() as tmp:
+    mod.DOWNLOADS = Path(tmp)
+    assert mod.search_courses("anything").startswith("No course is downloaded yet")
+    root = Path(tmp, "02249 Hard Problems")
+    root.mkdir()
+    (root / "_course-326400.json").write_text(json.dumps({
+        "ou": 326400, "name": "02249 Hard Problems, Fall 2026", "saved": "x", "news": [],
+        "modules": [{"ModuleId": 5, "Title": "Week 1", "Topics": [
+            {"TopicId": 11, "Title": "Book"}, {"TopicId": 12, "Title": "Old", "IsBroken": True}]}],
+        "files": {"11": "Week 1/book.pdf", "12": "Week 1/old.pdf", "3/4": "news/att.pdf"},
+        "linked": {}}))
+    docs = [mod._search_entry("Book", quote("Week 1/book.pdf"), "PDF",
+                              ["Intro to reductions", "Hamilton cycle", "Hamilton cycle: 3-SAT reduces to HamiltonCycle"], "Week 1"),
+            mod._search_entry("Old", quote("Week 1/old.pdf"), "PDF", ["Hamilton cycle"]),
+            mod._search_entry("Week 1", "#u5", "unit", ["Read about 3SAT"]),
+            mod._search_entry("Slides", quote("news/att.pdf"), "PDF", ["SAT"]),
+            mod._search_entry("Gone", "elsewhere.pdf", "PDF", ["Hamilton cycle"])]
+    (root / "_search.js").write_text(f"window.SEARCH = {json.dumps(docs)};\n")
+    got = mod.search_courses("hamilton cycle", 2249)
+    # The broken topic and the entry pointing at nothing are left out; page 3
+    # has both words twice over, page 2 once.
+    assert got.startswith("1 match:"), got
+    assert "[1] Book (PDF, page 3; also pages 2)" in got and "org_unit_id 326400, topic_id 11" in got, got
+    assert "02249 Hard Problems, Fall 2026 › Week 1" in got, got
+    got = mod.search_courses("3sat hamilton")
+    assert got.startswith("1 with every word, then 1 with some of them"), got
+    assert "unit_id 5 (unit_info)" in got and "lacks: hamilton" in got, got
+    got = mod.search_courses("sat")
+    assert "announcement attachment 3, file 4 (get_announcement_attachment)" in got, got
+    assert mod.search_courses("nothere").startswith('No matches for "nothere" in the downloaded courses.')
+    # Read once per download: a new index counts only once the record changes.
+    (root / "_search.js").write_text(f"window.SEARCH = {json.dumps([mod._search_entry('Fresh', '#u5', 'unit', ['quokka'])])};\n")
+    assert mod.search_courses("quokka").startswith("No matches")
+    os.utime(root / "_course-326400.json", (time.time() + 5, time.time() + 5))
+    assert mod.search_courses("quokka").startswith("1 match:")
+    try:
+        mod.search_courses("x", 2231)
+        assert False
+    except RuntimeError as e:
+        assert "Course 02231 is not downloaded" in str(e), e
+
+# A linked file that is a topic's file points at the topic's copy and is
+# deleted; one that differs, or is empty like some unrelated topic, stays.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    (root / "Week 1").mkdir()
+    (root / "_linked").mkdir()
+    notes, empty = root / "Week 1" / "notes.pdf", root / "Week 1" / "blank.txt"
+    notes.write_bytes(b"%PDF same")
+    empty.write_bytes(b"")
+    copy, other, hollow = (root / "_linked" / n for n in ("book.pdf", "other.pdf", "none.txt"))
+    copy.write_bytes(b"%PDF same")
+    other.write_bytes(b"%PDF diff")
+    hollow.write_bytes(b"")
+    got = mod._dedupe_linked({"a": copy, "b": copy, "c": other, "d": hollow}, [notes, empty])
+    assert got == {"a": notes, "b": notes, "c": other, "d": hollow}, got
+    assert not copy.exists() and other.exists() and hollow.exists()
 
 print("OK")

@@ -128,7 +128,7 @@ teaching, hand-ins and quizzes left for you to do under the course's own rules
 on generative AI. The prober finds where the course is from its calendar and
 current unit, the teacher plans from the course's material and points to its
 exercises, and the practice agent draws on its exercise sheets and old exams
-but never poses an open graded question. They also get `dtu_search_courses`, which only the plugin has:
+but never poses an open graded question. They also get `dtu_search_courses`, the plugin's own copy of the MCP's `search_courses`:
 the view's search, below, over every downloaded course, returning each match's
 course, units, the PDF page with the most of the words (and others with as
 many) and the ids the other tools take, so a tutor can find where something is
@@ -315,6 +315,7 @@ those images; if one cannot be drawn at all, its text is shown instead.
 | `list_assignments(org_unit_id)` | Assignment folders and due dates |
 | `list_announcements(org_unit_id)` | Course announcements |
 | `get_announcement_attachment(org_unit_id, news_id, file_id)` | A file attached to an announcement, read like `get_file` |
+| `search_courses(query, org_unit_id=0, limit=15)` | Where words occur in the downloaded courses, with the ids and PDF page to read next |
 | `calendar(days=7, org_unit_id=0)` | What is scheduled in the next `days` days |
 | `download_course(org_unit_id)` | The whole course saved for offline use, with an `index.html` to browse it |
 | `download_term(term="")` | Every course of a term saved the same way; the newest term if none is given |

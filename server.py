@@ -15,6 +15,7 @@ header from devtools yourself.
 """
 
 import configparser
+import filecmp
 import inspect
 import json
 import logging
@@ -30,6 +31,7 @@ import webbrowser
 import zipfile
 from datetime import datetime, timedelta, timezone
 from collections import Counter
+from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache, partial
 from itertools import count
@@ -1013,6 +1015,25 @@ def _save_linked(client, root: Path, url: str) -> tuple:
     return url, dest
 
 
+def _dedupe_linked(linked: dict, saved: list) -> dict:
+    """linked with each file that is a byte-for-byte copy of a saved topic file
+    pointed at that file instead, and the copy deleted. A page may link to a
+    file the course also lists as a topic, which would otherwise be kept,
+    searched and found twice, the second time without a topic id to read it by."""
+    by_size = {}
+    for path in saved:
+        by_size.setdefault(path.stat().st_size, []).append(path)
+    same = {}
+    for dest in set(linked.values()):
+        size = dest.stat().st_size
+        # Empty files are all alike, and none is the same file as another.
+        match = size and next((p for p in by_size.get(size, ()) if filecmp.cmp(p, dest, shallow=False)), None)
+        if match:
+            dest.unlink()
+            same[dest] = match
+    return {url: same.get(dest, dest) for url, dest in linked.items()}
+
+
 def _relink(html: str, page: Path, linked: dict) -> str:
     """Point a page's DTU Learn pictures and file links at the copies in linked."""
     def swap(m):
@@ -1294,7 +1315,16 @@ nav{position:static;max-height:none;border-right:0;border-bottom:1px solid var(-
 INDEX_JS = r"""
 // lt is the title and the units above it, so "milk description" finds the
 // Description topic inside the Milk case study.
-const docs = (window.SEARCH || []).map(d => ({...d, lt: (d.t + " " + (d.u || "")).toLowerCase(), lx: d.x.toLowerCase()}));
+// p, a PDF's page starts, counts characters, as Python does; JS strings count
+// UTF-16 units, two for a character like 𝑥, so they are converted here.
+function unitStarts(text, starts) {
+  let units = 0, chars = 0;
+  return starts.map(start => {
+    for (; chars < start && units < text.length; chars++) units += text.codePointAt(units) > 0xffff ? 2 : 1;
+    return units;
+  });
+}
+const docs = (window.SEARCH || []).map(d => ({...d, p: d.p && unitStarts(d.x, d.p), lt: (d.t + " " + (d.u || "")).toLowerCase(), lx: d.x.toLowerCase()}));
 const q = document.getElementById("q"), out = document.getElementById("results");
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -1561,13 +1591,18 @@ def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
         }
         linked = dict(_each(pool, lambda url: _save_linked(c, root, url), refs,
                             "pictures and linked files", say))
-        linked = {url: dest for url, dest in linked.items() if dest}
-        # Linked files have no topic, so they are searchable by their file name.
+        saved_files = [p for p, _ in results if p]
+        linked = _dedupe_linked({url: dest for url, dest in linked.items() if dest}, saved_files)
+        # Linked files have no topic, so they are searchable by their file name;
+        # one that is a topic's file is found as that topic already. Two links
+        # may reach one file, which is searched once.
+        topic_files = set(saved_files)
+        own = list(dict.fromkeys(d for d in linked.values() if d not in topic_files))
         docs += [
             _search_entry(dest.name, quote(dest.relative_to(root).as_posix()),
                           dest.suffix[1:].upper() or "file", found)
-            for dest, found in zip(linked.values(), _each(
-                pool, _search_pages, linked.values(), "search text of linked files", say))
+            for dest, found in zip(own, _each(
+                pool, _search_pages, own, "search text of linked files", say))
             if found
         ]
     say("writing the pages")
@@ -1630,6 +1665,244 @@ def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
         problems.append((f"{len(refs) - len(linked)} pictures or linked files could not be "
                          "fetched; the pages link to them online", []))
     return _code(name), counts, problems
+
+
+# The search below is the LearnHarness plugin's (backend.cjs), over the same
+# _search.js index the offline pages' search box reads, so a search finds the
+# same things in all three places.
+OPTIONAL_HYPHEN = "[-‐]?"
+
+
+def _word_pattern(word: str) -> re.Pattern:
+    """One search word as a case-blind pattern. A hyphen in the word, or between
+    its digits and letters, is optional in the text either way: "3SAT" and
+    "3-SAT" find each other. Where a match may start is _word_matches' call."""
+    chars = word.strip("-")
+    parts = []
+    for i, ch in enumerate(chars):
+        if ch == "-":
+            parts.append(OPTIONAL_HYPHEN)
+            continue
+        prev = chars[i - 1] if i else ""
+        if prev.isalnum() and ch.isalnum() and prev.isdigit() != ch.isdigit():
+            parts.append(OPTIONAL_HYPHEN)
+        parts.append(re.escape(ch))
+    return re.compile("".join(parts), re.IGNORECASE)
+
+
+def _word_matches(pattern: re.Pattern, text: str):
+    """Pattern's matches that start a word, or a hump of a joined-up name in
+    any case ("cycle" in "HamiltonCycle"), so "reduc" finds "reductions" but
+    "sat" does not find "unsat"."""
+    at = 0
+    while found := pattern.search(text, at):
+        i = found.start()
+        if i == 0 or not text[i - 1].isalnum() or (text[i - 1].islower() and text[i].isupper()):
+            yield found
+            at = found.end()
+        else:
+            at = i + 1
+
+
+def _has_word(pattern: re.Pattern, text: str) -> bool:
+    return next(_word_matches(pattern, text), None) is not None
+
+
+def _search_docs(copy: dict) -> list[dict]:
+    """A saved course's search entries as download_course wrote them, each with
+    what it points at: ("topic", id), ("unit", id), ("news", id),
+    ("attachment", "news id/file id") or ("linked", path), and whether its
+    topic is broken. Entries pointing at nothing the copy knows are left out."""
+    try:
+        script = (copy["root"] / "_search.js").read_text(encoding="utf-8")
+        docs = json.loads(script[script.index("=") + 1:].strip().removesuffix(";"))
+    except (OSError, ValueError):
+        return []  # a course saved before the search existed: downloading it again adds one
+    by_path = {saved: ("attachment", key) if "/" in key else ("topic", int(key))
+               for key, saved in (copy.get("files") or {}).items()}
+    for saved in (copy.get("linked") or {}).values():
+        by_path.setdefault(saved, ("linked", saved))
+    by_url, broken = {}, set()
+
+    def walk(modules):
+        for m in modules or []:
+            for t in m.get("Topics") or []:
+                if t.get("Url"):
+                    by_url[t["Url"]] = t["TopicId"]
+                if t.get("IsBroken"):
+                    broken.add(t["TopicId"])
+            walk(m.get("Modules"))
+
+    walk(copy.get("modules"))
+
+    def target(href: str):
+        if anchor := re.fullmatch(r"#([un])(\d+)", href):
+            return ("unit" if anchor[1] == "u" else "news", int(anchor[2]))
+        if lesson := re.search(r"/d2l/le/lessons/\d+/topics/(\d+)", href):
+            return ("topic", int(lesson[1]))
+        if href in by_url:
+            return ("topic", by_url[href])
+        return by_path.get(unquote(href))
+
+    entries = []
+    for doc in docs:
+        if not (to := target(doc.get("h", ""))):
+            continue
+        # label: the title and the units above it, so "milk description"
+        # finds the Description topic in the Milk case study.
+        entries.append({"title": doc.get("t", ""), "where": doc.get("u", ""), "kind": doc.get("k", ""),
+                        "text": doc.get("x", ""), "pages": doc.get("p"), "target": to,
+                        "label": f'{doc.get("t", "")} {doc.get("u", "")}',
+                        "broken": to[0] == "topic" and to[1] in broken})
+    return entries
+
+
+# What each search reads, by course record: kept while the server runs and
+# read again only when the course is downloaded again, which rewrites the
+# record last. shortcut: every searched course's text stays in memory, ~10 MB
+# for four courses; drop the least recent if a degree's worth makes it heavy.
+_SEARCHABLE = {}  # record path -> (mtime, course, entries)
+
+
+def _searchable(record: Path) -> tuple[dict, list]:
+    """A saved course's ou, name and folder, and its search entries."""
+    mtime = record.stat().st_mtime
+    cached = _SEARCHABLE.get(record)
+    if cached and cached[0] == mtime:
+        return cached[1:]
+    copy = json.loads(record.read_text(encoding="utf-8")) | {"root": record.parent}
+    course = {"ou": copy["ou"], "name": copy["name"], "root": record.parent}
+    _SEARCHABLE[record] = (mtime, course, _search_docs(copy))
+    return _SEARCHABLE[record][1:]
+
+
+def _best_pages(entry: dict, patterns: list) -> tuple[int, int, list[int]]:
+    """The page of a PDF entry with the most of the words, then the most
+    matches; where its first match is; and the other pages with as many of
+    the words, at most five."""
+    tally = {}  # page -> [words, hits, first offset]
+    for i, pattern in enumerate(patterns):
+        for found in _word_matches(pattern, entry["text"]):
+            t = tally.setdefault(bisect_right(entry["pages"], found.start()), [set(), 0, found.start()])
+            t[0].add(i)
+            t[1] += 1
+            t[2] = min(t[2], found.start())
+    ranked = sorted(tally.items(), key=lambda kv: (-len(kv[1][0]), -kv[1][1]))
+    best, (words, _, first) = ranked[0]
+    return best, first, sorted([n for n, t in ranked[1:] if len(t[0]) == len(words)][:5])
+
+
+def _search(query: str, courses: dict, limit: int = 15) -> tuple[list, int, int]:
+    """Every course in courses (org unit id -> _searchable's pair) searched for query's words in an entry's title, its
+    units or its text, skipping broken topics: those with every word first,
+    title matches among them first, then by how often the words occur; then
+    those with some of the words, the most first. Returns the first limit
+    hits, how many matched at all, and how many had every word."""
+    words = [w for w in str(query).split() if any(c.isalnum() for c in w)][:12]
+    if not words:
+        return [], 0, 0
+    patterns = [_word_pattern(w) for w in words]
+    found = []
+    for copy, entries in courses.values():
+        for entry in entries:
+            if entry["broken"]:
+                continue
+            has = [_has_word(p, entry["label"]) or _has_word(p, entry["text"]) for p in patterns]
+            if any(has):
+                # Capped, so one long book does not bury everything else.
+                often = sum(min(20, sum(1 for _ in _word_matches(p, entry["text"]))) for p in patterns)
+                in_title = all(_has_word(p, entry["label"]) for p in patterns)
+                found.append((copy, entry, has, in_title, often))
+    found.sort(key=lambda f: (-sum(f[2]), -f[3], -f[4]))
+    hits = []
+    for copy, entry, has, _, _ in found[:limit]:
+        text = entry["text"]
+        hit = {"ou": copy["ou"], "course": copy["name"], "title": entry["title"], "where": entry["where"],
+               "kind": entry["kind"], "target": entry["target"],
+               "missing": [w for w, h in zip(words, has) if not h]}
+        starts = [m.start() for p in patterns if (m := next(_word_matches(p, text), None))]
+        if starts:
+            at = min(starts)
+            if entry["pages"]:
+                hit["page"], at, hit["also"] = _best_pages(entry, patterns)
+            start = max(0, at - 70)
+            hit["snippet"] = ("…" if start else "") + text[start:at + 150]
+        hits.append(hit)
+    return hits, len(found), sum(1 for f in found if all(f[2]))
+
+
+@mcp.tool()
+def search_courses(query: str, org_unit_id: int = 0, limit: int = 15) -> str:
+    """Search the downloaded courses for words: titles, unit text, announcements
+    and the text inside files, a PDF's page by page. Use it to find where
+    something is covered before reading files one by one.
+    Every word must appear; each matches the start of a word or of a part of a
+    joined-up name, so "reduc" finds "reductions" and "cycle" finds
+    "HamiltonCycle", and "3SAT" and "3-SAT" find each other. Course material
+    uses its own terms and abbreviations: when a search comes back thin, try
+    those, or fewer words. When nothing has every word, it returns what has
+    the most of them and says which words each lacks.
+    Each match comes with its course, the units above it, its kind, the PDF
+    page with the most matches and other pages with as many words, the ids
+    that get_file, unit_info, get_pdf_pages or get_announcement_attachment
+    take, and the text around the match.
+    org_unit_id limits it to one course (an org unit id or a DTU course
+    number); left out, every downloaded course. limit is at most 50.
+    Only downloaded courses are searched; download_course adds one.
+    """
+    newest = {int(p.stem.removeprefix("_course-")): p for p in _copies()}  # oldest first, so the newest wins, as in _copy
+    # By folder, as the plugin lists them, so equal matches come in the same order.
+    courses = {ou: _searchable(p) for ou, p in sorted(newest.items(), key=lambda kv: kv[1].parent.name)}
+    names = {ou: course["name"] for ou, (course, _) in courses.items()}
+    only = org_unit_id
+    if 0 < org_unit_id <= 99999:
+        # A course number, as _resolve tells them apart, matched to the saved courses.
+        code = f"{org_unit_id:05d} "
+        matches = [ou for ou, name in names.items() if name.startswith(code)]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Course {code.strip()} is downloaded for several terms: "
+                f"{', '.join(map(str, matches))}. Pass the org unit id." if matches else
+                f"Course {code.strip()} is not downloaded. Run list_courses and download_course.")
+        only = matches[0]
+    if only:
+        courses = {only: courses[only]} if only in courses else {}
+    hits, total, complete = _search(query, courses, min(50, max(1, limit)))
+    if not total:
+        if not names:
+            return "No course is downloaded yet, so there is nothing to search. download_course saves one."
+        saved = "; ".join(f"[{ou}] {name}" for ou, name in names.items())
+        return (f'No matches for "{query}" in {f"course {only}" if only else "the downloaded courses"}. '
+                f"Downloaded: {saved}.")
+    shown = f"; the best {len(hits)} shown" if total > len(hits) else ""
+    if complete == total:
+        lines = [f"{total} match{'' if total == 1 else 'es'}{shown}:"]
+    elif complete:
+        lines = [f"{complete} with every word, then {total - complete} with some of them, "
+                 f"each saying which it lacks{shown}:"]
+    else:
+        lines = [f'Nothing has every word of "{query}". These have the most of them, each saying '
+                 f"which it lacks; try the course's own words for those{shown}:"]
+    for i, hit in enumerate(hits, 1):
+        kind, key = hit["target"]
+        ou = hit["ou"]
+        ids = {
+            "topic": f"org_unit_id {ou}, topic_id {key}",
+            "unit": f"org_unit_id {ou}, unit_id {key} (unit_info)",
+            "attachment": f"org_unit_id {ou}, announcement attachment "
+                          f"{str(key).replace('/', ', file ')} (get_announcement_attachment)",
+            "news": f"org_unit_id {ou}, announcement {key} (list_announcements)",
+        }.get(kind, f"org_unit_id {ou}; a file the course's pages link to, not readable with the tools")
+        pages = ""
+        if hit.get("page"):
+            pages = f", page {hit['page']}" + (f"; also pages {', '.join(map(str, hit['also']))}" if hit["also"] else "")
+        lacks = f" — lacks: {', '.join(hit['missing'])}" if hit["missing"] else ""
+        lines += ["", f"[{i}] {hit['title']} ({hit['kind']}{pages}){lacks}",
+                  f"    {' › '.join(filter(None, (hit['course'], hit['where'])))}",
+                  f"    {ids}"]
+        if "snippet" in hit:
+            lines.append(f"    {hit['snippet']}")
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -2044,6 +2317,7 @@ COMMANDS = {
         list_assignments,
         list_announcements,
         get_announcement_attachment,
+        search_courses,
         calendar,
         download_course,
         download_term,

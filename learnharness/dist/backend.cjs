@@ -165,6 +165,16 @@ const record = ou => {
 // ponytail: every searched course's text stays in memory, a few MB each;
 // drop the least recent if many big courses make the app heavy.
 const searchCache = new Map(); // org unit id -> { mtime, ou, name, entries }
+// The index counts a PDF's page starts in characters, as server.py's Python
+// does; JS strings count UTF-16 units, two for a character like 𝑥, so without
+// this a page of mathematics pushes every later page's matches onto the next.
+function unitStarts(text, starts) {
+	let units = 0, chars = 0;
+	return starts.map(start => {
+		for (; chars < start && units < text.length; chars++) units += text.codePointAt(units) > 0xffff ? 2 : 1;
+		return units;
+	});
+}
 function searchCourse(ou, { file, mtime }) {
 	const cached = searchCache.get(ou);
 	if (cached?.mtime === mtime) return cached;
@@ -204,7 +214,7 @@ function searchCourse(ou, { file, mtime }) {
 		if (!to) continue;
 		// label: the title and the units above it, so "milk description"
 		// finds the Description topic in the Milk case study.
-		entries.push({ title: doc.t, where: doc.u ?? "", kind: doc.k, text: doc.x ?? "", pages: doc.p, label: `${doc.t} ${doc.u ?? ""}`, target: to, broken: broken.has(to.topic) });
+		entries.push({ title: doc.t, where: doc.u ?? "", kind: doc.k, text: doc.x ?? "", pages: doc.p && unitStarts(doc.x ?? "", doc.p), label: `${doc.t} ${doc.u ?? ""}`, target: to, broken: broken.has(to.topic) });
 	}
 	const course = { mtime, ou, name: copy.name, entries };
 	searchCache.set(ou, course);
@@ -468,7 +478,10 @@ exports.activate = ctx => {
 				const { text, found } = searchText(input);
 				return { content: [{ type: "text", text }], details: found };
 			},
-		}, ...tools.map(tool => ({
+		},
+		// server.py's search_courses is this same search; the one above also gives
+		// the tool card its hits, so it stands in for the other.
+		...tools.filter(tool => tool.name !== "search_courses").map(tool => ({
 			name: `dtu_${tool.name}`,
 			label: `DTU Learn: ${tool.name.replaceAll("_", " ")}`,
 			description: tool.description,
