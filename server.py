@@ -27,6 +27,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import unicodedata
 import webbrowser
 import zipfile
 import zlib
@@ -749,12 +752,17 @@ def _filename(r: httpx.Response, fallback: str) -> str:
 
 
 @_tool
-def get_file(org_unit_id: int, topic_id: int, ctx: Context | None = None) -> str:
+def get_file(
+    org_unit_id: int, topic_id: int, first_page: int = 1, last_page: int = 0,
+    ctx: Context | None = None,
+) -> str:
     """Fetch one content topic: a file's text, an HTML page's text, or a link's target.
 
     Topic ids come from course_contents. PDFs come back as extracted text with
     the saved file's path; other binaries are saved and only the path returned.
-    Read from the course's offline copy, like course_contents.
+    Read from the course's offline copy, like course_contents. A PDF's text
+    runs from first_page to last_page (0: its last page), cut after the page
+    that reaches about 25k tokens, with a note saying where to go on from.
     """
     ou = _resolve(org_unit_id)
     copy = _course(ou, ctx)
@@ -783,14 +791,15 @@ def get_file(org_unit_id: int, topic_id: int, ctx: Context | None = None) -> str
 
     saved = copy["files"].get(str(topic_id))
     if saved:
-        return _saved_text(copy["root"] / saved, title, (copy.get("marks") or {}).get(str(topic_id)))
+        return _saved_text(copy["root"] / saved, title, (copy.get("marks") or {}).get(str(topic_id)),
+                           (first_page, last_page))
     # Not in the copy: its download failed, so try DTU Learn once more.
     r, name = _topic_fetch(ou, topic)
-    return _file_text(r.content, r.headers.get("content-type", ""), name, title)
+    return _file_text(r.content, r.headers.get("content-type", ""), name, title, pages=(first_page, last_page))
 
 
-def _numbered_pages(text: str, marks: dict | None = None, rebuilt: dict | None = None) -> str:
-    """pdftotext's output with each page headed [Page n], and with what
+def _numbered_pages(text: str, marks: dict | None = None, rebuilt: dict | None = None) -> list[str]:
+    """pdftotext's output, a page each, headed [Page n] and with what
     _page_marks found on it, as [Page n, has images, drawing, math, unreadable
     symbols]. pdftotext ends every page with a form feed, which says nothing to
     a reader. Only the last one goes: the ones before it may close blank pages,
@@ -804,10 +813,10 @@ def _numbered_pages(text: str, marks: dict | None = None, rebuilt: dict | None =
                         ("symbols", "unreadable symbols")):
         for n in (marks or {}).get(kind, ()):
             on.setdefault(n, []).append(label)
-    return "\n\n".join(
+    return [
         f"[Page {n}{', has ' + ', '.join(on[n]) if n in on else ''}]\n{page.strip(chr(10))}"
         for n, page in enumerate(pages, 1)
-    )
+    ]
 
 
 def _poppler(*args, timeout: int = 120) -> str:
@@ -1127,6 +1136,7 @@ def _displayed(page, math: set) -> bool:
 
 
 BIG_OPERATORS = set("∑∏∫⋃⋂⨁⨂⨀⨄⋀⋁∐∮⨆")
+PRIMES = ("′", "′′", "″", "‴")  # set beside their letter, never as scripts
 # Pieces of tall delimiters, which pdftohtml gives boxes of the wrong height,
 # as it does every glyph of TeX's big-symbol font.
 DELIMITER_PIECES = set("⎛⎜⎝⎞⎟⎠⎡⎢⎣⎤⎥⎦⎧⎨⎩⎪⎫⎬⎭⎮⏐")
@@ -1152,7 +1162,7 @@ def _nest(runs: list) -> str:
     middle = sum(r["mid"] for r in base) / len(base)
     out, group, kind = "", [], None
     for r in runs + [None]:
-        small = r is not None and r["size"] < 0.85 * top and r["text"].strip() not in ("′", "′′")
+        small = r is not None and r["size"] < 0.85 * top and r["text"].strip() not in PRIMES
         here = ("_" if r["mid"] > middle else "^") if small else None
         if group and (here != kind or not small):
             out += _script(_nest(group), kind)
@@ -1189,6 +1199,8 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
         if not text.strip():
             continue
         size, family = fonts.get(t.get("font"), (0, ""))
+        if "CMSY" in family:  # TeX's ↦ is CMSY's \mapstochar, read as 7, and →
+            text = text.replace("7→", "↦")
         big = text.strip() in BIG_OPERATORS
         runs.append(dict(text=text, top=top, left=left, right=left + width, w=width, h=height,
                          mid=top + height / 2, size=size, big=big, math=bool(MATH_FONT.search(family)),
@@ -1216,6 +1228,14 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
                  dict(r, text=text[-1], left=r["right"] - wide, w=wide, big=True, piece=False,
                       spaced=text[-2].isspace())]
     touch = max(3, 0.15 * body)  # the most a script sits right of its base, or into an italic one
+    # TeX's √ hangs below its box, which sits up to half a line high: it
+    # goes with the text it covers, right after it.
+    for r in (r for r in runs if r["text"].strip() == "√"):
+        under = [b for b in runs if b is not r and -touch <= b["left"] - r["right"] <= touch
+                 and r["top"] <= b["top"] < r["top"] + r["h"]]
+        if under:
+            shift = min(under, key=lambda b: b["left"])["mid"] - r["mid"]
+            r["top"], r["mid"] = r["top"] + shift, r["mid"] + shift
     for r in runs:
         # Small beside the page's text, or beside the larger text it follows,
         # overlapping it up or down: a slide's smaller
@@ -1265,14 +1285,39 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
             b.get("bracket") and r["size"] < 0.85 * b["size"] and -touch <= r["left"] - b["right"] <= touch
             and b["top"] < r["top"] + r["h"] and r["top"] < b["top"] + b["h"] for b in runs)
 
+    # Small text touching full-size text beside it, overlapping it: its script.
+    scripts = lambda r: r["small"] and any(
+        not (b["small"] or b["big"] or b["piece"]) and -touch <= r["left"] - b["right"] <= touch
+        and b["top"] < r["top"] + r["h"] and r["top"] < b["top"] + b["h"] for b in runs)
     # Fractions first, shorter rules first, so an inner one is a single run by
     # the time its outer rule is looked at. Text on one side only is an
     # overline, an underline or a root; text with gaps as wide as a table's
     # columns is a table; a bar over a tenth as thick as its text is tall is a
     # piece of TeX's \underbrace, not a fraction's (Office's are a sixteenth).
+    # Three or more long rules spanning the same width are a table's lines;
+    # short ones, stacked fractions or bars over letters in a column.
+    spans = Counter((round(x0), round(x1)) for x0, x1, *_ in rules)
     for x0, x1, y, thick in sorted(((x0 * scale, x1 * scale, y * scale, (rest or [0])[0] * scale)
-                                    for x0, x1, y, *rest in rules), key=lambda r: r[1] - r[0]):
+                                    for x0, x1, y, *rest in rules
+                                    if spans[round(x0), round(x1)] < 3 or (x1 - x0) * scale <= 6 * body),
+                                   key=lambda r: r[1] - r[0]):
+        # A bar from where a √ ends is the root's, over what it covers.
+        if any(r["text"].strip() == "√" and abs(r["right"] - x0) <= touch
+               and r["top"] - line_h <= y <= r["top"] + r["h"] for r in runs):
+            continue
         inside = [r for r in runs if not r.get("taken") and x0 - 3 <= r["left"] <= x1 and r["right"] <= x1 + 0.6 * body]
+        # A short bar through the top of the box of the text under it, above
+        # its letters, is a bar over them, as TeX's x̄_1 for not x_1; a
+        # fraction's bar sits above its denominator's box, or under a
+        # numerator centred on it.
+        over = [r for r in inside if r["top"] + 1 <= y <= r["top"] + 0.4 * r["h"] and r["right"] <= x1 + 2]
+        if over and x1 - x0 <= 6 * body and sum(r["w"] for r in over) >= 0.5 * (x1 - x0) and not any(
+                x0 <= (a["left"] + a["right"]) / 2 <= x1 and y - 0.6 * line_h <= a["top"] + a["h"] <= y + 2
+                and a["top"] < y for a in inside if not any(a is r for r in over) and not scripts(a)):
+            for r in over:
+                mark = "̄" if len(r["text"].strip()) == 1 else "̅"
+                r["text"] = "".join(c if c.isspace() else c + mark for c in r["text"])
+            continue
         above = [r for r in inside if y - 1.6 * line_h <= r["top"] + r["h"] <= y + 2 and r["top"] < y]
         below = [r for r in inside if y - 2 <= r["top"] <= y + 1.2 * line_h]
         if not above or not below:
@@ -1281,9 +1326,12 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
         near_below = min(r["top"] for r in below)
         num = sorted((r for r in above if r["top"] + r["h"] >= near_above - 0.6 * line_h), key=lambda r: r["left"])
         den = sorted((r for r in below if r["top"] <= near_below + 0.6 * line_h), key=lambda r: r["left"])
+        # Both parts are centred on the bar: text at one end of a rule, as a
+        # sum's total under its last row or a □ ending a proof, is not one.
+        centred = lambda part: abs((part[0]["left"] + part[-1]["right"]) / 2 - (x0 + x1) / 2) <= 0.25 * (x1 - x0) + 3
         if {id(r) for r in num} & {id(r) for r in den} or any(
                 b["left"] - a["right"] > 1.5 * body for part in (num, den) for a, b in zip(part, part[1:])) or (
-                thick > 0.1 * max(r["size"] for r in num + den)):
+                thick > 0.1 * max(r["size"] for r in num + den)) or not (centred(num) and centred(den)):
             continue
         wrap = lambda part: part if len(part) == 1 or re.fullmatch(r"\d+(\.\d+)?", part) else f"({part})"
         for r in num + den:
@@ -1295,12 +1343,15 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
                          h=max(r["top"] + r["h"] for r in den) - min(r["top"] for r in num),
                          small=size < 0.85 * body, big=False, piece=False, fraction=True))
 
-    # A displayed operator's limits: small text centred right over or under it.
+    # A displayed operator's limits: small text centred right over or under it,
+    # unless it is the script of text it touches, as the n of X_n above a ∑.
     for op in (r for r in runs if r["big"]):
         centre = (op["left"] + op["right"]) / 2
         op["over"], op["under"] = [], []
         for r in runs:
             if not r["small"] or r.get("taken") or abs((r["left"] + r["right"]) / 2 - centre) > max(op["w"], r["w"]) * 0.6:
+                continue
+            if scripts(r):
                 continue
             if op["top"] - 1.6 * line_h <= r["top"] + r["h"] <= op["top"] + 4:
                 op["over"].append(r)
@@ -1308,6 +1359,20 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
             elif op["top"] + 0.5 * line_h <= r["top"] <= op["top"] + 2.6 * line_h:
                 op["under"].append(r)
                 r["taken"] = True
+        # A limit wider than the operator, X:∥X∥=n under a ∑, goes on in small
+        # text beside it, TeX's thin spaces apart, with its own scripts.
+        for side in (op["over"], op["under"]):
+            grew = True
+            while grew:
+                grew = False
+                for r in runs:
+                    gap = max(touch, 0.5 * r["size"])
+                    if r["small"] and not r.get("taken") and not r.get("fraction") and any(
+                            s["top"] < r["top"] + r["h"] and r["top"] < s["top"] + s["h"]
+                            and (-touch <= r["left"] - s["right"] <= gap or -touch <= s["left"] - r["right"] <= gap)
+                            for s in side):
+                        side.append(r)
+                        r["taken"] = grew = True
 
     # Lines from ordinary full-size text; operators and delimiters, whose boxes
     # are wrong, join the nearest one, a stacked piece only when it is close.
@@ -1344,16 +1409,35 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
         if (home := next((line for line in lines if any(x is r.get("beside") for x in line["runs"])), None)):
             home["runs"].append(r)  # a drawn bracket goes with the text it is beside
             continue
-        # An opening bracket carries no script: text touching one starts inside it.
-        # A script after a tall bracket sits higher or lower than one after a letter.
+        # An opening bracket carries no script: text touching one starts inside
+        # it, as inside one in a script, n(n−1)/2 in {0,1}^{n(n−1)/2}, the
+        # script goes on. A script after a tall bracket sits higher or lower than one after a letter.
         # A script it follows overlaps it up or down, where a diagram's label
         # below a formula does not. Larger text it follows says which it is,
         # since a line can hold two columns' rows, unless it sits level with
         # it, as TeX's ℕ_0 does, or its box is taller than its type, as a big
-        # symbol's is; TeX's symbol boxes are too rough to ask more.
-        base = [b for b in near["runs"] if -touch <= r["left"] - b["right"] <= touch
+        # symbol's is; TeX's symbol boxes are too rough to ask more. Office
+        # leaves a wider gap after a ∑ or ∏ set in a script and its limits,
+        # before the summand (the i of e^{∑_{i=1}^{q−1} i}).
+        limit = lambda b: b.get("kind") and any(
+            x["text"].rstrip()[-1:] in BIG_OPERATORS and -touch <= b["left"] - x["right"] <= touch
+            for x in near["runs"])
+        root = max((b for b in near["runs"] if not (b.get("kind") or b["big"] or b.get("fraction"))
+                    and b["right"] <= r["left"] + touch),
+                   key=lambda b: b["right"], default=None) if near else None
+        # A prime sits as far out after an italic capital (TeX's V′).
+        wide = 2 * touch if r["text"].strip() in PRIMES else touch
+        base = [b for b in near["runs"] if -touch <= r["left"] - b["right"] <= (2 * touch if limit(b) else wide)
                 and (not b.get("kind") or b["top"] < r["top"] + r["h"] and r["top"] < b["top"] + b["h"])
-                and not b["text"].rstrip().endswith(tuple("([{⟨⌊⌈"))] if near else []
+                and (b.get("kind") or not b["text"].rstrip().endswith(tuple("([{⟨⌊⌈")))
+                # smaller than the text it follows, a caption set small goes on
+                # as text; a fraction's parts in a line are script size already
+                and (b.get("kind") or b["big"] or b.get("bracket") or b.get("fraction")
+                     or r["size"] < 0.85 * b["size"])
+                # and it goes on a script only while smaller than the letter
+                # the script hangs from: x_1 + x̄_2 in a caption, not x_{1+x̄_2}
+                and not (b.get("kind") and root and r["size"] >= 0.85 * root["size"])] if near else []
+        r["summand"] = any(r["left"] - b["right"] > touch for b in base)
         if base and not r.get("bracket") and abs(near["mid"] - r["mid"]) <= 1.5 * line_h:
             mid = next((b["mid"] for b in base if not b.get("kind") and r["size"] < 0.85 * b["size"]
                         and b["h"] <= 1.2 * b["size"] and abs(r["mid"] - b["mid"]) > 0.15 * b["h"]), near["mid"])
@@ -1373,8 +1457,8 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
     for line in lines:
         text, end, group = "", None, []
         for r in sorted(line["runs"], key=lambda r: (r["left"], r["top"])) + [None]:
-            kind = r and (None if r["text"].strip() in ("′", "′′") else r.get("kind"))
-            if group and (r is None or kind != group[0]["kind"] or r["left"] - end > 3):
+            kind = r and (None if r["text"].strip() in PRIMES else r.get("kind"))
+            if group and (r is None or kind != group[0]["kind"] or r["left"] - end > 3 and not r.get("summand")):
                 text += _script(_nest(group), group[0]["kind"])
                 group = []
             if r is None:
@@ -1385,7 +1469,7 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
                 at = round(r["left"] / column)
                 if not text:
                     text = " " * at
-                elif r["left"] - end > 0.2 * r["size"] or r.get("spaced"):
+                elif (r["left"] - end > 0.2 * r["size"] or r.get("spaced")) and r["text"].strip() not in PRIMES:
                     text += " " * max(1, at - len(text)) if r["left"] - end > 2 * column else " "
                 text += r["text"]
                 if r["big"] and (r.get("under") or r.get("over")):
@@ -1396,6 +1480,9 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
             end = r["right"]
         for accent, combining in ACCENTS:  # a bar or tilde over a letter, set apart
             text = re.sub(f"(\\w){accent}|{accent}\\s?(\\w)", lambda m, c=combining: (m.group(1) or m.group(2)) + c, text)
+        # TeX's \not is a stroke of its own before = or ∈, so it lands on the
+        # space: on the sign it strikes it is ≠ or ∉.
+        text = re.sub("̸\\s?(\\S)", lambda m: unicodedata.normalize("NFC", m.group(1) + "̸"), text)
         out.append(text.rstrip())
     return "\n".join(out)
 
@@ -1428,7 +1515,8 @@ def _write_math_text(path: Path, xml: str, math: set, rules: list, width: float,
     if root is not None:
         fonts = {f.get("id"): (int(f.get("size") or 0), f.get("family") or "") for f in root.iter("fontspec")}
         plain = (_pdf_text(path) or "").removesuffix("\f").split("\f")
-        letters = lambda text: Counter(c for c in text if c.isalnum())
+        # ↦ stands for pdftotext's 7→ (_rebuild_page)
+        letters = lambda text: Counter(c for c in text.replace("↦", "7") if c.isalnum())
         for page in root.findall("page"):
             n = int(page.get("number"))
             if n not in math or n > len(rules) or n > len(plain):
@@ -1725,7 +1813,7 @@ def _decode(content: bytes, ctype: str) -> str:
         return content.decode("utf-8", "replace")
 
 
-def _saved_text(path: Path, title, marks: dict | None = None) -> str:
+def _saved_text(path: Path, title, marks: dict | None = None, pages: tuple = (1, 0)) -> str:
     """_file_text for a file in an offline copy. The copy keeps no content
     type, so the extension stands in. Anything but a page, a PDF or an Office
     file is left to the bytes, as D2L's unknown type is: guess_type calls a
@@ -1733,16 +1821,18 @@ def _saved_text(path: Path, title, marks: dict | None = None) -> str:
     ctype = mimetypes.guess_type(path.name)[0] or ""
     if not any(kind in ctype for kind in ("html", "pdf", "officedocument")):
         ctype = "d2l/unknowntype"
-    return _file_text(path.read_bytes(), ctype, path.name, title, path, marks)
+    return _file_text(path.read_bytes(), ctype, path.name, title, path, marks, pages)
 
 
 def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None = None,
-               marks: dict | None = None) -> str:
+               marks: dict | None = None, pages: tuple = (1, 0)) -> str:
     """Turn a file into text for the caller, saving it to disk when the bytes
     are not text themselves. Shared by content topics and announcement
     attachments, fetched or read from an offline copy; path is where a copy
     already keeps the file, and marks what _page_marks found in it when the
-    copy was saved; a PDF without them is looked at now."""
+    copy was saved; a PDF without them is looked at now. pages is the first
+    and last page of a PDF to give (0: to its end), whole pages up to
+    TEXT_LIMIT."""
     if "html" in ctype:
         return f"[{title}]\n\n{_html_text(_decode(content, ctype))}"
     if ctype.startswith("text/") or "json" in ctype:
@@ -1770,18 +1860,35 @@ def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None =
             # number the pages so the ones that matter can be looked at.
             marks = _page_marks(path) if marks is None else marks
             rebuilt = _math_text(path)
-            text = _numbered_pages(text, marks, rebuilt)
-            cut = "\n\n[Text truncated here.]" if len(text) > TEXT_LIMIT else ""
+            blocks = _numbered_pages(text, marks, rebuilt)
+            first, last = pages[0], min(pages[1] or len(blocks), len(blocks))
+            if not 1 <= first <= last:
+                raise RuntimeError(f"{name} has pages 1 to {len(blocks)}: ask for first_page "
+                                   f"to last_page within them.")
+            # Whole pages, so a page is never half read; a page longer than the
+            # limit on its own is cut.
+            shown, size = [], 0
+            for block in blocks[first - 1:last]:
+                if shown and size + len(block) > TEXT_LIMIT:
+                    break
+                shown.append(block[:TEXT_LIMIT])
+                size += len(block) + 2
+            end = first + len(shown) - 1
+            span = "" if (first, end) == (1, len(blocks)) else f", pages {first} to {end} of {len(blocks)}"
+            cut = (f"\n\n[Text stops after page {end} of {len(blocks)}. Ask for first_page={end + 1} "
+                   f"for the rest.]" if end < last else "")
+            text = "\n\n".join(shown)
             return (
-                f"[Text of {name}. The PDF itself is at {path}. Figures and "
-                f"mathematical notation do not survive extraction: open it, or "
+                f"[Text of {name}{span}. The PDF itself is at {path}. Figures do "
+                f"not survive extraction, and mathematical notation "
+                f"{'only roughly' if rebuilt else 'does not either'}: open it, or "
                 f"for a course topic see those pages with get_pdf_pages. A page "
                 f"heading says when the page has images, a drawing, math or "
                 f"unreadable symbols (a font its text cannot name, so look at "
                 f"the page for those); "
                 f"a figure of level and upright lines alone (a grid, a "
                 f"table) is not marked.{MATH_NOTATION if rebuilt else ''}]"
-                f"\n\n{text[:TEXT_LIMIT]}{cut}"
+                f"\n\n{text}{cut}"
             )
         # Say why, or a missing pdftotext reads as a PDF made of images.
         why = ("pdftotext, from poppler, is not installed on the machine running this server"
@@ -1946,7 +2053,8 @@ def _search_pages(path: Path) -> list[str]:
     one for anything else. Empty when no text can be got out of it."""
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        pages = (_pdf_text(path) or "").split("\f")  # pdftotext ends each page with \f
+        # pdftotext ends each page with \f; split on all, the last makes a page past the end.
+        pages = (_pdf_text(path) or "").removesuffix("\f").split("\f")
     elif suffix in OOXML_KINDS:
         pages = [_ooxml_text(path, OOXML_KINDS[suffix]) or ""]
     elif suffix in (".html", ".htm"):
@@ -2310,6 +2418,54 @@ function take(folder, name) {
 """
 
 
+# Claude Desktop gives up on a tool call after 140 s, progress or not, and a
+# term's download takes minutes. So an MCP call waits this long and then
+# leaves the download running; calling again picks it up.
+JOB_WAIT = 110
+_job = {}  # the download running in the background, if any
+
+
+def _background(key: str, label: str, call: str, work, ctx: Context | None) -> str:
+    """Run work(report) -- a download -- and return what it returns. From
+    the command line it simply runs. For an MCP client it runs in a thread,
+    one at a time, and the call waits up to JOB_WAIT seconds for it; if it
+    is still going, the call says so and the next call with the same key
+    waits on, and returns its summary once done."""
+    if ctx is None:
+        return work(lambda text: None)
+    job = _job.get("now")
+    if job and job["key"] != key:
+        return (f"Another download, {job['label']}, is still running. Wait for it with "
+                f"{job['call']} before starting this one.")
+    if not job:
+        job = {"key": key, "label": label, "call": call, "last": "", "start": time.monotonic(),
+               "done": threading.Event()}
+
+        def run():
+            try:
+                job["result"] = work(lambda text: job.__setitem__("last", text))
+            except Exception as e:  # handed to the call that collects it
+                job["error"] = e
+            finally:
+                job["done"].set()
+
+        _job["now"] = job
+        threading.Thread(target=run, daemon=True).start()
+    report, sent, until = _reporter(ctx), None, time.monotonic() + JOB_WAIT
+    while not job["done"].wait(1) and time.monotonic() < until:
+        if job["last"] != sent:
+            sent = job["last"]
+            report(sent)
+    if not job["done"].is_set():
+        return (f"The download of {label} is still running after {int(time.monotonic() - job['start'])} s"
+                f"{': ' + job['last'].strip() if job['last'].strip() else ''}. It goes on in the background. "
+                f"Call {call} again for its progress, and its summary once it is done.")
+    _job.pop("now", None)
+    if "error" in job:
+        raise job["error"]
+    return job["result"]
+
+
 @_tool
 def download_course(org_unit_id: int, ctx: Context | None = None) -> str:
     """Save a course for offline use: its files, unit text and announcements.
@@ -2321,10 +2477,17 @@ def download_course(org_unit_id: int, ctx: Context | None = None) -> str:
     course_contents, unit_info, get_file and the announcement tools read
     this copy, so run it again to bring them up to date.
     Nothing comes back as text -- for that, ask for the one topic with get_file.
+    One that takes over about two minutes goes on in the background: call
+    download_course again with the same course for its progress and summary.
     """
-    row = _download(_resolve(org_unit_id), report=_reporter(ctx))
-    _status(keep=True)  # a blank line between the ✓ line and the table
-    return _summary([row])
+    ou = _resolve(org_unit_id)
+
+    def work(report):
+        row = _download(ou, report=report)
+        _status(keep=True)  # a blank line between the ✓ line and the table
+        return _summary([row])
+
+    return _background(f"course {ou}", f"course {org_unit_id}", f"download_course({org_unit_id})", work, ctx)
 
 
 @_tool
@@ -2333,7 +2496,9 @@ def download_term(term: str = "", ctx: Context | None = None) -> str:
 
     term is written like the headings of list_courses: "Fall 2026", "Jan 25".
     Left out, it is the newest term you are enrolled in. A course that fails
-    is reported and the rest still download.
+    is reported and the rest still download. A term takes minutes, so after
+    about two minutes the download goes on in the background: call
+    download_term again with the same term for its progress and summary.
     """
     want = None
     if term:
@@ -2346,16 +2511,22 @@ def download_term(term: str = "", ctx: Context | None = None) -> str:
     units = _term_units(want)
     if not units:
         raise RuntimeError(f"You have no courses in {term or 'any term'}. Run list_courses to see your terms.")
-    rows, report = [], _reporter(ctx)
-    for i, ou in enumerate(units, 1):
-        prefix = f"[{i}/{len(units)}] "
-        try:
-            rows.append(_download(ou["Id"], prefix, report))
-        except (RuntimeError, httpx.HTTPError) as e:
-            rows.append((_code(ou["Name"]), None, [("could not download", [str(e)])]))
-            _status(("31", "  ✗ "), ("2", prefix), ("", ou["Name"]), keep=True)
-    _status(keep=True)  # a blank line between the ✓ lines and the table
-    return _summary(rows)
+
+    def work(report):
+        rows = []
+        for i, ou in enumerate(units, 1):
+            prefix = f"[{i}/{len(units)}] "
+            try:
+                rows.append(_download(ou["Id"], prefix, report))
+            except (RuntimeError, httpx.HTTPError) as e:
+                rows.append((_code(ou["Name"]), None, [("could not download", [str(e)])]))
+                _status(("31", "  ✗ "), ("2", prefix), ("", ou["Name"]), keep=True)
+        _status(keep=True)  # a blank line between the ✓ lines and the table
+        return _summary(rows)
+
+    label = term or "the newest term"
+    return _background(f"term {label}", label, f'download_term("{term}")' if term else "download_term()",
+                       work, ctx)
 
 
 COLUMNS = ("files", "pictures", "announcements", "links", "videos", "broken")
@@ -2936,19 +3107,21 @@ def list_announcements(org_unit_id: int, ctx: Context | None = None) -> str:
 
 @_tool
 def get_announcement_attachment(
-    org_unit_id: int, news_id: int, file_id: int, ctx: Context | None = None
+    org_unit_id: int, news_id: int, file_id: int, first_page: int = 1, last_page: int = 0,
+    ctx: Context | None = None,
 ) -> str:
     """Fetch a file attached to an announcement: its text, or where it was saved.
 
     The ids come from list_announcements: news_id from the heading, file_id
-    from the Attachment line. Handled like get_file handles a content file.
+    from the Attachment line. Handled like get_file handles a content file,
+    first_page and last_page included.
     """
     ou = _resolve(org_unit_id)
     copy = _course(ou, ctx)
     saved = copy["files"].get(f"{news_id}/{file_id}")
     if saved:
         marks = (copy.get("marks") or {}).get(f"{news_id}/{file_id}")
-        return _saved_text(copy["root"] / saved, Path(saved).name, marks)
+        return _saved_text(copy["root"] / saved, Path(saved).name, marks, (first_page, last_page))
     with _client() as c:
         r = c.get(f"/d2l/api/le/{LE}/{ou}/news/{news_id}/attachments/{file_id}")
     if r.status_code in (401, 403):
@@ -2963,7 +3136,7 @@ def get_announcement_attachment(
         )
     r.raise_for_status()
     name = _filename(r, f"attachment-{file_id}")
-    return _file_text(r.content, r.headers.get("content-type", ""), name, name)
+    return _file_text(r.content, r.headers.get("content-type", ""), name, name, pages=(first_page, last_page))
 
 
 def _term_units(want: tuple | None = None) -> list:

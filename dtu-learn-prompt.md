@@ -82,9 +82,11 @@ teachers actually handed me this term.
     that `pdftotext` is not installed, tell me to install poppler (see the
     dtuMCP README); when it has no text layer, as a scan has none, read its
     pages with `get_pdf_pages`.
-  - Text past about 25k tokens is cut, ending `[Text truncated here.]`. For
-    anything after the cut, find the page with `search_courses` and read it
-    with `get_pdf_pages`.
+  - A long PDF's text stops after about 25k tokens, at the end of a page,
+    with a note naming the page to go on from: call `get_file` again with
+    that `first_page`. When you need only part of a long PDF, find its pages
+    with `search_courses` and ask for just those, with `first_page` and
+    `last_page`. Other files are cut, ending `[Text truncated here.]`.
   - Figures, diagrams and mathematical notation do not survive extraction.
     When they matter, look at just those pages with
     `get_pdf_pages(org_unit_id, topic_id, first_page, last_page)`, which
@@ -123,6 +125,10 @@ teachers actually handed me this term.
   me. Broken topics, links and videos have no file and are only counted.
 - `download_term(term)` — the same for every course of a term, written like
   the headings of `list_courses` (`"Fall 2026"`); the newest term if left out.
+  A download that runs past about two minutes goes on in the background, and
+  the call says so: call the same tool again with the same course or term
+  for its progress and, once done, its summary. Start no other download
+  until it is done.
 - `search_courses(query, org_unit_id, limit)` — searches the saved courses
   for words: titles, unit text, announcements and the text inside files, a
   PDF's page by page. Each word matches the start of a word, so `reduc` finds

@@ -225,11 +225,11 @@ online.
 | `list_courses` | Enrolled courses grouped by term, newest first |
 | `course_contents(org_unit_id)` | Unit/topic tree, with their IDs and any external links |
 | `unit_info(org_unit_id, unit_id)` | One unit's own text, plus its contents |
-| `get_file(org_unit_id, topic_id)` | A topic's content, whatever kind it is |
+| `get_file(org_unit_id, topic_id, first_page=1, last_page=0)` | A topic's content, whatever kind it is; for a PDF, from `first_page` to `last_page` |
 | `get_pdf_pages(org_unit_id, topic_id, first_page, last_page=0)` | Pages of a PDF topic as images, for figures and notation |
 | `list_assignments(org_unit_id)` | Assignment folders and due dates |
 | `list_announcements(org_unit_id)` | Course announcements |
-| `get_announcement_attachment(org_unit_id, news_id, file_id)` | A file attached to an announcement, read like `get_file` |
+| `get_announcement_attachment(org_unit_id, news_id, file_id, first_page=1, last_page=0)` | A file attached to an announcement, read like `get_file` |
 | `search_courses(query, org_unit_id=0, limit=15)` | Where words occur in the downloaded courses, with the ids and PDF page to read next |
 | `calendar(days=7, org_unit_id=0)` | What is scheduled in the next `days` days |
 | `download_course(org_unit_id)` | The whole course saved for offline use, with an `index.html` to browse it |
@@ -248,7 +248,10 @@ online.
   unzipped (spreadsheets as cell values), and anything else that decodes as
   UTF-8. An HTML page comes back as stripped text, a link as its URL, a video
   as the address to watch it at. Text goes in the reply because some clients
-  sandbox their file tools away from where the server saves files.
+  sandbox their file tools away from where the server saves files. A reply
+  stops at about 25k tokens: a PDF's after the whole page that reaches it,
+  with a note naming the page to go on from, which `first_page` asks for;
+  other files mid-text.
 - **PDF page headings say what the text lost**, as `[Page n, has images,
   drawing, math]`, so an agent knows which pages to look at:
   - *images*: a picture `pdfimages` lists, drawn at least half a square inch
@@ -280,7 +283,11 @@ online.
   Word and PowerPoint draw the brackets that grow to fit a formula, as in
   `{0,1}^λ` or `H(m)`, as shapes rather than characters, so no text tool sees
   them; the pass knows `( ) [ ] { } |` by their outlines in the SVG and puts
-  them back next to the formula they enclose.
+  them back next to the formula they enclose. A short bar through the top
+  of the letters under it is a bar over them, as TeX's `x̄_1` for not `x_1`,
+  and long rules of one width are a table's lines rather than fraction bars.
+  TeX's `√`, set half a line high, goes with what it covers, and its `\not`
+  and `\mapsto` come out as `≠`, `∉` and `↦`.
   Matrices, cases, aligned columns of equations and figures made of text keep
   their layout only roughly: look at those pages.
 - **`get_pdf_pages`** draws pages with `pdftoppm` at 1568 pixels on the long
@@ -303,7 +310,11 @@ in `<course>/_linked/`, with the pages pointed at the copies. Videos are left
 out (`dtumcp download_video <course> <topic>` saves one), as are links and
 broken topics. `download_term` does every course of a term, written like
 `list_courses`'s headings (`"Fall 2026"`, `"Jan 25"`); one failing course does
-not stop the rest.
+not stop the rest. Claude Desktop gives up on a tool call after 140 seconds, so
+over MCP a download that takes longer than 110 seconds goes on in the
+background: the call says it is still running, and calling the same tool
+again waits on it and returns its summary once done. One download runs at a
+time. The command line waits as before.
 
 Each course gets an `index.html` laid out like the course site, with Content
 and Announcements tabs, and the data folder gets a landing page linking every

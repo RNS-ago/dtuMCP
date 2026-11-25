@@ -30,12 +30,12 @@ wanted = {"_flatten", "_profiles", "_pick_browser", "_pasted_cookies", "_cookies
           "_rebuild_page", "_write_math_text", "_math_text", "_pdf_objects", "_pdf_stream",
           "_utf16", "_cmap_entries", "_cmap", "_tex_maps", "_unmapped_fonts", "_font_pages", "_word_boxes", "_save", "_rich", "_group_rows",
           "_humps", "_parts", "_terms", "_index", "_drop_course", "_index_course", "_sync_index",
-          "_search_docs", "_search", "_search_answer", "search_courses"}
+          "_search_docs", "_search", "_search_answer", "search_courses", "_background"}
 constants_extra = {"OOXML_MEMBERS"}
 constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT", "INDEX_VERSION", "INDEX_SCHEMA", "INDEX_WEIGHTS",
              "MATH_FONT", "SVG", "SVG_HIDDEN", "NUMBER",
              "OMX", "CAPITALS", "TEX_GLYPHS", "CAMBRIA", "OFFICE_NARY", "PIECES", "PDF_OBJECT", "HEX",
-             "BIG_OPERATORS", "DELIMITER_PIECES", "WORD_BOX", "ACCENTS", "MATH_TEXT", "MATH_NOTATION"}
+             "BIG_OPERATORS", "PRIMES", "DELIMITER_PIECES", "WORD_BOX", "ACCENTS", "MATH_TEXT", "MATH_NOTATION", "JOB_WAIT", "_job"}
 
 
 def needed(node):
@@ -75,6 +75,10 @@ mod.__dict__.update(
     zlib=__import__("zlib"),
     mcp=types.SimpleNamespace(tool=lambda: lambda f: f),
     _tool=lambda f: f,
+    Context=object,
+    threading=__import__("threading"),
+    time=__import__("time"),
+    unicodedata=__import__("unicodedata"),
 )
 exec(
     compile(ast.Module([n for n in tree.body if needed(n)], []), "server.py", "exec"),
@@ -408,6 +412,37 @@ assert docs == [
     {"t": "a.pdf", "h": "Announcements/5-a.pdf", "k": "attachment", "x": "Homework one"},
 ], docs
 
+# --- _background: a download outlives the client's wait -------------------
+mod._reporter, mod.JOB_WAIT = (lambda ctx: lambda text: None), 0.5
+assert mod._background("k", "l", "c", lambda report: "done", None) == "done"  # the command line waits
+gate = __import__("threading").Event()
+
+
+def slow(report):
+    report("[1/2] 02231 files 3/40")
+    gate.wait(5)
+    return "summary"
+
+
+got = mod._background("term Fall", "Fall", 'download_term("Fall")', slow, object())
+assert "still running" in got and "[1/2] 02231 files 3/40" in got and 'download_term("Fall")' in got, got
+got = mod._background("course 1", "course 1", "download_course(1)", slow, object())
+assert got.startswith("Another download, Fall,") and 'download_term("Fall")' in got, got
+gate.set()
+assert mod._background("term Fall", "Fall", 'download_term("Fall")', slow, object()) == "summary"
+assert not mod._job
+
+
+def broken(report):
+    raise RuntimeError("Session rejected")
+
+
+try:
+    mod._background("course 2", "course 2", "download_course(2)", broken, object())
+    raise AssertionError("the error should reach the call")
+except RuntimeError as e:
+    assert str(e) == "Session rejected" and not mod._job, e
+
 # --- _search_pages ----------------------------------------------------------
 with tempfile.TemporaryDirectory() as tmp:
     pptx = Path(tmp) / "s.pptx"
@@ -421,6 +456,13 @@ with tempfile.TemporaryDirectory() as tmp:
     empty.write_text("<p> </p>")
     assert mod._search_pages(empty) == []
     assert mod._search_pages(Path(tmp) / "movie.mp4") == []
+    # pdftotext's closing form feed is no page of its own.
+    real = mod._pdf_text
+    try:
+        mod._pdf_text = lambda path: "one\f\ftwo\f"
+        assert mod._search_pages(Path(tmp) / "n.pdf") == ["one", "", "two"], mod._search_pages(Path(tmp) / "n.pdf")
+    finally:
+        mod._pdf_text = real
 
 # --- _d2l_file, _linked_dest, _relink ---------------------------------------
 B = mod.BASE
@@ -547,7 +589,7 @@ assert mod._decode(b"x", "text/plain; charset=nonsense") == "x"
 
 # pdftotext ends every page with a form feed; get_file numbers them instead,
 # so a reader can ask get_pdf_pages for the page with the figure.
-got = mod._numbered_pages("\n  Title\n\fP = NP?\n\f\f")
+got = "\n\n".join(mod._numbered_pages("\n  Title\n\fP = NP?\n\f\f"))
 assert got == "[Page 1]\n  Title\n\n[Page 2]\nP = NP?\n\n[Page 3]\n", repr(got)
 
 # pdfimages -list, as poppler prints it for a 4-page PDF with a slide
@@ -568,7 +610,7 @@ page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-pp
 assert mod._picture_pages(listing, 4) == {2, 3}, mod._picture_pages(listing, 4)
 assert mod._picture_pages("", 4) == set()
 got = mod._numbered_pages("one\ftwo\fthree\ffour\f", {"images": [2, 3], "math": [3]})
-assert got.split("\n\n")[:3] == ["[Page 1]\none", "[Page 2, has images]\ntwo",
+assert got[:3] == ["[Page 1]\none", "[Page 2, has images]\ntwo",
                                   "[Page 3, has images, math]\nthree"], got
 assert mod._poppler("pdfimages", "-list", "/nonexistent/nope.pdf") == ""
 assert mod._poppler("no-such-poppler-tool") == ""
@@ -675,7 +717,7 @@ xml = ("<pdf2xml><page number='1'><fontspec id='0' size='20' family='AAAAAW+Camb
        "<text font='0'> </text></page><page number='2'><text font='0'>8</text></page>"
        "<page number='3'><fontspec id='1' size='20' family='AAAAAX+Calibri'/><text font='1'>a</text></page></pdf2xml>")
 assert mod._font_pages(xml, {"AAAAAW+CambriaMath"}) == {2} and mod._font_pages("<", {"x"}) == set()
-assert mod._numbered_pages("a\fb\f", {"math": [2], "symbols": [2]}) == "[Page 1]\na\n\n[Page 2, has math, unreadable symbols]\nb"
+assert mod._numbered_pages("a\fb\f", {"math": [2], "symbols": [2]}) == ["[Page 1]\na", "[Page 2, has math, unreadable symbols]\nb"]
 # bfrange entries are read too, as a run and as a list.
 assert mod._cmap_entries(b"beginbfrange <41> <43> <0061> <44> <45> [<03B1> <03B2>] endbfrange") == {
     0x41: "a", 0x42: "b", 0x43: "c", 0x44: "α", 0x45: "β"}
@@ -756,6 +798,120 @@ page = mod.ET.fromstring("<page number='1' width='1400' height='800'>" + "".join
 ]) + "</page>")
 lines = [" ".join(line.split()) for line in mod._rebuild_page(page, fonts, [], 1).splitlines()]
 assert lines[-2:] == ["… |𝑚_𝑘", "𝑚_2 𝑚_𝑘"], lines
+# Office leaves a wider gap before a summand than a script's (02231 Hash p28).
+page = mod.ET.fromstring("<page number='1' width='1400' height='800'>" + "".join([
+    run(100, 100, 900, 39, 6, "plenty of text at the page's own size, which is 39"),
+    run(530, 800, 20, 39, 6, "𝑒"), run(514, 820, 28, 28, 7, "⋅∑"), run(502, 848, 46, 23, 8, "𝑞−1"),
+    run(528, 848, 40, 23, 8, "𝑖=1"), run(514, 900, 10, 28, 7, "𝑖"),
+]) + "</page>")
+fonts.update({"6": (39, "AB+CambriaMath"), "7": (28, "AB+CambriaMath"), "8": (23, "AB+CambriaMath")})
+assert mod._rebuild_page(page, fonts, [], 1).split()[-1] == "𝑒^{⋅∑^{𝑞−1}_{𝑖=1}𝑖}", mod._rebuild_page(page, fonts, [], 1)
+# A script stays with the letter it touches though a ∑ sits under it on the
+# next line, whose limits it would otherwise be (02249 Lecture Notes p121).
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 700, 16, 20, "plenty of text at the page's own size, which is 18"),
+    run(706, 285, 39, 16, 20, ": Let"), run(706, 354, 54, 16, 21, ", . . . , X"), run(713, 408, 8, 11, 22, "n"),
+    run(706, 425, 120, 16, 20, "be independent"),
+    run(727, 323, 36, 16, 20, ". For"), run(727, 365, 15, 16, 21, "X"), run(727, 386, 19, 16, 20, ":="),
+    run(726, 409, 19, 8, 23, "∑"), run(723, 428, 8, 11, 22, "n"), run(737, 428, 4, 11, 22, "i"),
+    run(737, 432, 16, 11, 24, "=1"), run(727, 452, 15, 16, 21, "X"), run(734, 467, 4, 11, 22, "i"),
+]) + "</page>")
+fonts.update({"20": (18, "AB+CMR12"), "21": (18, "AB+CMMI12"), "22": (12, "AB+CMMI8"), "23": (18, "AB+CMEX10"),
+              "24": (12, "AB+CMR8")})
+lines = [" ".join(line.split()) for line in mod._rebuild_page(page, fonts, [], 1).splitlines()]
+assert lines[-2:] == [": Let , . . . , X_n be independent", ". For X := ∑^n_{i=1} X_i"], lines
+# A caption set smaller than the text goes on as text, not as a script
+# (Lecture Notes p16); long rules of one width are a table's, not fraction
+# bars (p67).
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 700, 16, 20, "plenty of text at the page's own size, which is 18"),
+    run(495, 207, 69, 13, 27, "Table 2.1"), run(495, 276, 289, 13, 27, ": Magnitudes of running times"),
+    run(855, 260, 300, 16, 20, "− 0 1 2"), run(877, 260, 300, 16, 20, "0 − − −"),
+    run(899, 260, 300, 16, 20, "1 − − −"),
+]) + "</page>")
+fonts.update({"27": (15, "AB+CMR10")})
+text = mod._rebuild_page(page, fonts, [(257, 642, y, 0.0) for y in (850.8, 873.0, 898.2, 920.5)], 1)
+assert [" ".join(line.split()) for line in text.splitlines()][1:] == [
+    "Table 2.1: Magnitudes of running times", "− 0 1 2", "0 − − −", "1 − − −"], text
+# TeX's √ sits half a line high: it goes with what it covers, and its bar
+# is no fraction bar (exam2023 p7: 4σ over √(2π)).
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 700, 13, 30, "plenty of text at the page's own size, which is 15"),
+    run(215, 560, 50, 13, 30, "1/2] ≤"), run(205, 642, 7, 13, 30, "4"), run(205, 650, 9, 13, 31, "σ"),
+    run(214, 636, 12, 14, 32, "√"), run(227, 648, 7, 13, 30, "2"), run(227, 656, 9, 13, 31, "π"),
+]) + "</page>")
+fonts.update({"30": (15, "AB+CMR10"), "31": (15, "AB+CMMI10"), "32": (15, "AB+CMSY10")})
+text = mod._rebuild_page(page, fonts, [(636, 665, 221.9, 0.0), (648, 665, 224.9, 0.0)], 1)
+assert text.split()[-1] == "(4σ)/(√2π)", text
+# A limit wider than its ∑ is taken whole, thin spaces and all (Lecture Notes p15).
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 700, 16, 20, "plenty of text at the page's own size, which is 18"),
+    run(316, 381, 30, 16, 20, ") :="), run(311, 436, 26, 8, 23, "∑"),
+    run(342, 416, 12, 11, 22, "X"), run(342, 429, 4, 11, 24, ":"), run(342, 438, 6, 11, 25, "∥"),
+    run(342, 445, 12, 11, 22, "X"), run(342, 457, 6, 11, 25, "∥"), run(342, 464, 10, 11, 24, "="),
+    run(342, 474, 8, 11, 22, "n"), run(316, 484, 11, 16, 21, "P"),
+]) + "</page>")
+fonts.update({"25": (12, "AB+CMSY8")})
+assert "∑_{X:∥X∥=n} P" in " ".join(mod._rebuild_page(page, fonts, [], 1).split()), mod._rebuild_page(page, fonts, [], 1)
+# TeX's ↦ is CMSY's \mapstochar, which text tools read as 7, then → (p28).
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 700, 16, 20, "plenty of text at the page's own size, which is 18"),
+    run(1039, 600, 20, 16, 21, "f: ℕ"), run(1034, 624, 18, 17, 26, "7→"), run(1039, 646, 13, 16, 21, "ℕ"),
+]) + "</page>")
+fonts.update({"26": (18, "AB+CMSY10")})
+assert mod._rebuild_page(page, fonts, [], 1).split()[-4:] == ["f:", "ℕ", "↦", "ℕ"], mod._rebuild_page(page, fonts, [], 1)
+# TeX's \not strikes the sign after it, not the space before (Lecture Notes p17).
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>"
+                         + run(100, 100, 300, 16, 20, "v ̸= w and x ̸∈ L") + "</page>")
+assert mod._rebuild_page(page, fonts, [], 1).strip() == "v ≠ w and x ∉ L", mod._rebuild_page(page, fonts, [], 1)
+# A total at the end of a summing rule is not a denominator (Lecture Notes p24).
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 700, 16, 20, "plenty of text at the page's own size, which is 18"),
+    run(400, 300, 200, 16, 20, "+ · · · = 1/32"), run(420, 490, 9, 16, 20, "1"),
+]) + "</page>")
+assert mod._rebuild_page(page, fonts, [(300, 500, 418.0, 0.0)], 1).split()[-1] == "1", mod._rebuild_page(page, fonts, [(300, 500, 418.0, 0.0)], 1)
+# A script goes on only while smaller than the letter it hangs from: a
+# caption's x_1 + x_3 (Lecture Notes p50), but TeX's g^{sk_1+sk_2}.
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 700, 16, 20, "plenty of text at the page's own size, which is 18"),
+    run(400, 100, 9, 13, 27, "x"), run(405, 109, 5, 9, 28, "1"), run(400, 114, 30, 13, 27, "+ x"),
+    run(405, 144, 5, 9, 28, "3"),
+    run(600, 100, 9, 16, 21, "g"), run(594, 109, 14, 11, 22, "sk"), run(599, 123, 5, 8, 29, "1"),
+    run(594, 128, 20, 11, 22, "+sk"), run(599, 148, 5, 8, 29, "2"),
+]) + "</page>")
+fonts.update({"27": (15, "AB+CMR10"), "28": (10, "AB+CMR7"), "29": (8, "AB+CMR5")})
+lines = [" ".join(line.split()) for line in mod._rebuild_page(page, fonts, [], 1).splitlines()]
+assert lines[1:] == ["x_1+ x_3", "g^{sk_1+sk_2}"], lines
+# A bracket inside a script keeps the script going (Lecture Notes p10).
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 700, 16, 20, "plenty of text at the page's own size, which is 18"),
+    run(693, 286, 9, 17, 26, "{"), run(694, 295, 9, 16, 20, "0"), run(694, 304, 5, 16, 21, ","),
+    run(694, 311, 9, 16, 20, "1"), run(693, 320, 9, 17, 26, "}"), run(690, 329, 8, 11, 22, "n"),
+    run(690, 337, 5, 11, 24, "("), run(690, 342, 8, 11, 22, "n"), run(690, 349, 10, 11, 25, "−"),
+    run(690, 359, 11, 11, 24, "1)"), run(690, 371, 6, 11, 22, "/"), run(690, 377, 6, 11, 24, "2"),
+]) + "</page>")
+fonts.update({"25": (12, "AB+CMSY8"), "26": (18, "AB+CMSY10")})
+assert mod._rebuild_page(page, fonts, [], 1).split()[-1] == "{0,1}^{n(n−1)/2}", mod._rebuild_page(page, fonts, [], 1)
+# TeX sets a prime a little out from an italic capital (Lecture Notes p17).
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 700, 16, 20, "plenty of text at the page's own size, which is 18"),
+    run(1015, 479, 81, 16, 20, "is a subset"), run(1015, 566, 10, 16, 21, "V"), run(1012, 580, 3, 11, 25, "′"),
+    run(1014, 591, 14, 17, 26, "⊆"), run(1015, 610, 10, 16, 21, "V"),
+]) + "</page>")
+fonts.update({"25": (12, "AB+CMSY8"), "26": (18, "AB+CMSY10")})
+assert mod._rebuild_page(page, fonts, [], 1).split()[-4:] == ["subset", "V′", "⊆", "V"], mod._rebuild_page(page, fonts, [], 1)
+# A short bar through the top of a letter's box is a bar over it, though a
+# script from the line above hangs over its end (Lecture Notes p46, p50);
+# under a numerator centred on it, it is a fraction's.
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 700, 16, 20, "plenty of text at the page's own size, which is 18"),
+    run(691, 680, 9, 16, 21, "a"), run(697, 690, 7, 11, 22, "k"), run(691, 705, 75, 16, 20, "receives a"),
+    run(712, 646, 8, 16, 21, "z"), run(712, 669, 14, 16, 20, "="), run(712, 690, 10, 16, 21, "x"),
+    run(719, 700, 5, 11, 22, "ℓ"), run(712, 714, 66, 16, 20, "with the"),
+    run(800, 300, 10, 16, 21, "ω"), run(819, 300, 10, 16, 20, "6"),
+]) + "</page>")
+text = mod._rebuild_page(page, fonts, [(689, 699, 713.6, 0.0), (298, 312, 820.5, 0.0)], 1)
+assert "= x̄_ℓ with" in " ".join(text.split()) and "ω/6" in text, text
 # A bracket inside a run goes between the words pdftotext -bbox places it
 # between, though by letter count it falls nearer the next space.
 page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + run(100, 100, 300, 39, 0, "ab cd efghijklmno") + "</page>")
@@ -779,7 +935,7 @@ with tempfile.TemporaryDirectory() as tmp:
     side = Path(tmp) / ("notes.pdf" + mod.MATH_TEXT)
     side.write_text(json.dumps({"size": notes.stat().st_size, "pages": {"2": "x_i"}}), encoding="utf-8")
     assert mod._math_text(notes) == {"2": "x_i"}
-    assert mod._numbered_pages("one\ftwo xi\f", None, mod._math_text(notes)) == "[Page 1]\none\n\n[Page 2]\nx_i"
+    assert mod._numbered_pages("one\ftwo xi\f", None, mod._math_text(notes)) == ["[Page 1]\none", "[Page 2]\nx_i"]
     notes.write_bytes(b"%PDF fake, downloaded again")
     assert mod._math_text(notes) == {}
     mod._write_math_text(notes, "", set(), [], 0.0)  # no math pages: no file
@@ -941,6 +1097,28 @@ with tempfile.TemporaryDirectory() as tmp:
         assert "no text layer" in got and "get_pdf_pages" in got, got
     finally:
         mod.shutil = real
+
+    # A PDF's text is whole pages up to TEXT_LIMIT, from first_page to
+    # last_page, with where to go on from when it stops early.
+    real = mod._pdf_text, mod.TEXT_LIMIT
+    try:
+        mod._pdf_text, mod.TEXT_LIMIT = (lambda path: "one\ftwo\fthree\ffour\f"), 30
+        read = lambda pages: mod._file_text(b"", "application/pdf", "n.pdf", "N", scan, {}, pages)
+        got = read((1, 0))
+        assert "[Text of n.pdf, pages 1 to 2 of 4." in got and got.endswith(
+            "[Page 2]\ntwo\n\n[Text stops after page 2 of 4. Ask for first_page=3 for the rest.]"), got
+        got = read((3, 0))
+        assert "pages 3 to 4 of 4" in got and got.endswith("[Page 4]\nfour"), got
+        assert read((2, 2)).endswith("]\n\n[Page 2]\ntwo"), read((2, 2))
+        mod.TEXT_LIMIT = 100
+        assert "[Text of n.pdf. " in read((1, 0)) and "Text stops" not in read((1, 0))
+        try:
+            read((5, 0))
+            raise AssertionError("page 5 of 4")
+        except RuntimeError as e:
+            assert "pages 1 to 4" in str(e), e
+    finally:
+        mod._pdf_text, mod.TEXT_LIMIT = real
 
 # pyproject.toml (uv tool install) and server.py's inline metadata (uv run
 # --script) must ask for the same dependencies.
