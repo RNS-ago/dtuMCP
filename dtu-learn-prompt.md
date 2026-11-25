@@ -85,7 +85,8 @@ teachers actually handed me this term.
   - Any other format is saved and only the path comes back.
 - `download_course(org_unit_id)` — save every file of a course to disk on the
   machine running the server, under `<course>/<unit>/` in its data folder
-  (`~/.local/share/dtumcp/courses` on Linux).
+  (`~/.local/share/dtumcp/courses` on Linux, `%LOCALAPPDATA%\dtumcp\courses`
+  on Windows).
   It returns counts, not content. Broken topics, links and videos have no
   file and are only counted.
 - `search_courses(query, org_unit_id, limit)` — searches the saved courses
@@ -177,6 +178,6 @@ reference.
 - The calendar of a course from an earlier term is often closed to students,
   and comes back refused rather than empty. Say so instead of retrying.
 - If a tool says the session was rejected or has expired, tell me to run
-  `uv run --script ~/repos/dtuMCP/server.py login` in a terminal. You cannot do
+  `uv run --script server.py login` in a terminal, in the dtuMCP folder. You cannot do
   it yourself: it opens a browser and waits for me to sign in. Courses already
   downloaded can still be read meanwhile.

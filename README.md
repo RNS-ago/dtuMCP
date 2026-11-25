@@ -7,6 +7,29 @@ authenticates with your own browser session cookies instead.
 
 ## Setup
 
+The server needs [uv](https://docs.astral.sh/uv/getting-started/installation/),
+which fetches Python and the server's dependencies itself. Install it, then
+clone this repository.
+
+Linux and macOS:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Windows, in PowerShell (or `winget install --id=astral-sh.uv -e`):
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Open a new terminal afterwards so it finds `uv`. Every `uv run` command in this
+README works the same in PowerShell, cmd or a Linux shell, run from the
+repository folder. For PDF text and page images, also install poppler (see
+[Tools](#tools)).
+
+Then sign in:
+
 ```bash
 uv run --script server.py login
 ```
@@ -61,19 +84,31 @@ header from devtools.
 Each of these starts the server over stdio, as a child process on your own
 machine. Nothing listens on a port and nothing is exposed to the network.
 
-Use the **absolute path to `uv`**. Anything launched from a desktop icon or a
-`.desktop` entry does not inherit your shell's `PATH`, so a bare `uv` fails with
-`spawn uv ENOENT`. `which uv` gives you the path to use; on Windows,
-`where uv` (usually `C:\Users\you\.local\bin\uv.exe`).
+Use the **absolute path to `uv`** and to `server.py`. Anything launched from a
+desktop icon, the Start menu or a `.desktop` entry may not inherit your shell's
+`PATH`, so a bare `uv` fails with `spawn uv ENOENT`. `which uv` gives you the
+path to use; on Windows, `where.exe uv` (usually
+`C:\Users\you\.local\bin\uv.exe`). Replace `you` and `repos\dtuMCP` below with
+your user name and where you cloned the repository.
 
-**Claude Code** — registers for the CLI and the VS Code extension at once:
+**Claude Code** — registers for the CLI and the VS Code extension at once.
+
+Linux and macOS:
 
 ```bash
 claude mcp add --scope user dtu-learn -- ~/.local/bin/uv run --script ~/repos/dtuMCP/server.py
 ```
 
-**Cursor** — `~/.cursor/mcp.json` for every project, or `.cursor/mcp.json` in
-one project. Then Customize → MCP and toggle `dtu-learn` on.
+Windows (write the paths out in full: PowerShell and cmd do not expand `~` for
+other programs):
+
+```powershell
+claude mcp add --scope user dtu-learn -- C:\Users\you\.local\bin\uv.exe run --script C:\Users\you\repos\dtuMCP\server.py
+```
+
+**Cursor** — `~/.cursor/mcp.json` (`%USERPROFILE%\.cursor\mcp.json` on
+Windows) for every project, or `.cursor/mcp.json` in one project. Then
+Customize → MCP and toggle `dtu-learn` on.
 
 ```json
 {
@@ -81,6 +116,19 @@ one project. Then Customize → MCP and toggle `dtu-learn` on.
     "dtu-learn": {
       "command": "/home/you/.local/bin/uv",
       "args": ["run", "--script", "/home/you/repos/dtuMCP/server.py"]
+    }
+  }
+}
+```
+
+On Windows, double every backslash in JSON (or use forward slashes):
+
+```json
+{
+  "mcpServers": {
+    "dtu-learn": {
+      "command": "C:\\Users\\you\\.local\\bin\\uv.exe",
+      "args": ["run", "--script", "C:\\Users\\you\\repos\\dtuMCP\\server.py"]
     }
   }
 }
@@ -112,9 +160,10 @@ login and are fetched with ordinary web tools rather than these.
 
 Paste its contents into:
 
-- **Claude Code** — `~/.claude/CLAUDE.md` for every session, or a project
-  `CLAUDE.md`.
-- **Cursor** — `~/.cursor/rules/dtu-learn.mdc`, or Settings → Rules.
+- **Claude Code** — `~/.claude/CLAUDE.md` (`%USERPROFILE%\.claude\CLAUDE.md`
+  on Windows) for every session, or a project `CLAUDE.md`.
+- **Cursor** — `~/.cursor/rules/dtu-learn.mdc`
+  (`%USERPROFILE%\.cursor\rules\dtu-learn.mdc` on Windows), or Settings → Rules.
 - **Claude Desktop** — a Project's custom instructions.
 
 ## LearnHarness
@@ -285,8 +334,9 @@ argument. Restart LearnHarness, which loads plugin code only at start, and
 enable **DTU Learn** under Settings → Community plugins.
 
 The plugin runs its copy of `server.py` through `uv`. It looks for `uv` on
-`PATH`, in `~/.local/bin` and in `~/.cargo/bin`, since an app started from a
-desktop entry does not get your shell's `PATH`. It reads the same session file
+`PATH`, in `~/.local/bin` and in `~/.cargo/bin` (under `%USERPROFILE%` on
+Windows), since an app started from a desktop entry or the Start menu may not
+get your shell's `PATH`. It reads the same session file
 as every other client, so one `login` covers it too.
 
 PDFs are drawn with [pdf.js](https://mozilla.github.io/pdf.js/) 6.4.299
@@ -463,8 +513,9 @@ assistant, so the content has to come back in the reply itself.
 
 PDFs are saved there too, but `get_file` returns their extracted text: a 34-page
 lecture deck is about 4k tokens as text against roughly 50k as page images.
-Extraction needs `pdftotext` from poppler-utils (on Windows, `scoop install
-poppler`, or a [poppler-windows](https://github.com/oschwartz10612/poppler-windows)
+Extraction needs `pdftotext` from poppler-utils (`sudo apt install
+poppler-utils` on Debian and Ubuntu, `brew install poppler` on macOS; on
+Windows, `scoop install poppler`, or a [poppler-windows](https://github.com/oschwartz10612/poppler-windows)
 release with its `bin` folder on `PATH`); without it, or for a scanned
 PDF with no text layer, `get_file` just returns the path. The text heads each
 page `[Page n]`.
@@ -519,8 +570,10 @@ up under `## No term`.
 
 ## Test
 
+From the repository folder:
+
 ```bash
-python3 test_server.py
+uv run test_server.py
 ```
 
 ## Local CLI (paste into any AI)
@@ -550,20 +603,34 @@ session cookies stay on your machine, but anyone who learns the URL can call
 every tool through it. The secret path is the only gate. Use a long random
 path, never paste the URL anywhere, and stop the tunnel when you are done.
 
-1. Pick a secret path and start a tunnel:
+1. Install [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+   (on Windows, `winget install --id Cloudflare.cloudflared`) and start a
+   tunnel:
 
 ```bash
 cloudflared tunnel --url http://localhost:8000
 ```
 
-2. Note the `https://<random>.trycloudflare.com` hostname it prints, then start
-   the server with it:
+2. Note the `https://<random>.trycloudflare.com` hostname it prints. In a
+   second terminal, pick a secret path, print the connector URL and start the
+   server with them.
+
+Linux and macOS:
 
 ```bash
 export DTU_MCP_PATH="/$(openssl rand -hex 16)/mcp"
 export DTU_ALLOWED_HOST='<random>.trycloudflare.com'
-uv run --script server.py
 echo "https://$DTU_ALLOWED_HOST$DTU_MCP_PATH"
+uv run --script server.py
+```
+
+Windows (PowerShell):
+
+```powershell
+$env:DTU_MCP_PATH = "/$([guid]::NewGuid().ToString('N'))/mcp"
+$env:DTU_ALLOWED_HOST = '<random>.trycloudflare.com'
+"https://$env:DTU_ALLOWED_HOST$env:DTU_MCP_PATH"
+uv run --script server.py
 ```
 
 3. On claude.ai: **Customize → Connectors → + → Add custom connector**, paste

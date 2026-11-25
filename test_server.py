@@ -1,4 +1,4 @@
-"""Self-checks for the pure logic in server.py. Run: python3 test_server.py"""
+"""Self-checks for the pure logic in server.py. Run: uv run test_server.py"""
 import ast
 import configparser
 import datetime as datetime_module
@@ -17,7 +17,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 # Load the functions under test without importing the mcp dependency.
-tree = ast.parse(open("server.py").read())
+tree = ast.parse(open("server.py", encoding="utf-8").read())
 wanted = {"_flatten", "_profiles", "_pick_browser", "_pasted_cookies", "_cookies_from_chrome", "_term", "_pdf_text", "_TextExtractor",
           "_html_text", "_urn_kind", "_ooxml_text", "_description",
           "_calendar_lines", "_local", "_safe", "_file_topics", "_index_html",
