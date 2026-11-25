@@ -98,6 +98,11 @@ teachers actually handed me this term.
     caption or label (`Figure 3.2`, `Theorem 4`) and the lines that refer to
     it, or a page with only a title and a few words. `search_courses` gives
     the page of a caption or term too.
+  - Sums, products, calligraphic and blackboard letters (`∑`, `∏`, `𝒩𝒫`,
+    `ℕ`) come through in PDFs set with TeX, except encrypted or signed ones
+    and copies saved before the fix, where a sum still reads as a capital `X`
+    or `P` and `𝒩𝒫` as `N P`. Where a formula needs a sum, check the page
+    before reading such a capital as a variable.
   - Spreadsheet text is cell values only, with the row and column layout lost,
     so do not read relationships across columns out of it.
   - An **HTML page** comes back as stripped text, a **link** as its target URL

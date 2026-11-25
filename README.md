@@ -312,6 +312,18 @@ Both tools end with counts:
   Open ~/.local/share/dtumcp/courses/index.html to see every course.
 ```
 
+PDFs set with TeX are fixed as they are saved. Their fonts draw the right
+symbols but tell text tools the wrong characters: pdfTeX's map from font codes
+to Unicode leaves out the big operators, the calligraphic and blackboard
+capitals and the `\big` brackets, so a sum reads as `X` or `P`, 𝒩𝒫 as `N P`,
+ℕ as `N`, and brackets as invisible control characters. The download completes
+those maps (for TeX's `CMEX`, `CMSY` and `MSBM` fonts) in an update added at
+the end of the file, which leaves every original byte and every drawn page as
+it was and is kept only when poppler reads the result with as many pages. So
+`get_file`, search, a PDF viewer's copy and paste and the LearnHarness viewer
+all get ∑, 𝒩𝒫, ℕ and the brackets. Encrypted and signed PDFs are left alone,
+and a course saved before this is fixed when it is downloaded again.
+
 In a terminal they show a live status line per course; set `NO_COLOR` for
 plain text. MCP clients that ask for progress get the same line as progress
 notifications.

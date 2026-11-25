@@ -26,12 +26,14 @@ wanted = {"_flatten", "_profiles", "_pick_browser", "_pasted_cookies", "_cookies
           "_each", "_status", "_summary", "_code",
           "_copies", "_copy", "_data_dir", "_saved_text", "_file_text", "_decode",
           "_numbered_pages", "_poppler", "_picture_pages", "_page_marks", "_math_pages",
-          "_figure_shape", "_drawing_pages", "_displayed", "_rich", "_group_rows",
+          "_figure_shape", "_drawing_pages", "_displayed", "_pdf_objects", "_pdf_stream",
+          "_utf16", "_cmap_entries", "_cmap", "_tex_maps", "_save", "_rich", "_group_rows",
           "_humps", "_parts", "_terms", "_index", "_drop_course", "_index_course", "_sync_index",
           "_search_docs", "_search", "_search_answer", "search_courses"}
 constants_extra = {"OOXML_MEMBERS"}
 constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT", "INDEX_VERSION", "INDEX_SCHEMA", "INDEX_WEIGHTS",
-             "MATH_FONT", "SVG", "SVG_HIDDEN", "NUMBER"}
+             "MATH_FONT", "SVG", "SVG_HIDDEN", "NUMBER",
+             "OMX", "CAPITALS", "TEX_GLYPHS", "PIECES", "PDF_OBJECT", "HEX"}
 
 
 def needed(node):
@@ -68,6 +70,7 @@ mod.__dict__.update(
     ET=__import__("xml.etree.ElementTree", fromlist=["ElementTree"]),
     Counter=__import__("collections").Counter,
     tempfile=tempfile,
+    zlib=__import__("zlib"),
     mcp=types.SimpleNamespace(tool=lambda: lambda f: f),
     _tool=lambda f: f,
 )
@@ -607,6 +610,58 @@ xml = """<?xml version="1.0" encoding="UTF-8"?>
 <text top="100" left="16" height="18" font="0">Some text.</text></page>
 </pdf2xml>"""
 assert mod._math_pages(xml) == ({2}, 3), mod._math_pages(xml)
+
+# _tex_maps completes the ToUnicode map of a TeX font in an incremental
+# update: a CMEX map that pdfTeX left with only a brace piece (as a private-use
+# code) gets the sum at X, a \bigg( at 0x12 and the piece as the real one.
+def pdf(*objects, trailer=b""):
+    out, places = bytearray(b"%PDF-1.4\n"), {}
+    for num, body in objects:
+        places[num] = len(out)
+        out += b"%d 0 obj\n%s\nendobj\n" % (num, body)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % places[n] for n in sorted(places))
+    out += b"trailer\n<< /Size %d /Root 1 0 R %s>>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, trailer, xref)
+    return bytes(out)
+
+
+cmap = b"1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <3C> <F8F2> endbfchar"
+font = b"<< /Type /Font /Subtype /Type1 /BaseFont /ABCDEF+CMEX10 /ToUnicode 4 0 R >>"
+original = pdf((1, b"<< /Type /Catalog /Pages 2 0 R >>"), (2, b"<< /Type /Pages /Kids [] /Count 0 >>"),
+               (3, font), (4, b"<< /Length %d >>\nstream\n%s\nendstream" % (len(cmap), cmap)))
+patched = mod._tex_maps(original)
+assert patched.startswith(original) and len(patched) > len(original)
+objects = mod._pdf_objects(patched)
+entries = mod._cmap_entries(mod._pdf_stream(objects[4]))
+assert (entries[ord("X")], entries[0x12], entries[0x3C], entries[ord("P")]) == ("∑", "(", "⎨", "∑"), entries
+assert patched.rstrip().endswith(b"%%EOF") and b"/Prev " in patched[len(original):]
+assert mod._tex_maps(patched) is patched  # complete already: nothing more added
+# Encrypted or signed PDFs, and fonts that are not TeX's, are left as they are.
+assert mod._tex_maps(original.replace(b"/Root 1 0 R", b"/Root 1 0 R /Encrypt 9 0 R")) is not None
+assert mod._tex_maps(original.replace(b"/Root 1 0 R", b"/Root 1 0 R /Encrypt 9 0 R")).count(b"%%EOF") == 1
+assert mod._tex_maps(original.replace(b"/Count 0", b"/Count 0 /ByteRange [0 1 2 3]")).count(b"%%EOF") == 1
+assert mod._tex_maps(original.replace(b"CMEX10", b"Helvetica")).count(b"%%EOF") == 1
+assert mod._tex_maps(b"not a pdf") == b"not a pdf"
+# The symbol font's calligraphic capitals replace a map entry that gives the
+# plain letter; its real entries (here ∈ at 0x32) stay.
+cmap = b"2 beginbfchar <4E> <004E> <32> <2208> endbfchar"
+sy = pdf((1, b"<< /Type /Catalog >>"), (3, b"<< /Type /Font /BaseFont /XY+CMSY10 /ToUnicode 4 0 R >>"),
+         (4, b"<< /Length %d >>\nstream\n%s\nendstream" % (len(cmap), cmap)))
+entries = mod._cmap_entries(mod._pdf_stream(mod._pdf_objects(mod._tex_maps(sy))[4]))
+assert (entries[ord("N")], entries[0x32], entries[ord("P")]) == ("𝒩", "∈", "𝒫"), entries
+# bfrange entries are read too, as a run and as a list.
+assert mod._cmap_entries(b"beginbfrange <41> <43> <0061> <44> <45> [<03B1> <03B2>] endbfrange") == {
+    0x41: "a", 0x42: "b", 0x43: "c", 0x44: "α", 0x45: "β"}
+# _save keeps a patched PDF only when poppler reads it with as many pages.
+with tempfile.TemporaryDirectory() as tmp:
+    dest = Path(tmp) / "notes.pdf"
+    mod._save(dest, original)
+    assert dest.read_bytes() in (original, patched)  # patched where poppler is installed
+    assert not (Path(tmp) / "notes.pdf.part").exists()
+    mod._save(Path(tmp) / "notes.txt", b"X")
+    assert (Path(tmp) / "notes.txt").read_bytes() == b"X"
+assert "\uf8f1\uf8f2\uf8f3".translate(str.maketrans(mod.PIECES)) == "⎧⎨⎩"
 assert mod._math_pages("") == (set(), 0)
 
 # pdftocairo -svg, 4 pages: a rounded box and a header rule (the template)

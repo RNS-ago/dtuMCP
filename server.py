@@ -29,6 +29,7 @@ import sys
 import tempfile
 import webbrowser
 import zipfile
+import zlib
 from xml.etree import ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from collections import Counter
@@ -226,7 +227,7 @@ def _pdf_text(path: Path) -> str | None:
         return None
     if done.returncode != 0 or not done.stdout.strip():
         return None
-    return done.stdout
+    return done.stdout.translate(str.maketrans(PIECES))
 
 
 def _mozlz4(path: Path) -> bytes:
@@ -795,8 +796,8 @@ def _numbered_pages(text: str, marks: dict | None = None) -> str:
     last one goes: the ones before it may close blank pages, which still count."""
     pages = text.removesuffix("\f").split("\f")
     on = {}
-    for kind, numbers in (marks or {}).items():
-        for n in numbers:
+    for kind in ("images", "drawing", "math"):
+        for n in (marks or {}).get(kind, ()):
             on.setdefault(n, []).append(kind)
     return "\n\n".join(
         f"[Page {n}{', has ' + ', '.join(on[n]) if n in on else ''}]\n{page.strip(chr(10))}"
@@ -829,6 +830,185 @@ def _page_marks(path: Path) -> dict:
     images = _picture_pages(_poppler("pdfimages", "-list", path, timeout=60), pages)
     return {kind: sorted(found) for kind, found in
             (("images", images), ("drawing", drawing), ("math", math)) if found}
+
+
+# TeX's fonts as pdfTeX embeds them draw the right shapes but tell text tools
+# the wrong characters. Each font carries a ToUnicode map from its codes to
+# Unicode, and pdfTeX's leaves out what Unicode has no plain letter for: the
+# big-operator font's sum is code X, the symbol font's calligraphic N is N,
+# the \big delimiters are control characters. pdftotext then writes the code
+# itself. _tex_maps completes those maps, by font and code.
+OMX = {  # TeX's big operators and delimiters, CMEX
+    **dict(zip(map(chr, range(32)), "()[]⌊⌋⌈⌉{}⟨⟩|‖/\\()()[]⌊⌋⌈⌉{}⟨⟩/\\")),
+    **dict(zip(" !\"#$%&'()*+,-./", "()[]⌊⌋⌈⌉{}⟨⟩/\\/\\")),
+    **dict(zip("0123456789:;<=>?@ABCDE", "⎛⎞⎡⎤⎣⎦⎢⎥⎧⎫⎩⎭⎨⎬⎪⏐⎝⎠⎜⎟⟨⟩")),
+    **dict(zip("FGHIJKLMNOPQRSTUVWXYZ[\\]^_`a", "⨆⨆∮∮⨀⨀⨁⨁⨂⨂∑∏∫⋃⋂⨄⋀⋁∑∏∫⋃⋂⨄⋀⋁∐∐")),
+    **dict(zip("hijklmnopqrst", "[]⌊⌋⌈⌉{}√√√√⎷")),
+}
+CAPITALS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+TEX_GLYPHS = (  # by font name: what its codes stand for
+    (re.compile(r"CMEX\d"), OMX),
+    (re.compile(r"CMB?SY\d"), dict(zip(CAPITALS, "𝒜ℬ𝒞𝒟ℰℱ𝒢ℋℐ𝒥𝒦ℒℳ𝒩𝒪𝒫𝒬ℛ𝒮𝒯𝒰𝒱𝒲𝒳𝒴𝒵"))),
+    (re.compile(r"MSBM\d"), dict(zip(CAPITALS, "𝔸𝔹ℂ𝔻𝔼𝔽𝔾ℍ𝕀𝕁𝕂𝕃𝕄ℕ𝕆ℙℚℝ𝕊𝕋𝕌𝕍𝕎𝕏𝕐ℤ"))),
+)
+# The pieces of tall parentheses, brackets, braces and arrows, for which
+# pdfTeX's maps give Adobe's private-use codes.
+PIECES = dict(zip(""
+                  "", "⏐⎯⎛⎜⎝⎡⎢⎣⎧⎨⎩⎪⎮⎞⎟⎠⎤⎥⎦⎫⎬⎭"))
+PDF_OBJECT = re.compile(rb"(?<!\d)(\d+)\s+\d+\s+obj\b")
+HEX = re.compile(rb"<([0-9A-Fa-f]*)>")
+
+
+def _pdf_objects(data: bytes) -> dict:
+    """A PDF's objects by number, each as the bytes between obj and endobj,
+    those packed in object streams included. The last definition of a number
+    is the live one."""
+    objects = {}
+    for m in PDF_OBJECT.finditer(data):
+        end = data.find(b"endobj", m.end())
+        start = data.find(b"stream", m.end(), end)
+        length = start > 0 and re.search(rb"/Length\s+(\d+)(?!\s+\d+\s+R)", data[m.end():start])
+        if length:  # a stream's bytes may hold "endobj"
+            end = data.find(b"endobj", start + int(length.group(1)))
+        objects[int(m.group(1))] = data[m.end():end]
+    for body in list(objects.values()):
+        if not re.search(rb"/Type\s*/ObjStm", body) or (raw := _pdf_stream(body)) is None:
+            continue
+        try:
+            first = int(re.search(rb"/First\s+(\d+)", body).group(1))
+            head = list(map(int, raw[:first].split()))
+        except (AttributeError, ValueError):
+            continue
+        places = [(head[i], first + head[i + 1]) for i in range(0, len(head) - 1, 2)]
+        for (num, at), (_, nxt) in zip(places, places[1:] + [(0, len(raw))]):
+            objects.setdefault(num, raw[at:nxt])
+    return objects
+
+
+def _pdf_stream(body: bytes) -> bytes | None:
+    """An object's stream, inflated; None for one in another filter."""
+    at = body.find(b"stream")
+    if at < 0:
+        return None
+    raw = body[at + 6:body.rfind(b"endstream")].removeprefix(b"\r").removeprefix(b"\n")
+    if b"/Filter" not in body[:at]:
+        return raw
+    if not re.search(rb"/Filter\s*\[?\s*/FlateDecode\s*\]?", body[:at]):
+        return None
+    try:
+        return zlib.decompressobj().decompress(raw)
+    except zlib.error:
+        return None
+
+
+def _utf16(hex_digits: bytes) -> str:
+    return bytes.fromhex(hex_digits.decode()).decode("utf-16-be", "replace")
+
+
+def _cmap_entries(cmap: bytes) -> dict:
+    """A ToUnicode map's one-byte codes and what they stand for."""
+    entries = {}
+    for block in re.findall(rb"beginbfchar(.*?)endbfchar", cmap, re.S):
+        for code, uni in re.findall(rb"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]*)>", block):
+            entries[int(code, 16)] = _utf16(uni)
+    for block in re.findall(rb"beginbfrange(.*?)endbfrange", cmap, re.S):
+        for lo, hi, to in re.findall(rb"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]*>|\[[^\]]*\])", block):
+            lo, hi = int(lo, 16), int(hi, 16)
+            if to.startswith(b"["):
+                entries.update((lo + i, _utf16(u)) for i, u in enumerate(HEX.findall(to)))
+            elif len(start := _utf16(to[1:-1])) == 1:
+                entries.update((code, chr(ord(start) + code - lo)) for code in range(lo, hi + 1))
+    return entries
+
+
+def _cmap(entries: dict) -> bytes:
+    lines = [b"/CIDInit /ProcSet findresource begin", b"12 dict begin", b"begincmap",
+             b"/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def",
+             b"/CMapName /Adobe-Identity-UCS def", b"/CMapType 2 def",
+             b"1 begincodespacerange", b"<00> <FF>", b"endcodespacerange"]
+    items = sorted(entries.items())
+    for i in range(0, len(items), 100):  # a bfchar block holds at most 100
+        lines.append(b"%d beginbfchar" % len(items[i:i + 100]))
+        lines += [b"<%02X> <%s>" % (code, uni.encode("utf-16-be").hex().upper().encode())
+                  for code, uni in items[i:i + 100]]
+        lines.append(b"endbfchar")
+    lines += [b"endcmap", b"CMapName currentdict /CMap defineresource pop", b"end", b"end"]
+    return b"\n".join(lines) + b"\n"
+
+
+def _tex_maps(data: bytes) -> bytes:
+    """A PDF with the ToUnicode maps of TeX's CMEX, CMSY and MSBM fonts
+    completed from TEX_GLYPHS and PIECES, added as an incremental update: the
+    new maps go after the file's last byte, under the same object numbers, so
+    nothing drawn changes and the original bytes stay as they were. The PDF
+    unchanged when it has no such map to complete, is encrypted or signed (an
+    update would show as tampering), or cannot be read this way. A completed
+    PDF comes back unchanged, so a second pass adds nothing."""
+    try:
+        at = int(re.findall(rb"startxref\s+(\d+)", data[-2048:])[-1])
+    except IndexError:
+        return data
+    end = data.find(b"stream", at) if data[at:at + 4] != b"xref" else data.find(b">>", data.find(b"trailer", at))
+    trailer = data[at:end + 2]
+    if b"/Encrypt" in trailer or b"/ByteRange" in data or not (size := re.search(rb"/Size\s+(\d+)", trailer)):
+        return data
+    objects, kinds = _pdf_objects(data), {}
+    for body in objects.values():
+        name = re.search(rb"/Type\s*/Font.*?/BaseFont\s*/([^\s/<>\[\]()]+)|/BaseFont\s*/([^\s/<>\[\]()]+).*?/Type\s*/Font", body, re.S)
+        ref = re.search(rb"/ToUnicode\s+(\d+)\s+\d+\s+R", body)
+        if name and ref:
+            font = (name.group(1) or name.group(2)).decode("latin-1")
+            for pattern, table in TEX_GLYPHS:
+                if pattern.search(font):
+                    kinds.setdefault(int(ref.group(1)), set()).add(id(table))
+                    break
+    tables = {id(table): table for _, table in TEX_GLYPHS}
+    maps = {}
+    for num, (kind, *more) in ((n, tuple(k)) for n, k in kinds.items()):
+        if more or num not in objects or (cmap := _pdf_stream(objects[num])) is None:
+            continue  # shared by fonts of different kinds, or unreadable
+        entries = _cmap_entries(cmap)
+        done = dict(entries)
+        for code, symbol in ((ord(c), s) for c, s in tables[kind].items()):
+            if entries.get(code, chr(code)) == chr(code) or entries[code] in PIECES:
+                done[code] = symbol  # missing, the code's own letter, or a private-use piece
+        done.update([(code, PIECES[uni]) for code, uni in done.items() if uni in PIECES])
+        if done != entries:
+            maps[num] = _cmap(done)
+    if not maps:
+        return data
+    update, places = bytearray(b"\n"), {}
+    for num, cmap in sorted(maps.items()):
+        packed = zlib.compress(cmap)
+        places[num] = len(data) + len(update)
+        update += b"%d 0 obj\n<< /Length %d /Filter /FlateDecode >>\nstream\n%s\nendstream\nendobj\n" % (
+            num, len(packed), packed)
+    xref = len(data) + len(update)
+    update += b"xref\n0 1\n0000000000 65535 f \n"
+    update += b"".join(b"%d 1\n%010d 00000 n \n" % (num, place) for num, place in sorted(places.items()))
+    keep = b" ".join(m.group(0) for key in (rb"/Root\s+\d+\s+\d+\s+R", rb"/Info\s+\d+\s+\d+\s+R", rb"/ID\s*\[[^\]]*\]")
+                     if (m := re.search(key, trailer)))
+    update += b"trailer\n<< /Size %s %s /Prev %d >>\nstartxref\n%d\n%%%%EOF\n" % (size.group(1), keep, at, xref)
+    return data + bytes(update)
+
+
+def _save(dest: Path, content: bytes) -> None:
+    """Write a downloaded file. A PDF set in TeX's fonts gets its symbols'
+    maps completed (_tex_maps), kept only when poppler reads it with as many
+    pages as before. Done to every PDF as it is saved, so two downloads of one
+    file stay byte for byte alike for _dedupe_linked."""
+    dest.write_bytes(content)
+    if dest.suffix.lower() != ".pdf" or (patched := _tex_maps(content)) is content:
+        return
+    pages = re.compile(r"^Pages:\s+(\d+)", re.M)
+    part = dest.with_name(dest.name + ".part")
+    part.write_bytes(patched)
+    before = pages.search(_poppler("pdfinfo", dest))
+    after = pages.search(_poppler("pdfinfo", part))
+    if before and after and before.group(1) == after.group(1):
+        part.replace(dest)
+    else:
+        part.unlink()
 
 
 # TeX's math fonts (Computer Modern, AMS, Fraktur, script) and any font named
@@ -1093,7 +1273,7 @@ def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None =
     if path is None:
         DOWNLOADS.mkdir(parents=True, exist_ok=True)
         path = DOWNLOADS / name
-        path.write_bytes(content)
+        _save(path, content)
 
     if "pdf" in ctype or name.lower().endswith(".pdf"):
         text = _pdf_text(path)
@@ -1175,7 +1355,7 @@ def _save_topic(client, ou: int, root: Path, parents: tuple, topic) -> tuple:
     # pile up copies.
     dest = root.joinpath(*parents, _safe(topic.get("Title", "")) + Path(name).suffix)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(r.content)
+    _save(dest, r.content)
     return dest, None
 
 
@@ -1188,7 +1368,7 @@ def _save_attachment(client, ou: int, root: Path, news_id: int, att) -> tuple:
     except httpx.HTTPError as e:
         return None, f"{name}: {e}"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(r.content)
+    _save(dest, r.content)
     return dest, None
 
 
@@ -1233,7 +1413,7 @@ def _save_linked(client, root: Path, url: str) -> tuple:
     # Kept by where it ended up: a short link names no file of its own.
     dest = _linked_dest(root, str(r.url))
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(r.content)
+    _save(dest, r.content)
     return url, dest
 
 
