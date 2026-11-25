@@ -23,7 +23,9 @@ Windows, in PowerShell (or `winget install --id=astral-sh.uv -e`):
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Open a new terminal afterwards so it finds `uv`. Every `uv run` command in this
+Open a new terminal afterwards so it finds `uv`. The first run downloads a
+Python of uv's own, never the system's: the Microsoft Store Python would hide
+the saved courses in a private folder of its own. Every `uv run` command in this
 README works the same in PowerShell, cmd or a Linux shell, run from the
 repository folder. For PDF text and page images, also install poppler (see
 [Tools](#tools)).

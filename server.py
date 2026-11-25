@@ -1,6 +1,10 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = ["mcp[cli]>=2", "httpx", "websockets>=12"]
+# [tool.uv]
+# # The Microsoft Store Python redirects writes under AppData to a private
+# # folder no other program sees, so the saved courses would vanish from view.
+# python-preference = "only-managed"
 # ///
 """MCP server for DTU Learn (D2L Brightspace) course material.
 
