@@ -64,6 +64,7 @@ mod.__dict__.update(
     sqlite3=__import__("sqlite3"),
     closing=__import__("contextlib").closing,
     mcp=types.SimpleNamespace(tool=lambda: lambda f: f),
+    _tool=lambda f: f,
 )
 exec(
     compile(ast.Module([n for n in tree.body if needed(n)], []), "server.py", "exec"),

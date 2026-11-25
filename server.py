@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from collections import Counter
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache, partial
+from functools import lru_cache, partial, wraps
 from itertools import count
 from html import escape, unescape
 from html.parser import HTMLParser
@@ -43,6 +43,7 @@ from urllib.parse import quote, unquote, urlparse
 import anyio
 import httpx
 from mcp.server.mcpserver import Context, Image, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from websockets.sync.client import connect as websocket
 
@@ -68,6 +69,23 @@ COOKIE_FILE = Path(os.environ.get("DTU_COOKIE_FILE", "~/.config/dtumcp/cookie"))
 RUN = "dtumcp" if Path(sys.argv[0]).stem == "dtumcp" else "uv run --script server.py"
 
 mcp = MCPServer("dtu-learn")
+
+
+def _tool(fn):
+    """Register fn as an MCP tool and return it as it is, for the command line.
+    MCP hands the model a ToolError's message but only "Error executing tool"
+    for any other exception, and this server's RuntimeErrors (session expired,
+    no pdftoppm, unknown course) are what the model must read to act."""
+    @wraps(fn)
+    def run(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except RuntimeError as e:
+            raise ToolError(str(e)) from e
+        except httpx.TransportError as e:
+            raise ToolError(f"Could not reach DTU Learn or Brightspace: {e}") from e
+    mcp.tool()(run)
+    return fn
 logging.getLogger("httpx").setLevel(logging.WARNING)  # one INFO line per request
 
 
@@ -637,7 +655,7 @@ def _term(org_unit) -> tuple[int, int]:
     return 0, -1  # sorts last, under "No term"
 
 
-@mcp.tool()
+@_tool
 def list_courses() -> str:
     """List the DTU Learn courses you are enrolled in, grouped by term, newest first.
 
@@ -656,7 +674,7 @@ def list_courses() -> str:
     return "\n".join(out).strip() or "No course enrollments found."
 
 
-@mcp.tool()
+@_tool
 def course_contents(org_unit_id: int, ctx: Context | None = None) -> str:
     """Show a course's content tree. Takes an org unit id or a DTU course number.
 
@@ -671,7 +689,7 @@ def course_contents(org_unit_id: int, ctx: Context | None = None) -> str:
     return "\n".join([_saved_note(copy), "", *lines]) if lines else "Course has no content."
 
 
-@mcp.tool()
+@_tool
 def unit_info(org_unit_id: int, unit_id: int, ctx: Context | None = None) -> str:
     """Show a unit's own text: its schedule, instructions and notes, plus its topics.
 
@@ -728,7 +746,7 @@ def _filename(r: httpx.Response, fallback: str) -> str:
     return unquote(match.group(1)) if match else fallback
 
 
-@mcp.tool()
+@_tool
 def get_file(org_unit_id: int, topic_id: int, ctx: Context | None = None) -> str:
     """Fetch one content topic: a file's text, an HTML page's text, or a link's target.
 
@@ -780,7 +798,7 @@ def _numbered_pages(text: str) -> str:
 PAGE_LIMIT = 10  # ponytail: ~2k tokens a page; raise it if real questions need more at once
 
 
-@mcp.tool()
+@_tool
 def get_pdf_pages(
     org_unit_id: int, topic_id: int, first_page: int, last_page: int = 0,
     ctx: Context | None = None,
@@ -1440,7 +1458,7 @@ function take(folder, name) {
 """
 
 
-@mcp.tool()
+@_tool
 def download_course(org_unit_id: int, ctx: Context | None = None) -> str:
     """Save a course for offline use: its files, unit text and announcements.
 
@@ -1457,7 +1475,7 @@ def download_course(org_unit_id: int, ctx: Context | None = None) -> str:
     return _summary([row])
 
 
-@mcp.tool()
+@_tool
 def download_term(term: str = "", ctx: Context | None = None) -> str:
     """Download every course of one term for offline use, as download_course does.
 
@@ -1995,7 +2013,7 @@ def _search_answer(query, org_unit_id: int = 0, limit: int = 15) -> tuple[str, d
     return "\n".join(lines), found
 
 
-@mcp.tool()
+@_tool
 def search_courses(query: str, org_unit_id: int = 0, limit: int = 15) -> str:
     """Search the downloaded courses for words: titles, unit text, announcements
     and the text inside files, a PDF's page by page. Use it to find where
@@ -2018,7 +2036,7 @@ def search_courses(query: str, org_unit_id: int = 0, limit: int = 15) -> str:
     return _search_answer(query, org_unit_id, limit)[0]
 
 
-@mcp.tool()
+@_tool
 def list_assignments(org_unit_id: int) -> str:
     """List assignment folders in a course with their due and closing dates."""
     lines = []
@@ -2035,7 +2053,7 @@ def list_assignments(org_unit_id: int) -> str:
     return "\n".join(lines) or "No assignments."
 
 
-@mcp.tool()
+@_tool
 def list_announcements(org_unit_id: int, ctx: Context | None = None) -> str:
     """List course announcements (news items), newest first.
 
@@ -2057,7 +2075,7 @@ def list_announcements(org_unit_id: int, ctx: Context | None = None) -> str:
     return "\n\n".join(lines) if len(lines) > 1 else "No announcements."
 
 
-@mcp.tool()
+@_tool
 def get_announcement_attachment(
     org_unit_id: int, news_id: int, file_id: int, ctx: Context | None = None
 ) -> str:
@@ -2153,7 +2171,7 @@ def _calendar_lines(events: list) -> list[str]:
     return lines
 
 
-@mcp.tool()
+@_tool
 def calendar(days: int = 7, org_unit_id: int = 0) -> str:
     """Show what is scheduled from today to `days` ahead, in local time: lectures,
     exercise sessions, hand-in deadlines and material release dates.
