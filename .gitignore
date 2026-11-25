@@ -12,3 +12,6 @@ downloads/
 # uv tool install and uv build
 .venv/
 /dist/
+
+# graphify knowledge graph, rebuilt locally by its git hooks
+graphify-out/
