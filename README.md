@@ -264,6 +264,17 @@ online.
   These are worked out once per PDF while a course downloads (a few seconds
   for a long deck) and kept in its `_course-<id>.json`; a copy saved before
   works them out on each read until it is downloaded again.
+- **Formulas on pages with math are written out.** `pdftotext` puts each
+  subscript, limit and fraction part on a line of its own, so `z_{m−1}` reads
+  as `zm−1`. The same pass rebuilds those pages from `pdftohtml`'s positions
+  and font sizes and the fraction bars in the SVG: `x_{i}` for a subscript,
+  `x^{2}` for a superscript, nested inside, `(a)/(b)` for a fraction and
+  `∑_{i=1}^{n}` for a sum with its limits. The rebuilt pages go in a
+  `<file>.pdf.math.json` beside the PDF, read by `get_file` in place of those
+  pages. A page whose rebuild has fewer letters than `pdftotext`'s text, such
+  as a scan whose hidden OCR layer `pdftohtml` skips, keeps `pdftotext`'s.
+  Matrices, aligned columns of equations and figures made of text keep their
+  layout only roughly: look at those pages.
 - **`get_pdf_pages`** draws pages with `pdftoppm` at 1568 pixels on the long
   side, the most a model takes in before scaling down. A page costs about 2k
   tokens against roughly 100 as text, so it takes at most 10 per call: read the

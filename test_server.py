@@ -26,14 +26,16 @@ wanted = {"_flatten", "_profiles", "_pick_browser", "_pasted_cookies", "_cookies
           "_each", "_status", "_summary", "_code",
           "_copies", "_copy", "_data_dir", "_saved_text", "_file_text", "_decode",
           "_numbered_pages", "_poppler", "_picture_pages", "_page_marks", "_math_pages",
-          "_figure_shape", "_drawing_pages", "_displayed", "_pdf_objects", "_pdf_stream",
+          "_figure_shape", "_drawing_pages", "_displayed", "_rule", "_script", "_nest",
+          "_rebuild_page", "_write_math_text", "_math_text", "_pdf_objects", "_pdf_stream",
           "_utf16", "_cmap_entries", "_cmap", "_tex_maps", "_save", "_rich", "_group_rows",
           "_humps", "_parts", "_terms", "_index", "_drop_course", "_index_course", "_sync_index",
           "_search_docs", "_search", "_search_answer", "search_courses"}
 constants_extra = {"OOXML_MEMBERS"}
 constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT", "INDEX_VERSION", "INDEX_SCHEMA", "INDEX_WEIGHTS",
              "MATH_FONT", "SVG", "SVG_HIDDEN", "NUMBER",
-             "OMX", "CAPITALS", "TEX_GLYPHS", "PIECES", "PDF_OBJECT", "HEX"}
+             "OMX", "CAPITALS", "TEX_GLYPHS", "PIECES", "PDF_OBJECT", "HEX",
+             "BIG_OPERATORS", "DELIMITER_PIECES", "ACCENTS", "MATH_TEXT", "MATH_NOTATION"}
 
 
 def needed(node):
@@ -662,6 +664,42 @@ with tempfile.TemporaryDirectory() as tmp:
     mod._save(Path(tmp) / "notes.txt", b"X")
     assert (Path(tmp) / "notes.txt").read_bytes() == b"X"
 assert "\uf8f1\uf8f2\uf8f3".translate(str.maketrans(mod.PIECES)) == "⎧⎨⎩"
+
+# _rebuild_page writes a page's formulas out from where pdftohtml puts their
+# runs (pixels at zoom 1.5; rules come in points, so scale 1.5): x_i, y^2, a
+# script of a script, a fraction over a rule, a sum's limits; a table rule,
+# with text far apart on each side, is no fraction.
+def run(top, left, width, height, font, text):
+    return f'<text top="{top}" left="{left}" width="{width}" height="{height}" font="{font}">{text}</text>'
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 10, 16, 0, "x"), run(108, 110, 5, 11, 1, "i"), run(100, 120, 10, 16, 0, "+"),
+    run(100, 135, 10, 16, 0, "y"), run(95, 145, 6, 11, 1, "2"),
+    run(100, 200, 8, 16, 0, "e"), run(92, 208, 12, 11, 1, "−1"), run(89, 220, 4, 8, 2, "2"),
+    run(150, 250, 30, 16, 0, "z ="), run(140, 300, 30, 16, 0, "a+b"), run(160, 310, 10, 16, 0, "2"),
+    run(200, 100, 10, 16, 0, "A"), run(200, 600, 10, 16, 0, "B"), run(222, 100, 10, 16, 0, "1"), run(222, 600, 10, 16, 0, "2"),
+    run(302, 350, 30, 16, 0, "s ="), run(300, 400, 26, 8, 3, "∑"), run(285, 409, 8, 11, 1, "n"),
+    run(320, 402, 20, 11, 1, "i=1"), run(302, 430, 10, 16, 0, "x"),
+    run(400, 100, 30, 16, 0, "exp("), run(398, 130, 12, 11, 1, "−1"), run(400, 145, 10, 16, 0, ")"),
+]) + "</page>")
+fonts = {"0": (18, "AB+CMR12"), "1": (12, "AB+CMMI8"), "2": (9, "AB+CMMI6"), "3": (18, "AB+CMEX10")}
+rules = [(198.67, 221.33, 105.33), (66.67, 533.33, 141.33)]  # a fraction bar, a table rule
+lines = [" ".join(line.split()) for line in mod._rebuild_page(page, fonts, rules, 1.5).splitlines()]
+assert lines == ["x_i + y^2 e^{−1^2}", "z = (a+b)/2", "A B", "1 2", "s = ∑_{i=1}^n x", "exp(−1)"], lines
+assert mod._nest([]) == ""
+
+# The rebuilt pages are kept beside the PDF with its size, and read back only
+# while the PDF is that size; get_file's text then takes them for those pages.
+with tempfile.TemporaryDirectory() as tmp:
+    notes = Path(tmp) / "notes.pdf"
+    notes.write_bytes(b"%PDF fake")
+    side = Path(tmp) / ("notes.pdf" + mod.MATH_TEXT)
+    side.write_text(json.dumps({"size": notes.stat().st_size, "pages": {"2": "x_i"}}), encoding="utf-8")
+    assert mod._math_text(notes) == {"2": "x_i"}
+    assert mod._numbered_pages("one\ftwo xi\f", None, mod._math_text(notes)) == "[Page 1]\none\n\n[Page 2]\nx_i"
+    notes.write_bytes(b"%PDF fake, downloaded again")
+    assert mod._math_text(notes) == {}
+    mod._write_math_text(notes, "", set(), [], 0.0)  # no math pages: no file
+    assert not side.exists() and mod._math_text(notes) == {}
 assert mod._math_pages("") == (set(), 0)
 
 # pdftocairo -svg, 4 pages: a rounded box and a header rule (the template)
@@ -680,9 +718,10 @@ svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="454" height="255"><defs
 with tempfile.TemporaryDirectory() as tmp:
     drawn = Path(tmp) / "pages.svg"
     drawn.write_text(svg, encoding="utf-8")
-    assert mod._drawing_pages(drawn) == {2, 3}, mod._drawing_pages(drawn)
+    assert mod._drawing_pages(drawn)[0] == {2, 3}, mod._drawing_pages(drawn)
+    assert mod._drawing_pages(drawn)[2] == 454.0
     drawn.write_text("<svg", encoding="utf-8")
-    assert mod._drawing_pages(drawn) == set()
+    assert mod._drawing_pages(drawn) == (set(), [], 0.0)
 
 # The Groups tab: the learner's own group in each category, its members named
 # from the class list (whose ids are strings), a category without one marked so.

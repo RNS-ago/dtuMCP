@@ -90,6 +90,10 @@ teachers actually handed me this term.
     `get_pdf_pages(org_unit_id, topic_id, first_page, last_page)`, which
     returns them as images, at most 10 pages per call. A page costs about 2k
     tokens against roughly 100 as text, so never ask for a whole document.
+  - On pages with math, formulas are written out from their layout: `x_{i}`
+    is a subscript, `x^{2}` a superscript, `(a)/(b)` a fraction and
+    `∑_{i=1}^{n}` a sum with its limits. Matrices and aligned equations come
+    out only roughly, so look at those pages when their layout matters.
   - To tell which pages to look at: a page's heading says what its text
     lost, as `[Page n, has images, drawing, math]`. In a mathematical text
     most pages have math, so look at those only when the exact notation

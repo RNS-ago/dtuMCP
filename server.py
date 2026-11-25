@@ -789,12 +789,15 @@ def get_file(org_unit_id: int, topic_id: int, ctx: Context | None = None) -> str
     return _file_text(r.content, r.headers.get("content-type", ""), name, title)
 
 
-def _numbered_pages(text: str, marks: dict | None = None) -> str:
+def _numbered_pages(text: str, marks: dict | None = None, rebuilt: dict | None = None) -> str:
     """pdftotext's output with each page headed [Page n], and with what
     _page_marks found on it, as [Page n, has images, drawing, math]. pdftotext
     ends every page with a form feed, which says nothing to a reader. Only the
     last one goes: the ones before it may close blank pages, which still count."""
     pages = text.removesuffix("\f").split("\f")
+    for n, page in (rebuilt or {}).items():  # math pages with their formulas written out
+        if 0 < int(n) <= len(pages):
+            pages[int(n) - 1] = page
     on = {}
     for kind in ("images", "drawing", "math"):
         for n in (marks or {}).get(kind, ()):
@@ -821,13 +824,16 @@ def _page_marks(path: Path) -> dict:
     """What a PDF's pages hold that its text loses, as page numbers under
     images, drawing and math. Worked out when a course downloads and kept in
     its record, since the drawing pass takes seconds on a long PDF. A poppler
-    tool that is missing leaves its kind out."""
-    math, pages = _math_pages(_poppler("pdftohtml", "-xml", "-i", "-stdout", "-q", path))
+    tool that is missing leaves its kind out. The math pages' formulas are
+    rebuilt on the way (_write_math_text), from the same poppler output."""
+    xml = _poppler("pdftohtml", "-xml", "-i", "-stdout", "-q", path)
+    math, pages = _math_pages(xml)
     with tempfile.TemporaryDirectory() as tmp:
         svg = Path(tmp) / "pages.svg"
         _poppler("pdftocairo", "-svg", path, svg)
-        drawing = _drawing_pages(svg) if svg.exists() else set()
+        drawing, rules, width = _drawing_pages(svg) if svg.exists() else (set(), [], 0.0)
     images = _picture_pages(_poppler("pdfimages", "-list", path, timeout=60), pages)
+    _write_math_text(path, xml, math, rules, width)
     return {kind: sorted(found) for kind, found in
             (("images", images), ("drawing", drawing), ("math", math)) if found}
 
@@ -1064,6 +1070,229 @@ def _displayed(page, math: set) -> bool:
     return any(is_math and left >= margin + 0.1 * width for _, _, left, is_math in lines)
 
 
+BIG_OPERATORS = set("∑∏∫⋃⋂⨁⨂⨀⨄⋀⋁∐∮⨆")
+# Pieces of tall delimiters, which pdftohtml gives boxes of the wrong height,
+# as it does every glyph of TeX's big-symbol font.
+DELIMITER_PIECES = set("⎛⎜⎝⎞⎟⎠⎡⎢⎣⎤⎥⎦⎧⎨⎩⎪⎫⎬⎭⎮⏐")
+ACCENTS = (("¯", "̄"), ("˜", "̃"), ("ˆ", "̂"), ("˙", "̇"))
+MATH_TEXT = ".math.json"  # beside a PDF: its math pages' rebuilt text
+MATH_NOTATION = (" On pages with math, formulas are written out from their layout: x_{i} is a "
+                 "subscript, x^{2} a superscript, (a)/(b) a fraction, ∑_{i=1}^{n} a sum with its limits.")
+
+
+def _script(text: str, kind: str) -> str:
+    text = text.strip()
+    return f"{kind}{text}" if len(text) == 1 else f"{kind}{{{text}}}"
+
+
+def _nest(runs: list) -> str:
+    """Runs of one formula part, in left order, as text: those smaller than
+    the part's largest are its scripts, _{..} below its middle and ^{..}
+    above, nested the same way inside, so e^{−1/(2ϵ^2)}. A prime stays put."""
+    if not runs:
+        return ""
+    top = max(r["size"] for r in runs)
+    base = [r for r in runs if r["size"] >= 0.85 * top] or runs
+    middle = sum(r["mid"] for r in base) / len(base)
+    out, group, kind = "", [], None
+    for r in runs + [None]:
+        small = r is not None and r["size"] < 0.85 * top and r["text"].strip() not in ("′", "′′")
+        here = ("_" if r["mid"] > middle else "^") if small else None
+        if group and (here != kind or not small):
+            out += _script(_nest(group), kind)
+            group = []
+        if r is None:
+            break
+        if small:
+            group.append(r)
+            kind = here
+        else:
+            out += r["text"]
+    return re.sub(r"\s+", " ", out).strip()
+
+
+def _rebuild_page(page, fonts: dict, rules: list, scale: float) -> str:
+    """A page of pdftohtml's XML as text with its formulas written out, where
+    pdftotext puts each script, limit and fraction part on a line of its own:
+    a subscript as x_{i}, a superscript as x^{2} (_nest), a fraction as
+    (a)/(b) when a rule (from the SVG, in points; scale turns them into
+    pdftohtml's pixels) has text right above and right below it, and a big
+    operator's limits as ∑_{lower}^{upper}. Lines keep their place across
+    the page, as pdftotext -layout's do."""
+    runs = []
+    for t in page.iter("text"):
+        text = "".join(t.itertext())
+        try:
+            top, left, width, height = (int(t.get(k)) for k in ("top", "left", "width", "height"))
+        except (TypeError, ValueError):
+            continue
+        if not text.strip():
+            continue
+        size, family = fonts.get(t.get("font"), (0, ""))
+        big = text.strip() in BIG_OPERATORS
+        runs.append(dict(text=text, top=top, left=left, right=left + width, w=width, h=height,
+                         mid=top + height / 2, size=size, big=big,
+                         piece=not big and (set(text.strip()) <= DELIMITER_PIECES or "CMEX" in family)))
+    if not runs:
+        return ""
+    sizes = Counter()
+    for r in runs:
+        sizes[r["size"]] += len(r["text"])
+    body = sizes.most_common(1)[0][0]
+    for r in runs:
+        r["small"] = r["size"] < 0.85 * body and not r["big"]
+    line_h = max((r["h"] for r in runs if not r["small"] and not r["big"] and not r["piece"]), default=16)
+
+    # Fractions first, shorter rules first, so an inner one is a single run by
+    # the time its outer rule is looked at. Text on one side only is an
+    # overline, an underline or a root; text with gaps as wide as a table's
+    # columns is a table.
+    for x0, x1, y in sorted(((x0 * scale, x1 * scale, y * scale) for x0, x1, y in rules), key=lambda r: r[1] - r[0]):
+        inside = [r for r in runs if not r.get("taken") and x0 - 3 <= r["left"] <= x1 and r["right"] <= x1 + 0.6 * body]
+        above = [r for r in inside if y - 1.6 * line_h <= r["top"] + r["h"] <= y + 2 and r["top"] < y]
+        below = [r for r in inside if y - 2 <= r["top"] <= y + 1.2 * line_h]
+        if not above or not below:
+            continue
+        near_above = max(r["top"] + r["h"] for r in above)
+        near_below = min(r["top"] for r in below)
+        num = sorted((r for r in above if r["top"] + r["h"] >= near_above - 0.6 * line_h), key=lambda r: r["left"])
+        den = sorted((r for r in below if r["top"] <= near_below + 0.6 * line_h), key=lambda r: r["left"])
+        if {id(r) for r in num} & {id(r) for r in den} or any(
+                b["left"] - a["right"] > 1.5 * body for part in (num, den) for a, b in zip(part, part[1:])):
+            continue
+        wrap = lambda part: part if len(part) == 1 or re.fullmatch(r"\d+(\.\d+)?", part) else f"({part})"
+        for r in num + den:
+            r["taken"] = True
+        size = max(r["size"] for r in num + den)
+        left, right = min(r["left"] for r in num + den), max(r["right"] for r in num + den)
+        runs.append(dict(text=f"{wrap(_nest(num))}/{wrap(_nest(den))}", top=min(r["top"] for r in num),
+                         left=left, right=right, w=right - left, mid=y, size=size,
+                         h=max(r["top"] + r["h"] for r in den) - min(r["top"] for r in num),
+                         small=size < 0.85 * body, big=False, piece=False, fraction=True))
+
+    # A displayed operator's limits: small text centred right over or under it.
+    for op in (r for r in runs if r["big"]):
+        centre = (op["left"] + op["right"]) / 2
+        op["over"], op["under"] = [], []
+        for r in runs:
+            if not r["small"] or r.get("taken") or abs((r["left"] + r["right"]) / 2 - centre) > max(op["w"], r["w"]) * 0.6:
+                continue
+            if op["top"] - 1.6 * line_h <= r["top"] + r["h"] <= op["top"] + 4:
+                op["over"].append(r)
+                r["taken"] = True
+            elif op["top"] + 0.5 * line_h <= r["top"] <= op["top"] + 2.6 * line_h:
+                op["under"].append(r)
+                r["taken"] = True
+
+    # Lines from ordinary full-size text; operators and delimiters, whose boxes
+    # are wrong, join the nearest one, a stacked piece only when it is close.
+    lines = []
+    for r in sorted((r for r in runs if not (r["small"] or r["big"] or r["piece"] or r.get("taken"))), key=lambda r: r["mid"]):
+        if lines and abs(r["mid"] - lines[-1]["mid"]) <= 0.6 * line_h:
+            lines[-1]["runs"].append(r)
+            lines[-1]["mid"] = sum(x["mid"] for x in lines[-1]["runs"]) / len(lines[-1]["runs"])
+        else:
+            lines.append({"mid": r["mid"], "runs": [r]})
+    for r in (r for r in runs if (r["big"] or r["piece"]) and not r.get("taken")):
+        near = min(lines, key=lambda line: abs(line["mid"] - r["mid"]), default=None)
+        whole = r["big"] or not set(r["text"].strip()) <= DELIMITER_PIECES
+        gap = abs(near["mid"] - r["mid"]) if near else 1e9
+        if gap <= 1.5 * line_h and (whole or gap <= 0.6 * line_h):
+            near["runs"].append(r)
+        else:
+            lines.append({"mid": r["mid"], "runs": [r]})
+    lines.sort(key=lambda line: line["mid"])
+    # Scripts: small text touching text on the nearest line. Other small text
+    # (a label, a footnote) makes lines of its own.
+    for r in sorted((r for r in runs if r["small"] and not r.get("taken")), key=lambda r: r["left"]):
+        near = min(lines, key=lambda line: abs(line["mid"] - r["mid"]), default=None)
+        # An opening bracket carries no script: text touching one starts inside it.
+        if near and abs(near["mid"] - r["mid"]) <= line_h and any(
+                -2 <= r["left"] - b["right"] <= 3 and not b["text"].rstrip().endswith(tuple("([{⟨⌊⌈"))
+                for b in near["runs"]):
+            r["kind"] = "_" if r["mid"] > near["mid"] else "^"
+            near["runs"].append(r)
+        elif near and abs(near["mid"] - r["mid"]) <= line_h and (r.get("fraction") or any(
+                -2 <= r["left"] - b["right"] <= 3 for b in near["runs"])):
+            near["runs"].append(r)  # a smaller fraction, or text just inside a bracket: in the line
+        elif (own := next((line for line in lines if line.get("own") and abs(line["mid"] - r["mid"]) <= 0.6 * r["h"]), None)):
+            own["runs"].append(r)
+        else:
+            lines.append({"mid": r["mid"], "runs": [r], "own": True})
+    lines.sort(key=lambda line: line["mid"])
+
+    column = body * 0.45  # pixels to a character, near pdftotext -layout's spacing
+    out = []
+    for line in lines:
+        text, end, group = "", None, []
+        for r in sorted(line["runs"], key=lambda r: (r["left"], r["top"])) + [None]:
+            kind = r and (None if r["text"].strip() in ("′", "′′") else r.get("kind"))
+            if group and (r is None or kind != group[0]["kind"] or r["left"] - end > 3):
+                text += _script(_nest(group), group[0]["kind"])
+                group = []
+            if r is None:
+                break
+            if kind:
+                group.append(r)
+            else:
+                at = round(r["left"] / column)
+                if not text:
+                    text = " " * at
+                elif r["left"] - end > 0.2 * r["size"]:
+                    text += " " * max(1, at - len(text)) if r["left"] - end > 2 * column else " "
+                text += r["text"]
+                if r["big"] and (r.get("under") or r.get("over")):
+                    for side, mark in (("under", "_"), ("over", "^")):
+                        if r[side]:
+                            text += _script(_nest(sorted(r[side], key=lambda x: x["left"])), mark)
+                    text += " "
+            end = r["right"]
+        for accent, combining in ACCENTS:  # a bar or tilde over a letter, set apart
+            text = re.sub(f"(\\w){accent}|{accent}\\s?(\\w)", lambda m, c=combining: (m.group(1) or m.group(2)) + c, text)
+        out.append(text.rstrip())
+    return "\n".join(out)
+
+
+def _write_math_text(path: Path, xml: str, math: set, rules: list, width: float) -> None:
+    """Rebuild the math pages of a PDF (_rebuild_page) and keep them in a file
+    beside it, for _numbered_pages. A page whose rebuild has fewer letters
+    than pdftotext's text is left out: pdftohtml skips text it cannot place,
+    such as a scan's hidden OCR layer. The file holds the PDF's size, so a
+    PDF downloaded again without it is not read with stale pages."""
+    side = path.with_name(path.name + MATH_TEXT)
+    pages = {}
+    try:
+        root = ET.fromstring(xml) if math and width else None
+    except ET.ParseError:
+        root = None
+    if root is not None:
+        fonts = {f.get("id"): (int(f.get("size") or 0), f.get("family") or "") for f in root.iter("fontspec")}
+        plain = (_pdf_text(path) or "").removesuffix("\f").split("\f")
+        letters = lambda text: Counter(c for c in text if c.isalnum())
+        for page in root.findall("page"):
+            n = int(page.get("number"))
+            if n not in math or n > len(rules) or n > len(plain):
+                continue
+            scale = int(page.get("width") or 0) / width
+            text = _rebuild_page(page, fonts, rules[n - 1], scale)
+            if text and sum((letters(plain[n - 1]) - letters(text)).values()) < 2:
+                pages[str(n)] = text
+    if pages:
+        side.write_text(json.dumps({"size": path.stat().st_size, "pages": pages}, ensure_ascii=False), encoding="utf-8")
+    else:
+        side.unlink(missing_ok=True)
+
+
+def _math_text(path: Path) -> dict:
+    """The rebuilt math pages kept beside a PDF, by page number as a string;
+    none when there are none or the PDF has changed since."""
+    try:
+        kept = json.loads(path.with_name(path.name + MATH_TEXT).read_text(encoding="utf-8"))
+        return kept["pages"] if kept.get("size") == path.stat().st_size else {}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
 SVG = "{http://www.w3.org/2000/svg}"
 SVG_HIDDEN = {SVG + tag for tag in ("defs", "clipPath", "mask", "pattern", "symbol")}
 NUMBER = re.compile(r"-?\d*\.?\d+(?:e-?\d+)?")
@@ -1095,28 +1324,57 @@ def _figure_shape(path) -> tuple | None:
     return tuple((round(x - box[0]), round(y - box[1])) for x, y in points), box
 
 
-def _drawing_pages(svg: Path) -> set[int]:
+def _rule(path) -> tuple | None:
+    """An SVG path that is a thin level rule, as TeX draws a fraction bar, an
+    overline or a table line: (left, right, y) in points, or None."""
+    m = [float(x) for x in NUMBER.findall(path.get("transform", ""))]
+    a, b, c, d, e, f = m if len(m) == 6 else (1, 0, 0, 1, 0, 0)
+    xy = [float(v) for v in NUMBER.findall(path.get("d", ""))]
+    points = [(a * x + c * y + e, b * x + d * y + f) for x, y in zip(xy[::2], xy[1::2])]
+    if not points:
+        return None
+    xs, ys = [x for x, _ in points], [y for _, y in points]
+    width, height = max(xs) - min(xs), max(ys) - min(ys)
+    filled = path.get("fill", "none") != "none"
+    try:
+        stroke = path.get("stroke") and float(path.get("stroke-width") or 1) * max(abs(a), abs(d)) <= 1.5
+    except ValueError:
+        stroke = False
+    if width >= 3 and ((filled and height <= 1.2) or (stroke and height <= 0.3)):
+        return min(xs), max(xs), (min(ys) + max(ys)) / 2
+    return None
+
+
+def _drawing_pages(svg: Path) -> tuple[set[int], list, float]:
     """The pages of pdftocairo's SVG with a vector figure: their figure paths,
     less any shape that sits on more than half the pages wherever it is (the
     slide template's), spanning 20 points or more. A figure of level and
-    upright lines alone, such as a grid or a number line, is not found. Read
-    as a stream: the SVG of a long deck is as big as the PDF."""
-    pages, hidden = [], 0
+    upright lines alone, such as a grid or a number line, is not found. Also,
+    for _rebuild_page, each page's thin level rules and the page width, in
+    points. Read as a stream: the SVG of a long deck is as big as the PDF."""
+    pages, rules, hidden, width = [], [], 0, 0.0
     try:
         for event, el in ET.iterparse(svg, events=("start", "end")):
+            if event == "start" and el.tag == SVG + "svg" and not width:
+                m = NUMBER.match(el.get("width") or "")
+                width = float(m.group()) if m else 0.0
             if el.tag in SVG_HIDDEN:
                 hidden += 1 if event == "start" else -1
             elif event == "start" and el.tag == SVG + "page":
                 pages.append([])
+                rules.append([])
             elif event == "end" and el.tag == SVG + "path" and not hidden:
+                if not pages:  # a one-page SVG has no <page>
+                    pages.append([])
+                    rules.append([])
                 if (shape := _figure_shape(el)):
-                    if not pages:  # a one-page SVG has no <page>
-                        pages.append([])
                     pages[-1].append(shape)
+                elif (rule := _rule(el)):
+                    rules[-1].append(rule)
             if event == "end":
                 el.clear()
     except ET.ParseError:
-        return set()
+        return set(), [], 0.0
     on = Counter(key for shapes in pages for key in {k for k, _ in shapes})
     found = set()
     for n, shapes in enumerate(pages, 1):
@@ -1124,7 +1382,7 @@ def _drawing_pages(svg: Path) -> set[int]:
         if own and max(max(b[2] for b in own) - min(b[0] for b in own),
                        max(b[3] for b in own) - min(b[1] for b in own)) >= 20:
             found.add(n)
-    return found
+    return found, rules, width
 
 
 def _picture_pages(listing: str, pages: int) -> set[int]:
@@ -1283,7 +1541,9 @@ def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None =
             # and mangles heavy mathematical notation, so say where the original
             # is rather than pretending the text is the whole document, and
             # number the pages so the ones that matter can be looked at.
-            text = _numbered_pages(text, _page_marks(path) if marks is None else marks)
+            marks = _page_marks(path) if marks is None else marks
+            rebuilt = _math_text(path)
+            text = _numbered_pages(text, marks, rebuilt)
             cut = "\n\n[Text truncated here.]" if len(text) > TEXT_LIMIT else ""
             return (
                 f"[Text of {name}. The PDF itself is at {path}. Figures and "
@@ -1291,7 +1551,7 @@ def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None =
                 f"for a course topic see those pages with get_pdf_pages. A page "
                 f"heading says when the page has images, a drawing or math; "
                 f"a figure of level and upright lines alone (a grid, a "
-                f"table) is not marked.]"
+                f"table) is not marked.{MATH_NOTATION if rebuilt else ''}]"
                 f"\n\n{text[:TEXT_LIMIT]}{cut}"
             )
         # Say why, or a missing pdftotext reads as a PDF made of images.
