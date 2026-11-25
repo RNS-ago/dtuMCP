@@ -92,22 +92,25 @@ path to use; on Windows, `where.exe uv` (usually
 your user name and where you cloned the repository.
 
 **Claude Code** — registers for the CLI and the VS Code extension at once.
+Run it from the repository folder: the shell fills in where `uv` and
+`server.py` are, so the saved config holds full paths wherever you cloned it.
 
 Linux and macOS:
 
 ```bash
-claude mcp add --scope user dtu-learn -- ~/.local/bin/uv run --script ~/repos/dtuMCP/server.py
+claude mcp add --scope user dtu-learn -- "$(command -v uv)" run --script "$PWD/server.py"
 ```
 
-Windows, in PowerShell, which fills in `$HOME` before `claude` sees it, so the
-saved config holds full paths (`~` would be passed on as it is):
+Windows, in PowerShell:
 
 ```powershell
-claude mcp add --scope user dtu-learn -- $HOME\.local\bin\uv.exe run --script $HOME\repos\dtuMCP\server.py
+claude mcp add --scope user dtu-learn -- (Get-Command uv).Source run --script "$PWD\server.py"
 ```
 
 The JSON configs below take full paths: their variable support (`${userHome}`
-in Cursor, none documented in Claude Desktop) is unreliable on Windows.
+in Cursor, none documented in Claude Desktop) is unreliable on Windows. From
+the repository folder, `echo "$(command -v uv)" "$PWD/server.py"` (PowerShell:
+`(Get-Command uv).Source; "$PWD\server.py"`) prints the two paths to paste.
 
 **Cursor** — `~/.cursor/mcp.json` (`%USERPROFILE%\.cursor\mcp.json` on
 Windows) for every project, or `.cursor/mcp.json` in one project. Then
