@@ -29,6 +29,7 @@ import sys
 import tempfile
 import webbrowser
 import zipfile
+from xml.etree import ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 from contextlib import closing
@@ -781,18 +782,194 @@ def get_file(org_unit_id: int, topic_id: int, ctx: Context | None = None) -> str
 
     saved = copy["files"].get(str(topic_id))
     if saved:
-        return _saved_text(copy["root"] / saved, title)
+        return _saved_text(copy["root"] / saved, title, (copy.get("marks") or {}).get(str(topic_id)))
     # Not in the copy: its download failed, so try DTU Learn once more.
     r, name = _topic_fetch(ou, topic)
     return _file_text(r.content, r.headers.get("content-type", ""), name, title)
 
 
-def _numbered_pages(text: str) -> str:
-    """pdftotext's output with each page headed [Page n]. It ends every page
-    with a form feed, which says nothing to a reader. Only the last one goes:
-    the ones before it may close blank pages, which still count."""
+def _numbered_pages(text: str, marks: dict | None = None) -> str:
+    """pdftotext's output with each page headed [Page n], and with what
+    _page_marks found on it, as [Page n, has images, drawing, math]. pdftotext
+    ends every page with a form feed, which says nothing to a reader. Only the
+    last one goes: the ones before it may close blank pages, which still count."""
     pages = text.removesuffix("\f").split("\f")
-    return "\n\n".join(f"[Page {n}]\n{page.strip(chr(10))}" for n, page in enumerate(pages, 1))
+    on = {}
+    for kind, numbers in (marks or {}).items():
+        for n in numbers:
+            on.setdefault(n, []).append(kind)
+    return "\n\n".join(
+        f"[Page {n}{', has ' + ', '.join(on[n]) if n in on else ''}]\n{page.strip(chr(10))}"
+        for n, page in enumerate(pages, 1)
+    )
+
+
+def _poppler(*args, timeout: int = 120) -> str:
+    """A poppler tool's output, or empty when it is missing, fails or hangs."""
+    try:
+        done = subprocess.run(
+            [str(a) for a in args], capture_output=True, encoding="utf-8",
+            errors="replace", timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    return done.stdout if done.returncode == 0 else ""
+
+
+def _page_marks(path: Path) -> dict:
+    """What a PDF's pages hold that its text loses, as page numbers under
+    images, drawing and math. Worked out when a course downloads and kept in
+    its record, since the drawing pass takes seconds on a long PDF. A poppler
+    tool that is missing leaves its kind out."""
+    math, pages = _math_pages(_poppler("pdftohtml", "-xml", "-i", "-stdout", "-q", path))
+    with tempfile.TemporaryDirectory() as tmp:
+        svg = Path(tmp) / "pages.svg"
+        _poppler("pdftocairo", "-svg", path, svg)
+        drawing = _drawing_pages(svg) if svg.exists() else set()
+    images = _picture_pages(_poppler("pdfimages", "-list", path, timeout=60), pages)
+    return {kind: sorted(found) for kind, found in
+            (("images", images), ("drawing", drawing), ("math", math)) if found}
+
+
+# TeX's math fonts (Computer Modern, AMS, Fraktur, script) and any font named
+# for math, which covers Cambria Math, STIX, New Computer Modern (Typst's) and
+# Latin Modern.
+MATH_FONT = re.compile(r"CMMI|CMSY|CMEX|CMBSY|MSAM|MSBM|EUFM|EUSM|RSFS|Math", re.I)
+
+
+def _math_pages(xml: str) -> tuple[set[int], int]:
+    """The pages of pdftohtml's XML that hold math, and how many pages it has.
+    A page holds math when 20 or more of its characters are set in math fonts,
+    or when it has a displayed formula, which _displayed tells. A lone $n$ in a
+    sentence or a list bullet, which LaTeX takes from a math font, is neither."""
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return set(), 0
+    math = {f.get("id") for f in root.iter("fontspec") if MATH_FONT.search(f.get("family") or "")}
+    pages = root.findall("page")
+    return {
+        int(page.get("number")) for page in pages
+        if sum(len("".join("".join(t.itertext()).split()))
+               for t in page.iter("text") if t.get("font") in math) >= 20
+        or _displayed(page, math)
+    }, len(pages)
+
+
+def _displayed(page, math: set) -> bool:
+    """Whether a pdftohtml page has a displayed formula: a line with text in a
+    math font that starts a tenth of the page's width or more right of the
+    page's left margin, as a centred formula does and body text, a list item
+    or its next line does not. The top and bottom 8% are left out: a slide's
+    running head can name a section in a math font."""
+    try:
+        width, height = int(page.get("width")), int(page.get("height"))
+        runs = sorted((int(t.get("top")), int(t.get("height")), int(t.get("left")),
+                       t.get("font") in math and bool("".join(t.itertext()).strip()))
+                      for t in page.iter("text"))
+    except (TypeError, ValueError):
+        return False
+    lines = []  # [top, height, left, has math]
+    for top, h, left, is_math in runs:
+        # A sub- or superscript sits within its line's height.
+        if not lines or top > lines[-1][0] + max(lines[-1][1], h) * 0.6:
+            lines.append([top, h, left, is_math])
+        else:
+            lines[-1][2] = min(lines[-1][2], left)
+            lines[-1][3] = lines[-1][3] or is_math
+    lines = [line for line in lines if 0.08 * height <= line[0] <= 0.92 * height]
+    if not lines:
+        return False
+    margin = min(left for _, _, left, _ in lines)
+    return any(is_math and left >= margin + 0.1 * width for _, _, left, is_math in lines)
+
+
+SVG = "{http://www.w3.org/2000/svg}"
+SVG_HIDDEN = {SVG + tag for tag in ("defs", "clipPath", "mask", "pattern", "symbol")}
+NUMBER = re.compile(r"-?\d*\.?\d+(?:e-?\d+)?")
+
+
+def _figure_shape(path) -> tuple | None:
+    """An SVG path that draws part of a figure: one with a slanted line, or one
+    of curves alone (a circle, an ellipse). Returns its shape placed at the
+    origin, to know it again elsewhere, and its box on the page. A path of
+    level and upright lines (a rule, a table line, a box, rounded or not) is
+    None."""
+    m = [float(x) for x in NUMBER.findall(path.get("transform", ""))]
+    a, b, c, d, e, f = m if len(m) == 6 else (1, 0, 0, 1, 0, 0)
+    steps = re.findall(r"([MLCZ])([^MLCZ]*)", path.get("d", ""))
+    drawn = not any(op == "L" for op, _ in steps) and any(op == "C" for op, _ in steps)
+    points, prev = [], None
+    for op, args in steps:
+        xy = [float(x) for x in NUMBER.findall(args)]
+        for x, y in zip(xy[::2], xy[1::2]):
+            point = (a * x + c * y + e, b * x + d * y + f)
+            if op == "L" and prev and abs(point[0] - prev[0]) > 0.5 and abs(point[1] - prev[1]) > 0.5:
+                drawn = True
+            points.append(point)
+            prev = point
+    if not drawn or not points:
+        return None
+    xs, ys = [x for x, _ in points], [y for _, y in points]
+    box = (min(xs), min(ys), max(xs), max(ys))
+    return tuple((round(x - box[0]), round(y - box[1])) for x, y in points), box
+
+
+def _drawing_pages(svg: Path) -> set[int]:
+    """The pages of pdftocairo's SVG with a vector figure: their figure paths,
+    less any shape that sits on more than half the pages wherever it is (the
+    slide template's), spanning 20 points or more. A figure of level and
+    upright lines alone, such as a grid or a number line, is not found. Read
+    as a stream: the SVG of a long deck is as big as the PDF."""
+    pages, hidden = [], 0
+    try:
+        for event, el in ET.iterparse(svg, events=("start", "end")):
+            if el.tag in SVG_HIDDEN:
+                hidden += 1 if event == "start" else -1
+            elif event == "start" and el.tag == SVG + "page":
+                pages.append([])
+            elif event == "end" and el.tag == SVG + "path" and not hidden:
+                if (shape := _figure_shape(el)):
+                    if not pages:  # a one-page SVG has no <page>
+                        pages.append([])
+                    pages[-1].append(shape)
+            if event == "end":
+                el.clear()
+    except ET.ParseError:
+        return set()
+    on = Counter(key for shapes in pages for key in {k for k, _ in shapes})
+    found = set()
+    for n, shapes in enumerate(pages, 1):
+        own = [box for key, box in shapes if len(pages) <= 2 or on[key] <= len(pages) / 2]
+        if own and max(max(b[2] for b in own) - min(b[0] for b in own),
+                       max(b[3] for b in own) - min(b[1] for b in own)) >= 20:
+            found.add(n)
+    return found
+
+
+def _picture_pages(listing: str, pages: int) -> set[int]:
+    """The pages of a pdfimages listing that hold a figure. Masks, pictures
+    drawn smaller than half a square inch (a logo strip, an icon) and any
+    picture drawn on more than half the pages (a slide background) do not
+    count. Drawn diagrams and typeset math are not pictures, so pdfimages never
+    lists them."""
+    on = {}  # picture -> pages it is drawn on
+    for line in listing.splitlines()[2:]:  # past the header and its rule
+        cols = line.split()
+        if len(cols) < 14 or cols[2] != "image" or not (cols[0] + cols[3] + cols[4]).isdigit():
+            continue
+        # An inline picture has "[inline]" where others have the object number
+        # and generation, one column less before x-ppi and y-ppi.
+        inline = not cols[10].isdigit()
+        ppi = cols[11:13] if inline else cols[12:14]
+        if not all(p.isdigit() and int(p) for p in ppi):
+            continue
+        if int(cols[3]) / int(ppi[0]) * int(cols[4]) / int(ppi[1]) < 0.5:
+            continue
+        # The object number names a picture reused across pages; an inline one is its own.
+        key = line if inline else cols[10]
+        on.setdefault(key, set()).add(int(cols[0]))
+    return {p for drawn in on.values() if len(drawn) <= max(2, pages / 2) for p in drawn}
 
 
 PAGE_LIMIT = 10  # ponytail: ~2k tokens a page; raise it if real questions need more at once
@@ -807,7 +984,8 @@ def get_pdf_pages(
 
     Figures, diagrams and mathematical notation do not survive text
     extraction. Read the text with get_file first; it numbers the pages as
-    [Page n]. Then ask for only the pages that matter: an image costs about
+    [Page n], with what the text loses on it: [Page n, has images, drawing,
+    math]. Then ask for only the pages that matter: an image costs about
     2k tokens against roughly 100 for the same page as text. last_page
     defaults to first_page; at most 10 pages at a time.
     """
@@ -882,7 +1060,7 @@ def _decode(content: bytes, ctype: str) -> str:
         return content.decode("utf-8", "replace")
 
 
-def _saved_text(path: Path, title) -> str:
+def _saved_text(path: Path, title, marks: dict | None = None) -> str:
     """_file_text for a file in an offline copy. The copy keeps no content
     type, so the extension stands in. Anything but a page, a PDF or an Office
     file is left to the bytes, as D2L's unknown type is: guess_type calls a
@@ -890,14 +1068,16 @@ def _saved_text(path: Path, title) -> str:
     ctype = mimetypes.guess_type(path.name)[0] or ""
     if not any(kind in ctype for kind in ("html", "pdf", "officedocument")):
         ctype = "d2l/unknowntype"
-    return _file_text(path.read_bytes(), ctype, path.name, title, path)
+    return _file_text(path.read_bytes(), ctype, path.name, title, path, marks)
 
 
-def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None = None) -> str:
+def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None = None,
+               marks: dict | None = None) -> str:
     """Turn a file into text for the caller, saving it to disk when the bytes
     are not text themselves. Shared by content topics and announcement
     attachments, fetched or read from an offline copy; path is where a copy
-    already keeps the file."""
+    already keeps the file, and marks what _page_marks found in it when the
+    copy was saved; a PDF without them is looked at now."""
     if "html" in ctype:
         return f"[{title}]\n\n{_html_text(_decode(content, ctype))}"
     if ctype.startswith("text/") or "json" in ctype:
@@ -923,12 +1103,15 @@ def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None =
             # and mangles heavy mathematical notation, so say where the original
             # is rather than pretending the text is the whole document, and
             # number the pages so the ones that matter can be looked at.
-            text = _numbered_pages(text)
+            text = _numbered_pages(text, _page_marks(path) if marks is None else marks)
             cut = "\n\n[Text truncated here.]" if len(text) > TEXT_LIMIT else ""
             return (
                 f"[Text of {name}. The PDF itself is at {path}. Figures and "
                 f"mathematical notation do not survive extraction: open it, or "
-                f"for a course topic see those pages with get_pdf_pages.]"
+                f"for a course topic see those pages with get_pdf_pages. A page "
+                f"heading says when the page has images, a drawing or math; "
+                f"a figure of level and upright lines alone (a grid, a "
+                f"table) is not marked.]"
                 f"\n\n{text[:TEXT_LIMIT]}{cut}"
             )
         # Say why, or a missing pdftotext reads as a PDF made of images.
@@ -1613,6 +1796,9 @@ def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
         }
         found = _each(pool, lambda r: _search_pages(r[0]) if r[0] else [], results, "search text", say)
         texts = dict(zip(keys, found))
+        pdfs = [(key, p) for key, (p, _) in zip(keys, results) if p and p.suffix.lower() == ".pdf"]
+        marks = dict(zip((key for key, _ in pdfs),
+                         _each(pool, lambda job: _page_marks(job[1]), pdfs, "figures and math", say)))
         html, docs = _index_html(name, ou, modules, news, index, texts)
         # The index and every saved HTML page can show pictures and link to
         # files in D2L's file area. Fetch each of those once, then point the
@@ -1664,6 +1850,10 @@ def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
                 p.relative_to(root).as_posix()
             for key, (p, _) in zip(keys, results) if p
         },
+        # What each saved PDF's pages hold that their text loses, for
+        # get_file's page headings: {"images": [3], "drawing": [5], "math": [...]}.
+        "marks": {"/".join(map(str, key)) if isinstance(key, tuple) else str(key): found
+                  for key, found in marks.items()},
         # Files the course's pages link to, by the link as the page has it:
         # a /content/ address, or a short link to a course file.
         "linked": {url: dest.relative_to(root).as_posix() for url, dest in linked.items()},
@@ -2088,7 +2278,8 @@ def get_announcement_attachment(
     copy = _course(ou, ctx)
     saved = copy["files"].get(f"{news_id}/{file_id}")
     if saved:
-        return _saved_text(copy["root"] / saved, Path(saved).name)
+        marks = (copy.get("marks") or {}).get(f"{news_id}/{file_id}")
+        return _saved_text(copy["root"] / saved, Path(saved).name, marks)
     with _client() as c:
         r = c.get(f"/d2l/api/le/{LE}/{ou}/news/{news_id}/attachments/{file_id}")
     if r.status_code in (401, 403):

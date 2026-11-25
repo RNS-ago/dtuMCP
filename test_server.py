@@ -25,11 +25,13 @@ wanted = {"_flatten", "_profiles", "_pick_browser", "_pasted_cookies", "_cookies
           "_search_pages", "_search_entry", "_landing_html",
           "_each", "_status", "_summary", "_code",
           "_copies", "_copy", "_data_dir", "_saved_text", "_file_text", "_decode",
-          "_numbered_pages", "_rich", "_group_rows",
+          "_numbered_pages", "_poppler", "_picture_pages", "_page_marks", "_math_pages",
+          "_figure_shape", "_drawing_pages", "_displayed", "_rich", "_group_rows",
           "_humps", "_parts", "_terms", "_index", "_drop_course", "_index_course", "_sync_index",
           "_search_docs", "_search", "_search_answer", "search_courses"}
 constants_extra = {"OOXML_MEMBERS"}
-constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT", "INDEX_VERSION", "INDEX_SCHEMA", "INDEX_WEIGHTS"}
+constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT", "INDEX_VERSION", "INDEX_SCHEMA", "INDEX_WEIGHTS",
+             "MATH_FONT", "SVG", "SVG_HIDDEN", "NUMBER"}
 
 
 def needed(node):
@@ -63,6 +65,9 @@ mod.__dict__.update(
     datetime=datetime_module.datetime,
     sqlite3=__import__("sqlite3"),
     closing=__import__("contextlib").closing,
+    ET=__import__("xml.etree.ElementTree", fromlist=["ElementTree"]),
+    Counter=__import__("collections").Counter,
+    tempfile=tempfile,
     mcp=types.SimpleNamespace(tool=lambda: lambda f: f),
     _tool=lambda f: f,
 )
@@ -539,6 +544,90 @@ assert mod._decode(b"x", "text/plain; charset=nonsense") == "x"
 # so a reader can ask get_pdf_pages for the page with the figure.
 got = mod._numbered_pages("\n  Title\n\fP = NP?\n\f\f")
 assert got == "[Page 1]\n  Title\n\n[Page 2]\nP = NP?\n\n[Page 3]\n", repr(got)
+
+# pdfimages -list, as poppler prints it for a 4-page PDF with a slide
+# background (object 5) on every page and a figure on page 3, plus an inline picture, a mask and an
+# icon on page 2. Only the figure and the inline picture mark their pages.
+listing = """\
+page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+--------------------------------------------------------------------------------------------
+   1     0 image     720   540  gray    1   8  image  no         5  0   144   144  380K 100%
+   2     1 image     720   540  gray    1   8  image  no         5  0   144   144  380K 100%
+   2     2 image     200   100  rgb     3   8  jpeg   no  [inline]     96    96 9000B 15%
+   2     3 smask     400   300  gray    1   8  image  no        11  0    96    96  117K 100%
+   2     4 image      16    16  rgb     3   8  image  no        12  0    96    96  768B 100%
+   3     5 image     720   540  gray    1   8  image  no         5  0   144   144  380K 100%
+   3     6 image     400   300  gray    1   8  image  no         6  0    96    96  117K 100%
+   4     7 image     720   540  gray    1   8  image  no         5  0   144   144  380K 100%
+"""
+assert mod._picture_pages(listing, 4) == {2, 3}, mod._picture_pages(listing, 4)
+assert mod._picture_pages("", 4) == set()
+got = mod._numbered_pages("one\ftwo\fthree\ffour\f", {"images": [2, 3], "math": [3]})
+assert got.split("\n\n")[:3] == ["[Page 1]\none", "[Page 2, has images]\ntwo",
+                                  "[Page 3, has images, math]\nthree"], got
+assert mod._poppler("pdfimages", "-list", "/nonexistent/nope.pdf") == ""
+assert mod._poppler("no-such-poppler-tool") == ""
+# A one-slide export of a DTU deck: its footer strip and logo are drawn too
+# small to be figures, though there is no other page to see them repeat on.
+footer = """\
+page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+--------------------------------------------------------------------------------------------
+   1     0 image     250    27  rgb     3   8  image  no        21  0   167   176 4417B  22%
+   1     1 image      21    30  rgb     3   8  image  no        22  0   225   214  870B  46%
+"""
+assert mod._picture_pages(footer, 1) == set()
+
+# pdftohtml -xml: math is counted by the characters set in math fonts, so a
+# lone $n$ (page 1) does not mark a page and a displayed formula (page 2) does.
+xml = """<?xml version="1.0" encoding="UTF-8"?>
+<pdf2xml>
+<page number="1"><fontspec id="0" family="ABCDEF+CMR10"/><fontspec id="1" family="GHIJKL+CMMI10"/>
+<text font="0">For every graph with</text><text font="1">n</text><text font="0">vertices</text></page>
+<page number="2"><text font="1">x</text><text font="1"> = sum over i of a i b i + c i d i</text></page>
+<page number="3"><fontspec id="2" family="NewCMMath-Regular"/><text font="2">f(x) = x^2 + 2x + 1 for all x</text></page>
+</pdf2xml>"""
+assert mod._math_pages(xml) == ({2, 3}, 3), mod._math_pages(xml)
+
+# A displayed formula marks a page under 20 math characters: a line with
+# math that starts well right of the margin (page 2's centred T(n) <= c).
+# Body text with an inline $n$ (page 1) does not, and nor does a running head
+# that names a section in a math font (page 3's top line).
+xml = """<?xml version="1.0" encoding="UTF-8"?>
+<pdf2xml>
+<page number="1" width="680" height="383"><fontspec id="0" family="CMSS10"/><fontspec id="1" family="CMMI10"/>
+<text top="100" left="16" height="18" font="0">Let</text><text top="100" left="40" height="18" font="1">n</text>
+<text top="100" left="52" height="18" font="0">be the number of vertices.</text>
+<text top="130" left="49" height="18" font="0">and its next line</text></page>
+<page number="2" width="680" height="383">
+<text top="100" left="16" height="18" font="0">Then the running time is constant:</text>
+<text top="140" left="200" height="18" font="1">T</text><text top="146" left="212" height="12" font="1">Scan</text>
+<text top="140" left="250" height="18" font="0">for some</text><text top="140" left="310" height="18" font="1">c</text></page>
+<page number="3" width="680" height="383">
+<text top="3" left="173" height="14" font="1">NP</text><text top="3" left="200" height="14" font="0">completeness</text>
+<text top="100" left="16" height="18" font="0">Some text.</text></page>
+</pdf2xml>"""
+assert mod._math_pages(xml) == ({2}, 3), mod._math_pages(xml)
+assert mod._math_pages("") == (set(), 0)
+
+# pdftocairo -svg, 4 pages: a rounded box and a header rule (the template)
+# and a bullet on every page; a graph's node and edges on page 2; a diagonal
+# drawn through a transform on page 3; only a table's level lines on page 4.
+template = ('<path d="M 10 10 C 10 5 15 5 20 5 L 400 5 C 405 5 405 10 405 10 L 405 100 L 10 100 Z"/>'
+            '<path d="M 0 2 L 450 2"/><path d="M 30 50 L 34 52 L 30 54 Z"/>')
+svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="454" height="255"><defs>
+<path d="M 0 0 L 9 9 L 0 9 Z"/></defs><pageSet>
+<page>{template}</page>
+<page>{template}<path d="M 100 100 C 104 100 104 108 100 108 C 96 108 96 100 100 100 Z"/>
+<path d="M 100 100 L 160 150 L 220 100"/></page>
+<page>{template}<path transform="matrix(0.5, 0, 0, -0.5, 100, 200)" d="M 0 0 L 80 60"/></page>
+<page>{template}<path d="M 50 150 L 250 150 M 50 170 L 250 170 M 150 140 L 150 180"/></page>
+</pageSet></svg>"""
+with tempfile.TemporaryDirectory() as tmp:
+    drawn = Path(tmp) / "pages.svg"
+    drawn.write_text(svg, encoding="utf-8")
+    assert mod._drawing_pages(drawn) == {2, 3}, mod._drawing_pages(drawn)
+    drawn.write_text("<svg", encoding="utf-8")
+    assert mod._drawing_pages(drawn) == set()
 
 # The Groups tab: the learner's own group in each category, its members named
 # from the class list (whose ids are strings), a category without one marked so.

@@ -249,6 +249,21 @@ online.
   UTF-8. An HTML page comes back as stripped text, a link as its URL, a video
   as the address to watch it at. Text goes in the reply because some clients
   sandbox their file tools away from where the server saves files.
+- **PDF page headings say what the text lost**, as `[Page n, has images,
+  drawing, math]`, so an agent knows which pages to look at:
+  - *images*: a picture `pdfimages` lists, drawn at least half a square inch
+    and on no more than half the pages (logos and slide backgrounds are left
+    out).
+  - *drawing*: a vector figure in `pdftocairo`'s SVG, found by its curves and
+    slanted lines, less shapes on most pages (the slide template). A figure of
+    level and upright lines alone, such as a grid or a number line, is missed.
+  - *math*: 20 or more characters set in math fonts (TeX's, or any font named
+    for math), or a displayed formula: a line with math that starts well right
+    of the margin, as a centred formula does. Read with `pdftohtml`.
+
+  These are worked out once per PDF while a course downloads (a few seconds
+  for a long deck) and kept in its `_course-<id>.json`; a copy saved before
+  works them out on each read until it is downloaded again.
 - **`get_pdf_pages`** draws pages with `pdftoppm` at 1568 pixels on the long
   side, the most a model takes in before scaling down. A page costs about 2k
   tokens against roughly 100 as text, so it takes at most 10 per call: read the

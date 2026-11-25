@@ -90,6 +90,14 @@ teachers actually handed me this term.
     `get_pdf_pages(org_unit_id, topic_id, first_page, last_page)`, which
     returns them as images, at most 10 pages per call. A page costs about 2k
     tokens against roughly 100 as text, so never ask for a whole document.
+  - To tell which pages to look at: a page's heading says what its text
+    lost, as `[Page n, has images, drawing, math]`. In a mathematical text
+    most pages have math, so look at those only when the exact notation
+    matters. A figure made only of level and upright lines (a grid, a table,
+    a number line) is not marked; for those, look for what the text keeps: a
+    caption or label (`Figure 3.2`, `Theorem 4`) and the lines that refer to
+    it, or a page with only a title and a few words. `search_courses` gives
+    the page of a caption or term too.
   - Spreadsheet text is cell values only, with the row and column layout lost,
     so do not read relationships across columns out of it.
   - An **HTML page** comes back as stripped text, a **link** as its target URL
