@@ -24,7 +24,7 @@ wanted = {"_flatten", "_profiles", "_pick_browser", "_pasted_cookies", "_cookies
           "_d2l_file", "_linked_dest", "_dedupe_linked", "_relink",
           "_search_pages", "_search_entry", "_landing_html",
           "_each", "_status", "_summary", "_code",
-          "_copies", "_copy", "_saved_text", "_file_text", "_decode",
+          "_copies", "_copy", "_data_dir", "_saved_text", "_file_text", "_decode",
           "_numbered_pages", "_rich", "_group_rows",
           "_humps", "_parts", "_terms", "_index", "_drop_course", "_index_course", "_sync_index",
           "_search_docs", "_search", "_search_answer", "search_courses"}
@@ -48,6 +48,7 @@ mod.__dict__.update(
     CHROMES=[],  # a Chrome on the machine running the tests is not one to list
     mimetypes=__import__("mimetypes"),
     os=os,
+    sys=__import__("sys"),
     re=re,
     subprocess=subprocess,
     Path=Path,
@@ -634,5 +635,9 @@ with tempfile.TemporaryDirectory() as tmp:
     got = mod._dedupe_linked({"a": copy, "b": copy, "c": other, "d": hollow}, [notes, empty])
     assert got == {"a": notes, "b": notes, "c": other, "d": hollow}, got
     assert not copy.exists() and other.exists() and hollow.exists()
+
+# Saved courses live in the platform's data folder.
+mod.sys = __import__("sys")  # tests above stand in their own
+assert mod._data_dir().parts[-2:] == ("dtumcp", "courses")
 
 print("OK")

@@ -48,7 +48,21 @@ from websockets.sync.client import connect as websocket
 
 BASE = os.environ.get("DTU_BASE", "https://learn.inside.dtu.dk")
 LP, LE = "1.63", "1.97"
-DOWNLOADS = Path(os.environ.get("DTU_DOWNLOADS", "~/Downloads/dtulearn")).expanduser()
+
+
+def _data_dir() -> Path:
+    """Where the saved courses live by default: the platform's place for an
+    app's own data, which, unlike Downloads, nobody clears out by hand."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or "~/AppData/Local"
+    elif sys.platform == "darwin":
+        base = "~/Library/Application Support"
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or "~/.local/share"
+    return Path(base, "dtumcp", "courses").expanduser()
+
+
+DOWNLOADS = Path(os.environ.get("DTU_DOWNLOADS") or _data_dir()).expanduser()
 COOKIE_FILE = Path(os.environ.get("DTU_COOKIE_FILE", "~/.config/dtumcp/cookie")).expanduser()
 
 mcp = MCPServer("dtu-learn")
@@ -1423,8 +1437,8 @@ function take(folder, name) {
 def download_course(org_unit_id: int, ctx: Context | None = None) -> str:
     """Save a course for offline use: its files, unit text and announcements.
 
-    Files land in ~/Downloads/dtulearn/<course>/<unit>/, on the machine running
-    this server, with an index.html beside them that lays the course out like
+    Files land in <course>/<unit>/ in this server's data folder
+    (~/.local/share/dtumcp/courses on Linux), on the machine running it, with an index.html beside them that lays the course out like
     its site. Pictures and files the pages link to are fetched as well. Links
     and videos are not files; the index points at them online.
     course_contents, unit_info, get_file and the announcement tools read
@@ -2440,7 +2454,7 @@ def _usage() -> str:
         "Environment:",
         f"  DTU_COOKIE           Cookie header to use instead of {COOKIE_FILE}",
         f"  DTU_COOKIE_FILE      Where the session is stored [{COOKIE_FILE}]",
-        f"  DTU_DOWNLOADS        Where get_file saves binaries [{DOWNLOADS}]",
+        f"  DTU_DOWNLOADS        Where saved courses and files are kept [{DOWNLOADS}]",
         f"  DTU_BASE             Brightspace instance [{BASE}]",
         "  DTU_FIREFOX_PROFILE  Profile directory to read cookies from; skips the scan",
         "  DTU_MCP_PATH         Serve over HTTP at this path instead of stdio.",

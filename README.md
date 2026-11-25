@@ -335,7 +335,10 @@ Anywhere an `org_unit_id` is asked for, the DTU course number works too:
 number offered in more than one term is ambiguous, so the error lists the
 offerings and their ids instead of picking one.
 
-Binary downloads land in `~/Downloads/dtulearn` (override with `DTU_DOWNLOADS`).
+Saved courses and files are kept in the data folder: `~/.local/share/dtumcp/courses`
+on Linux (or under `$XDG_DATA_HOME`), `%LOCALAPPDATA%\dtumcp\courses` on Windows
+and `~/Library/Application Support/dtumcp/courses` on macOS. `DTU_DOWNLOADS`
+names another.
 A unit (D2L calls it a module) is one of the `#` groups in a course tree. Most
 carry text of their own — a week's schedule, instructions for the exercises, a
 welcome message — which `course_contents` marks with `(info)` and `unit_info`
@@ -343,7 +346,7 @@ returns in full. Announcements are separate and belong to the course rather than
 the unit; `list_announcements` has those, with the ids of any attached files.
 
 `download_course` makes an offline copy of a course. It walks the whole
-content tree and saves every file under `~/Downloads/dtulearn/<course>/<unit>/`,
+content tree and saves every file under `<course>/<unit>/` in the data folder,
 eight at a time, naming each file after its topic so a second run overwrites
 instead of piling up copies. Windows limits a path to 260 characters unless
 long paths are switched on (`LongPathsEnabled` in the registry), and a deeply
@@ -361,7 +364,7 @@ heading, and a coloured bar on its left marks what it holds. Announcements has
 every announcement with its attachments. The page follows the system's dark
 mode.
 
-`~/Downloads/dtulearn/index.html` is the landing page: every course downloaded
+`index.html` in the data folder is the landing page: every course downloaded
 so far, grouped by term with the newest first, each with the date it was
 saved. Every course page links back to it from "← All courses". It is rebuilt
 from the course folders on each `download_course`, so start there to read
@@ -417,7 +420,7 @@ One row per course, then anything that went wrong, then the landing page:
   02249     45         0             11      9       0      75
   02231     54         1             12      0       2       0
 
-  Open ~/Downloads/dtulearn/index.html to see every course.
+  Open ~/.local/share/dtumcp/courses/index.html to see every course.
 ```
 
 `pictures` counts pictures and files the pages link to. `links`, `videos` and
@@ -479,7 +482,7 @@ Point `DTU_BASE` at another Brightspace instance to use this elsewhere.
 
 `search_courses`, the plugin's search box and its Coverage tab search one
 SQLite full-text index over every downloaded course, `_search.sqlite` in the
-downloads folder, with a row per PDF page and one per other item. It is filled
+data folder, with a row per PDF page and one per other item. It is filled
 from the `_search.js` each download writes, at the end of the download, and
 checked before each search: a course downloaded again since is indexed again,
 one whose folder is gone is dropped. Deleting the file is safe; the next search
