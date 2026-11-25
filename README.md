@@ -99,12 +99,15 @@ Linux and macOS:
 claude mcp add --scope user dtu-learn -- ~/.local/bin/uv run --script ~/repos/dtuMCP/server.py
 ```
 
-Windows (write the paths out in full: PowerShell and cmd do not expand `~` for
-other programs):
+Windows, in PowerShell, which fills in `$HOME` before `claude` sees it, so the
+saved config holds full paths (`~` would be passed on as it is):
 
 ```powershell
-claude mcp add --scope user dtu-learn -- C:\Users\you\.local\bin\uv.exe run --script C:\Users\you\repos\dtuMCP\server.py
+claude mcp add --scope user dtu-learn -- $HOME\.local\bin\uv.exe run --script $HOME\repos\dtuMCP\server.py
 ```
+
+The JSON configs below take full paths: their variable support (`${userHome}`
+in Cursor, none documented in Claude Desktop) is unreliable on Windows.
 
 **Cursor** — `~/.cursor/mcp.json` (`%USERPROFILE%\.cursor\mcp.json` on
 Windows) for every project, or `.cursor/mcp.json` in one project. Then
