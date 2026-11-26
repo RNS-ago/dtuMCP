@@ -29,9 +29,15 @@ def _data_dir() -> Path:
 
 DOWNLOADS = Path(os.environ.get("DTU_DOWNLOADS") or _data_dir()).expanduser()
 COOKIE_FILE = Path(os.environ.get("DTU_COOKIE_FILE", "~/.config/dtumcp/cookie")).expanduser()
-# How to run this again, for messages: the installed command, or the package
-# from a clone (python -m dtumcp).
-RUN = "dtumcp" if Path(sys.argv[0]).stem == "dtumcp" else "uv run dtumcp"
+def _run_command(argv0: str) -> str:
+    """How to run this again, for messages: dtumcp where uv tool install put
+    it on PATH, or uv run dtumcp in a clone, whose .venv is on PATH only
+    under uv run."""
+    path = Path(argv0)
+    return "dtumcp" if path.stem == "dtumcp" and ".venv" not in path.parts else "uv run dtumcp"
+
+
+RUN = _run_command(sys.argv[0])
 
 mcp = MCPServer("dtu-learn")
 

@@ -565,6 +565,11 @@ with tempfile.TemporaryDirectory() as tmp:
     assert got.endswith("[Page 1 is cut here, after 100,000 characters. get_pdf_pages shows it whole.]"), got[-200:]
 mod._pdf_text, mod._math_text = saved_pdf_text, saved_math
 
+# Messages name the command to type: the installed one, or uv run in a clone.
+assert mod._run_command("/home/u/.local/bin/dtumcp") == "dtumcp"
+assert mod._run_command("/home/u/dtuMCP/.venv/bin/dtumcp") == "uv run dtumcp"
+assert mod._run_command("-c") == "uv run dtumcp"
+
 # search_serve answers a line it cannot read with an error and goes on.
 with tempfile.TemporaryDirectory() as tmp:
     import subprocess, sys
