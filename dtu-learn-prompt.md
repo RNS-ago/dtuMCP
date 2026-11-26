@@ -32,7 +32,8 @@ directly — it will just show you a login page.
 3. **Search before you read.** To find where something is covered, use
    `search_courses` first, not `course_contents` and topic after topic. It
    searches the whole saved copy at once, inside files too, and gives each
-   match's topic id and PDF page.
+   match's topic id (or `linked` path) and its page: a PDF's page, or a
+   workbook's sheet.
 4. **Read only what the search found.** Then `get_file` or `unit_info` for
    those topics, and `get_pdf_pages` for just the pages whose figures or
    notation matter. Do not fetch every topic by default — courses have
@@ -74,10 +75,17 @@ teachers actually handed me this term.
 - `get_file(org_unit_id, topic_id)` — one topic, whatever kind it is.
   - A **PDF**, **Word**, **PowerPoint**, **Excel** or plain-text file comes
     back as text. Work from that text. A PDF's pages are headed `[Page n]`.
+  - A file a course's pages link to has no topic id. Pass its path instead,
+    as `get_file(org_unit_id, linked="_linked/...")`; `search_courses` gives
+    it, and the text of a page or unit marks each link to a saved file as
+    `[saved file: linked="_linked/..."]` or `[saved file: topic_id 7]`, after
+    the link's words. Follow those when a page points you at a reading.
   - Any path in a reply is on the machine running the server, which is not
     necessarily one you can read from. Never treat a saved path as a way to
     reach the content, and never report that you cannot read the material
-    because of it — the text is already in the reply.
+    because of it — the text is already in the reply. Only if you can run
+    code on that machine yourself, as in Claude Code, may you open a saved
+    file there, for instance a long workbook with pandas.
   - If a PDF comes back as "No text could be extracted": when the reason is
     that `pdftotext` is not installed, tell me to install poppler (see the
     dtuMCP README); when it has no text layer, as a scan has none, read its
@@ -86,11 +94,13 @@ teachers actually handed me this term.
     with a note naming the page to go on from: call `get_file` again with
     that `first_page`. When you need only part of a long PDF, find its pages
     with `search_courses` and ask for just those, with `first_page` and
-    `last_page`. Other files are cut, ending `[Text truncated here.]`.
+    `last_page`. A Word or PowerPoint file is cut, ending `[Text truncated
+    here.]`.
   - Figures, diagrams and mathematical notation do not survive extraction.
     When they matter, look at just those pages with
     `get_pdf_pages(org_unit_id, topic_id, first_page, last_page)`, which
-    returns them as images, at most 10 pages per call. A page costs about 2k
+    returns them as images, at most 10 pages per call (for a linked PDF,
+    `linked="_linked/..."` in place of `topic_id`). A page costs about 2k
     tokens against roughly 100 as text, so never ask for a whole document.
   - On pages with math, formulas are written out from their layout: `x_{i}`
     is a subscript, `x^{2}` a superscript, `(a)/(b)` a fraction and
@@ -117,8 +127,23 @@ teachers actually handed me this term.
     and copies saved before the fix, where a sum still reads as a capital `X`
     or `P` and `𝒩𝒫` as `N P`. Where a formula needs a sum, check the page
     before reading such a capital as a variable.
-  - Spreadsheet text is cell values only, with the row and column layout lost,
-    so do not read relationships across columns out of it.
+  - An **Excel workbook** (.xlsx) reads with its sheets as pages. The reply
+    lists the sheets with their size (`5. "Ecoinvent data" A1:X24023`), then
+    gives a row a line: its number, then each cell with anything in it by
+    column letter, as `12: A "Diesel" · C 0.5 · D 0.52 = B12*C12`. Text is in
+    quotes, dates are `YYYY-MM-DD`, and a formula's cell gives its result,
+    then `=` and the formula; `= as in D5` means the formula of D5, copied
+    with its references moved along. Use the formulas to explain how a
+    number is worked out.
+  - Course workbooks often hold a data sheet of thousands of rows beside a
+    few working sheets. A first call shows the sheets that fit and names the
+    ones too long; a long sheet asked for goes on with `first_row`, as its
+    note says. To look something up in such a sheet, do not page through
+    it: pass `find` with the words to look for, as `get_file(...,
+    first_page=5, last_page=5, find="adipic acid")`, which returns only the
+    rows with every word, after the sheet's first rows for its column
+    labels. A search hit in a workbook names its cells (`A196`), so you can
+    also ask for that row with `first_row`.
   - An **HTML page** comes back as stripped text, a **link** as its target URL
     to fetch with your web tools, and a **video** as the address to watch it
     at. A video has no transcript, so tell me to watch it rather than guessing
@@ -137,8 +162,10 @@ teachers actually handed me this term.
   PDF's page by page. Each word matches the start of a word, so `reduc` finds
   "reductions". Matches with every word come first, best first, then those
   with some of them, each saying which words it lacks. Each match gives its
-  course, the units above it, its PDF page, and the ids `get_file`,
-  `unit_info`, `get_pdf_pages` or `get_announcement_attachment` take. Pass an
+  course, the units above it, its page (a PDF's page, a workbook's sheet),
+  and the ids `get_file`, `unit_info`, `get_pdf_pages` or
+  `get_announcement_attachment` take; a file the pages link to gives the
+  `linked` path that `get_file` and `get_pdf_pages` take instead. Pass an
   `org_unit_id` to keep to one course. Courses use their own terms and
   abbreviations: when a search comes back thin, try those, or fewer words.
   Only saved courses are searched.
@@ -147,7 +174,8 @@ teachers actually handed me this term.
   each headed by its id and followed by `Attachment [file_id]` lines for any
   attached files.
 - `get_announcement_attachment(org_unit_id, news_id, file_id)` — one of those
-  attached files, returned as text the same way `get_file` returns a topic.
+  attached files, returned as text the same way `get_file` returns a topic,
+  with `first_page`, `last_page`, `first_row` and `find` too.
 - `calendar(days, org_unit_id)` — my schedule in local time for the next
   `days` days (7 by default), grouped under a heading per day. A line with a
   time range is a lecture or an exercise session and usually names its room;
