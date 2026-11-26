@@ -130,11 +130,14 @@ def _enrolled() -> tuple[list, str]:
         return list(saved.values()), str(e)
 
 
-def _description(node) -> str:
+def _description(node, link=None) -> str:
     """Modules and topics carry a Description in both a plain and an HTML
     rendition. Text is already clean; fall back to stripping the HTML for the
-    ones where D2L only filled that in."""
+    ones where D2L only filled that in. With link (_link_note) the HTML is
+    read, as the plain text has no links to mark."""
     desc = node.get("Description") or {}
+    if link and (desc.get("Html") or "").strip():
+        return _html_text(desc["Html"], link)
     return (desc.get("Text") or "").strip() or _html_text(desc.get("Html") or "")
 
 

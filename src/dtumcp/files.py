@@ -39,7 +39,7 @@ def _decode(content: bytes, ctype: str) -> str:
         return content.decode("utf-8", "replace")
 
 
-def _saved_text(path: Path, title, marks: dict | None = None, pages: tuple = (1, 0)) -> str:
+def _saved_text(path: Path, title, marks: dict | None = None, pages: tuple = (1, 0), link=None) -> str:
     """_file_text for a file in an offline copy. The copy keeps no content
     type, so the extension stands in. Anything but a page, a PDF or an Office
     file is left to the bytes, as D2L's unknown type is: guess_type calls a
@@ -47,11 +47,11 @@ def _saved_text(path: Path, title, marks: dict | None = None, pages: tuple = (1,
     ctype = mimetypes.guess_type(path.name)[0] or ""
     if not any(kind in ctype for kind in ("html", "pdf", "officedocument")):
         ctype = "d2l/unknowntype"
-    return _file_text(path.read_bytes(), ctype, path.name, title, path, marks, pages)
+    return _file_text(path.read_bytes(), ctype, path.name, title, path, marks, pages, link)
 
 
 def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None = None,
-               marks: dict | None = None, pages: tuple = (1, 0)) -> str:
+               marks: dict | None = None, pages: tuple = (1, 0), link=None) -> str:
     """Turn a file into text for the caller, saving it to disk when the bytes
     are not text themselves. Shared by content topics and announcement
     attachments, fetched or read from an offline copy; path is where a copy
@@ -60,7 +60,7 @@ def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None =
     and last page of a PDF to give (0: to its end), whole pages up to
     TEXT_LIMIT."""
     if "html" in ctype:
-        return f"[{title}]\n\n{_html_text(_decode(content, ctype))}"
+        return f"[{title}]\n\n{_html_text(_decode(content, ctype), link)}"
     if ctype.startswith("text/") or "json" in ctype:
         return _decode(content, ctype)
     if ctype == "d2l/unknowntype":
@@ -108,7 +108,7 @@ def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None =
                 f"[Text of {name}{span}. The PDF itself is at {path}. Figures do "
                 f"not survive extraction, and mathematical notation "
                 f"{'only roughly' if rebuilt else 'does not either'}: open it, or "
-                f"for a course topic see those pages with get_pdf_pages. A page "
+                f"see those pages with get_pdf_pages. A page "
                 f"heading says when the page has images, a drawing, math or "
                 f"unreadable symbols (a font its text cannot name, so look at "
                 f"the page for those); "
@@ -258,6 +258,41 @@ def _dedupe_linked(linked: dict, saved: list) -> dict:
             dest.unlink()
             same[dest] = match
     return {url: same.get(dest, dest) for url, dest in linked.items()}
+
+
+def _link_note(copy: dict, page: Path | None = None):
+    """For _html_text: how to open a saved file a link points at, as
+    "saved file: topic_id 7" or 'saved file: linked="_linked/..."', or None.
+    The link is a DTU Learn address, as unit text has it, or one relative to
+    page, as the saved pages have them (_relink)."""
+    root, linked = copy["root"].resolve(), copy.get("linked") or {}
+    topics = {saved: key for key, saved in (copy.get("files") or {}).items() if "/" not in key}
+    kept = set(linked.values())
+
+    def note(href):
+        saved = linked.get(_d2l_file(href) or "")
+        if saved is None and page is not None and href and not urlparse(href).scheme and href[0] not in "/#":
+            try:
+                saved = (page.parent / unquote(href.split("#")[0])).resolve().relative_to(root).as_posix()
+            except ValueError:
+                return None
+        if saved in topics:
+            return f"saved file: topic_id {topics[saved]}"
+        return f'saved file: linked="{saved}"' if saved in kept else None
+
+    return note
+
+
+def _linked_file(copy: dict, linked: str) -> Path:
+    """The saved copy of a file the course's pages link to, by the linked="..."
+    path search_courses and page text give, or by the link itself. Only files
+    the copy lists: the path is never joined on unchecked."""
+    links, want = copy.get("linked") or {}, linked.strip()
+    saved = want if want in set(links.values()) else links.get(_d2l_file(want) or "")
+    if saved is None:
+        raise RuntimeError(f"No linked file {linked!r} in that course. search_courses and the "
+                           'text of its pages give them as linked="_linked/...".')
+    return copy["root"] / saved
 
 
 def _relink(html: str, page: Path, linked: dict) -> str:

@@ -16,9 +16,9 @@ from .app import BASE, DOWNLOADS, LE, LP, RUN, _tool
 from .client import _client, _get, _number
 from .courses import (
     SEASON_NAMES, _calendar_lines, _description, _enrolled, _filename, _flatten, _my_events,
-    _resolve, _saved_note, _term, _term_units, _toc_index, _topic_fetch, _urn_kind,
+    _resolve, _saved_note, _stored_marks, _term, _term_units, _toc_index, _topic_fetch, _urn_kind,
 )
-from .files import _file_text, _safe, _saved_text
+from .files import _file_text, _link_note, _linked_file, _safe, _saved_text
 from .download import _background, _code, _course, _download, _status, _summary
 from .search import _search_answer
 from .video import _topic_parents, _video_link, _video_topic
@@ -65,14 +65,15 @@ def unit_info(org_unit_id: int | str, unit_id: int, ctx: Context | None = None) 
     Unit ids are the bracketed numbers on the `#` lines of course_contents. Only
     units marked `(info)` there have any text of their own.
     """
-    unit = _toc_index(_course(_resolve(org_unit_id), ctx)["modules"])[1].get(unit_id)
+    copy = _course(_resolve(org_unit_id), ctx)
+    unit = _toc_index(copy["modules"])[1].get(unit_id)
     if unit is None:
         raise RuntimeError(
             f"No unit {unit_id} in that course. Run course_contents; unit ids are "
             "the bracketed numbers on the lines beginning with #."
         )
     out = [f"# {unit.get('Title', '?')}", ""]
-    out.append(_description(unit) or "(This unit has no text of its own.)")
+    out.append(_description(unit, _link_note(copy)) or "(This unit has no text of its own.)")
     topics = _flatten([unit])[1:]  # drop the heading _flatten repeats
     if topics:
         out += ["", "Contents:", *topics]
@@ -81,8 +82,8 @@ def unit_info(org_unit_id: int | str, unit_id: int, ctx: Context | None = None) 
 
 @_tool
 def get_file(
-    org_unit_id: int | str, topic_id: int, first_page: int = 1, last_page: int = 0,
-    ctx: Context | None = None,
+    org_unit_id: int | str, topic_id: int = 0, first_page: int = 1, last_page: int = 0,
+    linked: str = "", ctx: Context | None = None,
 ) -> str:
     """Fetch one content topic: a file's text, an HTML page's text, or a link's target.
 
@@ -91,9 +92,17 @@ def get_file(
     Read from the course's offline copy, like course_contents. A PDF's text
     runs from first_page to last_page (0: its last page), cut after the page
     that reaches about 25k tokens, with a note saying where to go on from.
+    A page's links to saved files are marked in its text, as [saved file:
+    topic_id 7] or [saved file: linked="_linked/..."]. For a file the course's
+    pages link to, which has no topic, pass that linked path instead of
+    topic_id; search_courses gives it too.
     """
     ou = _resolve(org_unit_id)
     copy = _course(ou, ctx)
+    if linked:
+        path = _linked_file(copy, linked)
+        return _saved_text(path, path.name, _stored_marks(path), (first_page, last_page),
+                           _link_note(copy, path))
     topic = _toc_index(copy["modules"])[0].get(topic_id)
     if topic is None:
         raise RuntimeError(
@@ -120,7 +129,7 @@ def get_file(
     saved = copy["files"].get(str(topic_id))
     if saved:
         return _saved_text(copy["root"] / saved, title, (copy.get("marks") or {}).get(str(topic_id)),
-                           (first_page, last_page))
+                           (first_page, last_page), _link_note(copy, copy["root"] / saved))
     # Not in the copy: its download failed, so try DTU Learn once more.
     r, name = _topic_fetch(ou, topic)
     return _file_text(r.content, r.headers.get("content-type", ""), name, title, pages=(first_page, last_page))
@@ -131,8 +140,8 @@ PAGE_LIMIT = 10  # ponytail: ~2k tokens a page; raise it if real questions need 
 
 @_tool
 def get_pdf_pages(
-    org_unit_id: int | str, topic_id: int, first_page: int, last_page: int = 0,
-    ctx: Context | None = None,
+    org_unit_id: int | str, topic_id: int = 0, first_page: int = 1, last_page: int = 0,
+    linked: str = "", ctx: Context | None = None,
 ) -> list[str | Image]:
     """Show pages of a PDF topic as images, for what get_file's text loses.
 
@@ -143,7 +152,8 @@ def get_pdf_pages(
     whose characters its text cannot name, so its formulas need the image.
     Then ask for only the pages that matter: an image costs about
     2k tokens against roughly 100 for the same page as text. last_page
-    defaults to first_page; at most 10 pages at a time.
+    defaults to first_page; at most 10 pages at a time. For a file the
+    course's pages link to, pass its linked path instead of topic_id.
     """
     last_page = last_page or first_page
     if not 1 <= first_page <= last_page or last_page - first_page >= PAGE_LIMIT:
@@ -153,6 +163,18 @@ def get_pdf_pages(
         )
     ou = _resolve(org_unit_id)
     copy = _course(ou, ctx)
+    if linked:
+        path = _linked_file(copy, linked)
+        title = path.name
+    else:
+        path, title = _topic_pdf(ou, copy, topic_id)
+    if path.suffix.lower() != ".pdf":
+        raise RuntimeError(f"'{title}' is {path.name}, not a PDF. get_file has its text.")
+    return _pdf_images(path, title, first_page, last_page)
+
+
+def _topic_pdf(ou: int, copy: dict, topic_id: int) -> tuple[Path, str]:
+    """A File topic's saved file and title, fetched again if its download failed."""
     topic = _toc_index(copy["modules"])[0].get(topic_id)
     if topic is None:
         raise RuntimeError(
@@ -170,9 +192,11 @@ def get_pdf_pages(
         DOWNLOADS.mkdir(parents=True, exist_ok=True)
         path = DOWNLOADS / name
         path.write_bytes(r.content)
-    if path.suffix.lower() != ".pdf":
-        raise RuntimeError(f"'{title}' is {path.name}, not a PDF. get_file has its text.")
+    return path, title
 
+
+def _pdf_images(path: Path, title, first_page: int, last_page: int) -> list[str | Image]:
+    """Pages first_page to last_page of a PDF as images, each after its label."""
     with tempfile.TemporaryDirectory() as tmp:
         # 1568 pixels on the long side is as much as a model takes in before
         # scaling an image down, so anything sharper is paid for and lost.

@@ -57,29 +57,35 @@ def _pdf_text(path: Path) -> str | None:
 
 
 class _TextExtractor(HTMLParser):
-    """Strip a D2L HTML page down to readable text."""
+    """Strip a D2L HTML page down to readable text. link, given a link's
+    href, names how to open what it points at, written after its words."""
 
-    def __init__(self):
+    def __init__(self, link=None):
         super().__init__()
-        self.parts, self.skip = [], 0
+        self.parts, self.skip, self.link, self.note = [], 0, link, None
 
     def handle_starttag(self, tag, attrs):
         if tag in ("script", "style"):
             self.skip += 1
         elif tag in ("p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4"):
             self.parts.append("\n")
+        elif tag == "a" and self.link:
+            self.note = self.link(dict(attrs).get("href") or "")
 
     def handle_endtag(self, tag):
         if tag in ("script", "style") and self.skip:
             self.skip -= 1
+        elif tag == "a" and self.note:
+            self.parts.append(f"[{self.note}]")
+            self.note = None
 
     def handle_data(self, data):
         if not self.skip and data.strip():
             self.parts.append(data.strip())
 
 
-def _html_text(html: str) -> str:
-    parser = _TextExtractor()
+def _html_text(html: str, link=None) -> str:
+    parser = _TextExtractor(link)
     parser.feed(html)
     text = re.sub(r"[ \t]+", " ", " ".join(parser.parts))
     # Joining with spaces leaves one on each side of the inserted line breaks.

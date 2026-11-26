@@ -490,6 +490,41 @@ with tempfile.TemporaryDirectory() as tmp:
     assert mod._stored_marks(root / "_linked" / "x" / "other.pdf") is None
     assert mod._stored_marks(Path(tmp) / "loose.pdf") is None
 
+# Linked files: page text marks links to saved files, and get_file opens
+# one by its linked path or its link, and nothing the copy does not list.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / "12106 Food"
+    (root / "_linked" / "enforced").mkdir(parents=True)
+    (root / "Task 2").mkdir()
+    (root / "_linked" / "enforced" / "FCR salmonids.txt").write_text("feed per kilo")
+    (root / "Task 2" / "Info.html").write_text(
+        '<p>Use <a href="../_linked/enforced/FCR%20salmonids.txt">this article</a>, '
+        '<a href="../Task%202/Slides.pdf">the slides</a> and <a href="https://x.org/">a site</a>.</p>')
+    copy = {"root": root, "modules": [{"ModuleId": 3, "Title": "Task 2", "Topics": [],
+                                       "Description": {"Text": "See notes", "Html":
+                                           '<p>See <a href="/content/enforced/FCR%20salmonids.txt">notes</a></p>'}}],
+            "files": {"5": "Task 2/Info.html", "6": "Task 2/Slides.pdf", "1/2": "Announcements/1-a.pdf"},
+            "linked": {mod.BASE + "/content/enforced/FCR%20salmonids.txt": "_linked/enforced/FCR salmonids.txt"}}
+    note = mod._link_note(copy, root / "Task 2" / "Info.html")
+    text = mod._saved_text(root / "Task 2" / "Info.html", "Info", link=note)
+    assert ('this article [saved file: linked="_linked/enforced/FCR salmonids.txt"]' in text
+            and "the slides [saved file: topic_id 6]" in text and "and a site ." in text), text
+    assert mod._link_note(copy)("/content/enforced/FCR%20salmonids.txt") == \
+        'saved file: linked="_linked/enforced/FCR salmonids.txt"'
+    assert mod._link_note(copy, root / "Task 2" / "Info.html")("../../outside.pdf") is None
+    saved_resolve, saved_course = mod._resolve, mod._course
+    mod._resolve, mod._course = (lambda ou: 326408), (lambda ou, ctx=None: copy)
+    assert mod.get_file(12106, linked="_linked/enforced/FCR salmonids.txt") == "feed per kilo"
+    assert mod.get_file(12106, linked=mod.BASE + "/content/enforced/FCR%20salmonids.txt") == "feed per kilo"
+    assert "notes [saved file: linked=" in mod.unit_info(12106, 3)
+    for bad in ("_linked/../../../etc/passwd", "Task 2/Info.html"):
+        try:
+            mod.get_file(12106, linked=bad)
+            raise AssertionError(f"{bad} is not a linked file")
+        except RuntimeError as e:
+            assert "No linked file" in str(e), e
+    mod._resolve, mod._course = saved_resolve, saved_course
+
 # A failing page analysis costs the marks, not the file or its course.
 saved_marks = mod._marks
 mod._marks = lambda path: 1 / 0

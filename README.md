@@ -226,8 +226,8 @@ online.
 | `list_courses` | Enrolled courses grouped by term, newest first |
 | `course_contents(org_unit_id)` | Unit/topic tree, with their IDs and any external links |
 | `unit_info(org_unit_id, unit_id)` | One unit's own text, plus its contents |
-| `get_file(org_unit_id, topic_id, first_page=1, last_page=0)` | A topic's content, whatever kind it is; for a PDF, from `first_page` to `last_page` |
-| `get_pdf_pages(org_unit_id, topic_id, first_page, last_page=0)` | Pages of a PDF topic as images, for figures and notation |
+| `get_file(org_unit_id, topic_id, first_page=1, last_page=0, linked="")` | A topic's content, whatever kind it is; for a PDF, from `first_page` to `last_page`. `linked` reads a file the course's pages link to instead |
+| `get_pdf_pages(org_unit_id, topic_id, first_page, last_page=0, linked="")` | Pages of a PDF topic, or a linked PDF, as images, for figures and notation |
 | `list_assignments(org_unit_id)` | Assignment folders and due dates |
 | `list_announcements(org_unit_id)` | Course announcements |
 | `get_announcement_attachment(org_unit_id, news_id, file_id, first_page=1, last_page=0)` | A file attached to an announcement, read like `get_file` |
@@ -310,7 +310,10 @@ online.
 `download_course` saves every file under `<course>/<unit>/` in the data folder,
 named after its topic so a rerun overwrites. Announcement attachments go in
 `<course>/Announcements/`, and pictures and course files that pages link to go
-in `<course>/_linked/`, with the pages pointed at the copies. Videos are left
+in `<course>/_linked/`, with the pages pointed at the copies. A page's text
+marks each link to a saved file as `[saved file: topic_id 7]` or
+`[saved file: linked="_linked/..."]`, which `get_file` and `get_pdf_pages`
+take as `linked`. Videos are left
 out (`dtumcp download_video <course> <topic>` saves one), as are links and
 broken topics. `download_term` does every course of a term, written like
 `list_courses`'s headings (`"Fall 2026"`, `"Jan 25"`); one failing course does

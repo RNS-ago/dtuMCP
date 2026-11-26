@@ -300,7 +300,7 @@ def _search_answer(query, org_unit_id: int | str = 0, limit: int = 15) -> tuple[
             "attachment": f"org_unit_id {ou}, announcement attachment "
                           f"{str(key).replace('/', ', file ')} (get_announcement_attachment)",
             "news": f"org_unit_id {ou}, announcement {key} (list_announcements)",
-        }.get(kind, f"org_unit_id {ou}; a file the course's pages link to, not readable with the tools")
+        }.get(kind, f'org_unit_id {ou}, linked="{key}" (a file the course\'s pages link to: get_file)')
         pages = ""
         if hit.get("page"):
             pages = f", page {hit['page']}" + (f"; also pages {', '.join(map(str, hit['also']))}" if "also" in hit else "")
