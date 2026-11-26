@@ -304,6 +304,9 @@ def search_courses(query: str, org_unit_id: int | str = 0, limit: int = 15, kind
     Then come those with some of the words, each saying which it lacks.
     Course material uses its own terms and abbreviations: when a search comes
     back thin, try those, or fewer words.
+    A workbook's sheets are searched only through their first 100k
+    characters, a few hundred rows: a row further down a long data sheet is
+    not found here, so look it up with get_file's find on that workbook.
     Each match comes with its course, the units above it, its kind, its best
     PDF page and others as good, the ids that get_file, unit_info,
     get_pdf_pages or get_announcement_attachment take, and the text around

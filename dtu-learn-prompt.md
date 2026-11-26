@@ -143,7 +143,12 @@ teachers actually handed me this term.
     first_page=5, last_page=5, find="adipic acid")`, which returns only the
     rows with every word, after the sheet's first rows for its column
     labels. A search hit in a workbook names its cells (`A196`), so you can
-    also ask for that row with `first_row`.
+    also ask for that row with `first_row`. But `search_courses` reads only
+    the first few hundred rows of each sheet (100k characters), so a row
+    further down a data sheet is never among its hits, and it may show
+    rows near the top that merely share your words instead. When what you
+    look for belongs in a data sheet, use `find` on that workbook rather
+    than trusting the search's silence.
   - An **HTML page** comes back as stripped text, a **link** as its target URL
     to fetch with your web tools, and a **video** as the address to watch it
     at. A video has no transcript, so tell me to watch it rather than guessing
