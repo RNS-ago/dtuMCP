@@ -698,6 +698,7 @@ mod.shutil, mod.sys = real_shutil, real_sys
 # --- _summary ----------------------------------------------------------------
 # One aligned row per course, problems under the table, one pointer to the
 # landing page. A course that failed outright gets no row.
+real_downloads = mod.DOWNLOADS  # put back after each test that stands in its own
 mod.DOWNLOADS = Path("/dl")
 assert mod._code("02249 Computationally Hard Problems, Fall 2026") == "02249"
 assert mod._code("Sustainability lab") == "Sustainability lab"
@@ -718,6 +719,7 @@ assert got == """\
 
   Open /dl/index.html to see every course.""", got
 assert mod._summary([("02242", None, [("could not download", ["timed out"])])]).startswith("  ✗ 02242")
+mod.DOWNLOADS = real_downloads
 
 # --- offline copies ------------------------------------------------------------
 # The reading tools find a course's newest copy by its id, and read saved files
@@ -744,6 +746,7 @@ with tempfile.TemporaryDirectory() as tmp:
     (root / "blob.bin").write_bytes(b"\x89PNG\x00\xff")
     got = mod._saved_text(root / "blob.bin", "blob")
     assert got.startswith("No text could be extracted from blob.bin"), got
+mod.DOWNLOADS = real_downloads
 assert mod._decode("æ".encode("cp1252"), "text/plain; charset=windows-1252") == "æ"
 assert mod._decode(b"x", "text/plain; charset=nonsense") == "x"
 
@@ -1260,6 +1263,7 @@ with tempfile.TemporaryDirectory() as tmp:
         assert False
     except RuntimeError as e:
         assert "Course 02231 is not downloaded" in str(e), e
+mod.DOWNLOADS = real_downloads
 
 # A linked file that is a topic's file points at the topic's copy and is
 # deleted; one that differs, or is empty like some unrelated topic, stays.
