@@ -860,6 +860,39 @@ page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join
 ]) + "</page>")
 fonts.update({"26": (18, "AB+CMSY10")})
 assert mod._rebuild_page(page, fonts, [], 1).split()[-4:] == ["f:", "ℕ", "↦", "ℕ"], mod._rebuild_page(page, fonts, [], 1)
+# TeX's ∉ can be ∈ with a / set on it (p43); a fraction's exponent is the
+# whole fraction's (p24).
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 700, 16, 20, "plenty of text at the page's own size, which is 18"),
+    run(906, 490, 10, 16, 21, "X"), run(906, 512, 9, 16, 21, "/"), run(905, 510, 12, 17, 26, "∈"),
+    run(906, 530, 11, 16, 21, "P"),
+    run(972, 169, 6, 11, 24, "1"), run(986, 169, 6, 11, 24, "2"), run(969, 177, 8, 11, 22, "n"),
+]) + "</page>")
+text = mod._rebuild_page(page, fonts, [(168, 176, 982.0, 0.0)], 1)
+assert "X ∉ P" in " ".join(text.split()) and text.split()[-1] == "(1/2)^n", text
+# TeX's big brackets hang below their short CMEX box, so they and their
+# exponent stay on the formula's line, not the line above (Lecture Notes p80).
+page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+    run(100, 100, 700, 16, 20, "plenty of text at the page's own size, which is 18"),
+    run(140, 121, 39, 16, 20, "Thus"),
+    run(174, 454, 9, 16, 20, "1"), run(173, 467, 14, 17, 26, "−"), run(160, 485, 13, 8, 23, "("),
+    run(162, 499, 9, 16, 21, "k"), run(161, 513, 14, 17, 26, "−"), run(162, 531, 8, 16, 21, "z"),
+    run(169, 539, 5, 11, 22, "j"), run(186, 518, 9, 16, 21, "k"), run(160, 548, 13, 8, 23, ")"),
+    run(157, 561, 7, 11, 22, "k"), run(174, 577, 5, 16, 20, "."),
+]) + "</page>")
+lines = [" ".join(line.split()) for line in mod._rebuild_page(page, fonts, [(498, 545, 182.1, 0.0)], 1).splitlines()]
+assert lines[-2:] == ["Thus", "1 − ((k−z_j)/k )^k ."], lines
+# Small text joins a line only beside text it overlaps: the next step of a
+# slide's box starts its own line, though it begins where the last one's
+# number ends (02231 security definitions p37).
+page = mod.ET.fromstring("<page number='1' width='1400' height='800'>" + "".join([
+    run(100, 100, 900, 42, 0, "plenty of text at the page's own size, which is 42"),
+    run(367, 159, 47, 27, 40, "2.  "), run(366, 206, 156, 27, 2, "𝑐 ← 𝐸𝑛𝑐(𝑘, 𝑚"),
+    run(399, 203, 125, 27, 40, "3. Output "), run(399, 329, 12, 27, 2, "𝑐"),
+]) + "</page>")
+fonts.update({"0": (42, "AB+CambriaMath"), "2": (27, "AB+CambriaMath"), "40": (27, "AB+Calibri")})
+lines = [" ".join(line.split()) for line in mod._rebuild_page(page, fonts, [], 1).splitlines()]
+assert lines[-2:] == ["2. 𝑐 ← 𝐸𝑛𝑐(𝑘, 𝑚", "3. Output 𝑐"], lines
 # TeX's \not strikes the sign after it, not the space before (Lecture Notes p17).
 page = mod.ET.fromstring("<page number='1' width='900' height='1200'>"
                          + run(100, 100, 300, 16, 20, "v ̸= w and x ̸∈ L") + "</page>")

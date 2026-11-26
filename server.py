@@ -1203,8 +1203,20 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
             text = text.replace("7→", "↦")
         big = text.strip() in BIG_OPERATORS
         runs.append(dict(text=text, top=top, left=left, right=left + width, w=width, h=height,
-                         mid=top + height / 2, size=size, big=big, math=bool(MATH_FONT.search(family)),
+                         # CMEX's tall brackets and operators hang well below their short box
+                         mid=top + (0.75 * size if "CMEX" in family and (big or text.strip() in "()[]{}⟨⟩⌊⌋⌈⌉")
+                                    else height / 2), size=size, big=big,
+                         math=bool(MATH_FONT.search(family)),
                          piece=not big and (set(text.strip()) <= DELIMITER_PIECES or "CMEX" in family)))
+    # A / set over a sign strikes it out, as TeX writes ∉: ∈ with / on it.
+    for r in [r for r in runs if r["text"].strip() == "/"]:
+        sign = next((b for b in runs if b is not r and b["text"].strip() in "∈∋=≡<>≤≥⊂⊃⊆⊇∼≃≅≈|∃" and b["text"].strip()
+                     and b["left"] - 3 <= r["left"] and r["right"] <= b["right"] + 3
+                     and b["top"] < r["top"] + r["h"] and r["top"] < b["top"] + b["h"]), None)
+        if sign:
+            sign["text"] = sign["text"].replace(sign["text"].strip(),
+                                                unicodedata.normalize("NFC", sign["text"].strip() + "̸"))
+            runs.remove(r)
     if not runs:
         return ""
 
@@ -1444,7 +1456,10 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
             r["kind"] = "_" if r["mid"] > mid else "^"
             near["runs"].append(r)
         elif near and abs(near["mid"] - r["mid"]) <= line_h and (r.get("fraction") or any(
-                -touch <= r["left"] - b["right"] <= touch for b in near["runs"])):
+                -touch <= r["left"] - b["right"] <= touch  # overlapping it, unless its box is CMEX's short one
+                and (b["piece"] or b["big"] or r["text"].strip() in PRIMES
+                     or b["top"] < r["top"] + r["h"] and r["top"] < b["top"] + b["h"])
+                for b in near["runs"])):
             near["runs"].append(r)  # a smaller fraction, or text just inside a bracket: in the line
         elif (own := next((line for line in lines if line.get("own") and abs(line["mid"] - r["mid"]) <= 0.6 * r["h"]), None)):
             own["runs"].append(r)
@@ -1455,12 +1470,15 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
     column = body * 0.45  # pixels to a character, near pdftotext -layout's spacing
     out = []
     for line in lines:
-        text, end, group = "", None, []
+        text, end, group, last = "", None, [], None
         for r in sorted(line["runs"], key=lambda r: (r["left"], r["top"])) + [None]:
             kind = r and (None if r["text"].strip() in PRIMES else r.get("kind"))
             if group and (r is None or kind != group[0]["kind"] or r["left"] - end > 3 and not r.get("summand")):
+                if group[0]["kind"] == "^" and last and last.get("fraction") and text.endswith(last["text"]):
+                    # a fraction's script is the whole fraction's: (1/2)^n, not 1/2^n
+                    text = f"{text[:-len(last['text'])]}({last['text']})"
                 text += _script(_nest(group), group[0]["kind"])
-                group = []
+                group, last = [], None
             if r is None:
                 break
             if kind:
@@ -1472,6 +1490,7 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
                 elif (r["left"] - end > 0.2 * r["size"] or r.get("spaced")) and r["text"].strip() not in PRIMES:
                     text += " " * max(1, at - len(text)) if r["left"] - end > 2 * column else " "
                 text += r["text"]
+                last = r
                 if r["big"] and (r.get("under") or r.get("over")):
                     for side, mark in (("under", "_"), ("over", "^")):
                         if r[side]:
