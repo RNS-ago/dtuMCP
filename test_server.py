@@ -414,6 +414,73 @@ try:
 except RuntimeError as e:
     assert str(e) == "Session rejected" and not mod._job, e
 
+# A finished download nobody collected does not block the next one: its
+# summary comes back with the next call's.
+gate.clear()
+got = mod._background("course 3", "course 3", "download_course(3)", slow, object())
+assert "still running" in got, got
+gate.set()
+mod._job["now"]["done"].wait(5)
+got = mod._background("course 4", "course 4", "download_course(4)", lambda report: "summary 4", object())
+assert got == "The earlier download of course 3 finished:\nsummary\n\nsummary 4" and not mod._job, got
+
+# A course read with no copy shares download_course's background job, so a
+# second read does not start a second download of the course.
+saved_copy, saved_download, store, runs = mod._copy, mod._download, {}, []
+gate.clear()
+
+
+def fake_download(ou, prefix="", report=lambda text: None):
+    runs.append(ou)
+    gate.wait(5)
+    store[ou] = {"ou": ou}
+    return "02231", None, []
+
+
+mod._copy, mod._download = store.get, fake_download
+for _ in range(2):
+    try:
+        mod._course(5, object())
+        raise AssertionError("the read should say the download is still running")
+    except RuntimeError as e:
+        assert "Course 5 has no offline copy yet" in str(e) and "download_course(5)" in str(e), e
+gate.set()
+assert mod._course(5, object()) == {"ou": 5} and runs == [5] and not mod._job, runs
+
+# A read that finds another course's download finished leaves its summary
+# waiting: the next download call gets it, and nothing downloads again.
+gate.clear()
+got = mod._background("course 6", "course 6", "download_course(6)", slow, object())
+assert "still running" in got, got
+gate.set()
+mod._job["now"]["done"].wait(5)
+assert mod._course(7, object()) == {"ou": 7} and "course 6" in mod._waiting
+got = mod._background("course 6", "course 6", "download_course(6)", lambda report: 1 / 0, object())
+assert got == "summary" and not mod._waiting and not mod._job, got
+gate.clear()
+got = mod._background("course 8", "course 8", "download_course(8)", slow, object())
+gate.set()
+mod._job["now"]["done"].wait(5)
+mod._course(9, object())
+got = mod._background("course 10", "course 10", "download_course(10)", lambda report: "summary 10", object())
+assert got == "The earlier download of course 8 finished:\nsummary\n\nsummary 10" and not mod._waiting, got
+mod._copy, mod._download = saved_copy, saved_download
+
+# Two topics of one unit with one title keep a file each, told apart by id.
+saved_fetch = mod._topic_fetch
+mod._topic_fetch = lambda ou, topic, client: (types.SimpleNamespace(content=b"x"), "s.txt")
+with tempfile.TemporaryDirectory() as tmp:
+    plain, _ = mod._save_topic(None, 1, Path(tmp), ("Week 1",), {"TopicId": 7, "Title": "Slides"})
+    own, _ = mod._save_topic(None, 1, Path(tmp), ("Week 1",), {"TopicId": 8, "Title": "Slides"}, True)
+    assert (plain.name, own.name) == ("Slides.txt", "Slides (8).txt"), (plain, own)
+mod._topic_fetch = saved_fetch
+
+# A failing page analysis costs the marks, not the file or its course.
+saved_marks = mod._marks
+mod._marks = lambda path: 1 / 0
+assert mod._page_marks(Path("x.pdf")) == {}
+mod._marks = saved_marks
+
 # --- _search_pages ----------------------------------------------------------
 with tempfile.TemporaryDirectory() as tmp:
     pptx = Path(tmp) / "s.pptx"
@@ -694,6 +761,8 @@ xml = ("<pdf2xml><page number='1'><fontspec id='0' size='20' family='AAAAAW+Camb
 assert mod._font_pages(xml, {"AAAAAW+CambriaMath"}) == {2} and mod._font_pages("<", {"x"}) == set()
 assert mod._numbered_pages("a\fb\f", {"math": [2], "symbols": [2]}) == ["[Page 1]\na", "[Page 2, has math, unreadable symbols]\nb"]
 # bfrange entries are read too, as a run and as a list.
+assert mod._cmap_entries(b"beginbfchar <41> <041> endbfchar") == {0x41: "�"}  # odd digits: broken, not fatal
+assert mod._delimiter([(10, 0), (10, 10), (10, 20), (10, 0)], False) is None  # zero width: no division by 0
 assert mod._cmap_entries(b"beginbfrange <41> <43> <0061> <44> <45> [<03B1> <03B2>] endbfrange") == {
     0x41: "a", 0x42: "b", 0x43: "c", 0x44: "α", 0x45: "β"}
 # _save keeps a patched PDF only when poppler reads it with as many pages.

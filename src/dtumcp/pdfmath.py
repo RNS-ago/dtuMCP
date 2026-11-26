@@ -1,6 +1,7 @@
 """PDF pages: fonts, TeX glyph maps, formulas written out and figures."""
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -59,7 +60,20 @@ def _page_marks(path: Path) -> dict:
     map, see _unmapped_fonts). Worked out when a course downloads and kept in
     its record, since the drawing pass takes seconds on a long PDF. A poppler
     tool that is missing leaves its kind out. The math pages' formulas are
-    rebuilt on the way (_write_math_text), from the same poppler output."""
+    rebuilt on the way (_write_math_text), from the same poppler output.
+    None found when the analysis fails: one odd PDF must not fail a course."""
+    try:
+        return _marks(path)
+    except Exception:  # best effort: what is lost is page headings, not the file
+        return {}
+
+
+def _pdf_hidden(path: Path) -> list:
+    """A PDF's text set at size 0 (_hidden_text), without _page_marks' slow passes."""
+    return _hidden_text(_poppler("pdftohtml", "-xml", "-i", "-stdout", "-q", path))
+
+
+def _marks(path: Path) -> dict:
     xml = _poppler("pdftohtml", "-xml", "-i", "-stdout", "-q", path)
     math, pages = _math_pages(xml)
     with tempfile.TemporaryDirectory() as tmp:
@@ -68,7 +82,10 @@ def _page_marks(path: Path) -> dict:
         drawing, rules, width, delimiters = _drawing_pages(svg) if svg.exists() else (set(), [], 0.0, [])
     images = _picture_pages(_poppler("pdfimages", "-list", path, timeout=60), pages)
     words = _word_boxes(_poppler("pdftotext", "-bbox", path, "-")) if math else []
-    _write_math_text(path, xml, math, rules, width, delimiters, words)
+    try:
+        _write_math_text(path, xml, math, rules, width, delimiters, words)
+    except OSError:  # no rebuilt math beside the PDF; its marks still count
+        pass
     try:
         symbols = _font_pages(xml, _unmapped_fonts(path.read_bytes()))
     except OSError:
@@ -170,7 +187,10 @@ def _pdf_stream(body: bytes) -> bytes | None:
 
 
 def _utf16(hex_digits: bytes) -> str:
-    return bytes.fromhex(hex_digits.decode()).decode("utf-16-be", "replace")
+    try:
+        return bytes.fromhex(hex_digits.decode()).decode("utf-16-be", "replace")
+    except ValueError:  # an odd number of digits: a broken map, read as broken text is
+        return "\ufffd"
 
 
 def _cmap_entries(cmap: bytes) -> dict:
@@ -307,17 +327,26 @@ def _save(dest: Path, content: bytes) -> None:
     pages as before. Done to every PDF as it is saved, so two downloads of one
     file stay byte for byte alike for _dedupe_linked."""
     dest.write_bytes(content)
-    if dest.suffix.lower() != ".pdf" or (patched := _tex_maps(content)) is content:
+    if dest.suffix.lower() != ".pdf":
+        return
+    try:
+        patched = _tex_maps(content)
+    except Exception:  # best effort: the file as sent is kept
+        return
+    if patched is content:
         return
     pages = re.compile(r"^Pages:\s+(\d+)", re.M)
-    part = dest.with_name(dest.name + ".part")
-    part.write_bytes(patched)
+    # A name of its own, so two writers of one file never share a .part.
+    fd, name = tempfile.mkstemp(prefix=dest.name + ".", suffix=".part", dir=dest.parent)
+    part = Path(name)
+    with os.fdopen(fd, "wb") as f:
+        f.write(patched)
     before = pages.search(_poppler("pdfinfo", dest))
     after = pages.search(_poppler("pdfinfo", part))
     if before and after and before.group(1) == after.group(1):
         part.replace(dest)
     else:
-        part.unlink()
+        part.unlink(missing_ok=True)
 
 
 # TeX's math fonts (Computer Modern, AMS, Fraktur, script) and any font named
@@ -889,7 +918,7 @@ def _delimiter(points: list, curved: bool) -> str | None:
     xs, ys = [x for x, _ in points], [y for _, y in points]
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
     w, h = x1 - x0, y1 - y0
-    if h < 6 or h < 2 * w:
+    if h < 6 or h < 2 * w or w <= 0:  # w 0: a zero-width rule draws nothing
         return None
     edges = list(zip(points, points[1:] + points[:1]))
     ink = abs(sum(a[0] * b[1] - b[0] * a[1] for a, b in edges)) / 2 / (w * h)

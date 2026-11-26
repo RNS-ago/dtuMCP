@@ -144,7 +144,11 @@ def main() -> None:
             raise SystemExit(0)
         if name not in COMMANDS:
             raise SystemExit(f"Unknown command {name!r}.\n\n{_usage()}")
-        args = [int(a) if a.lstrip("-").isdigit() else a for a in sys.argv[2:]]
+        # Numbers only where the command takes an int: download_term "2026"
+        # stays text, and a course number keeps its leading 0.
+        params = list(inspect.signature(COMMANDS[name]).parameters.values())
+        args = [int(a) if a.lstrip("-").isdigit() and i < len(params) and params[i].annotation in (int, "int")
+                else a for i, a in enumerate(sys.argv[2:])]
         try:
             # Let inspect report a wrong argument count instead of a traceback.
             inspect.signature(COMMANDS[name]).bind(*args)

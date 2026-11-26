@@ -167,15 +167,17 @@ def _course_name(ou: int) -> str:
     return str(ou)
 
 
-def _save_topic(client, ou: int, root: Path, parents: tuple, topic) -> tuple:
+def _save_topic(client, ou: int, root: Path, parents: tuple, topic, own_id: bool = False) -> tuple:
     try:
         r, name = _topic_fetch(ou, topic, client)
     except (RuntimeError, httpx.HTTPError) as e:
         return None, f"{topic.get('Title', topic['TopicId'])}: {e}"
     # Named after the topic, which is what the course tree calls it, with the
     # extension off the server's filename. Two runs then overwrite rather than
-    # pile up copies.
-    dest = root.joinpath(*parents, _safe(topic.get("Title", "")) + Path(name).suffix)
+    # pile up copies. own_id adds the topic id, for a title another topic of
+    # the unit shares, which would otherwise overwrite this one's file.
+    stem = _safe(topic.get("Title", "")) + (f" ({topic['TopicId']})" if own_id else "")
+    dest = root.joinpath(*parents, stem + Path(name).suffix)
     dest.parent.mkdir(parents=True, exist_ok=True)
     _save(dest, r.content)
     return dest, None

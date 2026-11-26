@@ -22,7 +22,7 @@ from mcp.server.mcpserver import Context
 from .app import DOWNLOADS, LE
 from .client import _client, _get
 from .courses import _copy
-from .pdfmath import _page_marks
+from .pdfmath import _page_marks, _pdf_hidden
 from .files import (
     REFERENCE, _course_name, _d2l_file, _dedupe_linked, _file_topics, _relink, _safe,
     _save_attachment, _save_linked, _save_topic,
@@ -34,13 +34,20 @@ from .search import _index, _sync_index
 def _course(ou: int, ctx: Context | None = None) -> dict:
     """A course's offline copy, downloading the course first if it has none.
     Course material is read from the copy once it exists, so the first read
-    of a course is slow and every later one is local."""
-    # ponytail: two first reads of one course at once both download it; the
-    # second overwrites the first with the same files. Lock per course if
-    # that ever costs more than the wait.
+    of a course is slow and every later one is local. For an MCP client the
+    download goes through _background, as download_course's does: it shares
+    a download already running and leaves a long one in the background."""
     copy = _copy(ou)
     if copy is None:
-        _download(ou, report=_reporter(ctx))
+        if ctx is None:
+            _download(ou)
+        else:
+            # collect=False: a read has no room for other downloads' summaries,
+            # so they wait in _waiting for a download tool to give them.
+            note = _background(f"course {ou}", f"course {ou}", f"download_course({ou})",
+                               lambda report: _summary([_download(ou, report=report)]), ctx, collect=False)
+            if _copy(ou) is None:  # still running, or another download is
+                raise RuntimeError(f"Course {ou} has no offline copy yet. {note}")
         copy = _copy(ou)
     return copy
 
@@ -50,47 +57,75 @@ def _course(ou: int, ctx: Context | None = None) -> dict:
 # leaves the download running; calling again picks it up.
 JOB_WAIT = 110
 _job = {}  # the download running in the background, if any
+_waiting = {}  # finished downloads nobody has collected yet, by key
+_job_lock = threading.Lock()  # MCP runs sync tools in parallel threads
+_course_locks = {}  # one per org unit id: two downloads of a course write the same files
 
 
-def _background(key: str, label: str, call: str, work, ctx: Context | None) -> str:
+def _start(key: str, label: str, call: str, work) -> dict:
+    """Start work(report) in a thread as the background job. Called holding _job_lock."""
+    job = {"key": key, "label": label, "call": call, "last": "", "start": time.monotonic(),
+           "done": threading.Event()}
+
+    def run():
+        try:
+            job["result"] = work(lambda text: job.__setitem__("last", text))
+        except Exception as e:  # handed to the call that collects it
+            job["error"] = e
+        finally:
+            job["done"].set()
+
+    _job["now"] = job
+    threading.Thread(target=run, daemon=True).start()
+    return job
+
+
+def _background(key: str, label: str, call: str, work, ctx: Context | None, collect: bool = True) -> str:
     """Run work(report) -- a download -- and return what it returns. From
     the command line it simply runs. For an MCP client it runs in a thread,
     one at a time, and the call waits up to JOB_WAIT seconds for it; if it
     is still going, the call says so and the next call with the same key
-    waits on, and returns its summary once done."""
+    waits on, and returns its summary once done. A finished download nobody
+    collected does not block another key: it moves to _waiting, where a call
+    with its key gets its summary, and a collect call puts every waiting
+    summary ahead of its own."""
     if ctx is None:
         return work(lambda text: None)
-    job = _job.get("now")
-    if job and job["key"] != key:
-        return (f"Another download, {job['label']}, is still running. Wait for it with "
-                f"{job['call']} before starting this one.")
-    if not job:
-        job = {"key": key, "label": label, "call": call, "last": "", "start": time.monotonic(),
-               "done": threading.Event()}
-
-        def run():
-            try:
-                job["result"] = work(lambda text: job.__setitem__("last", text))
-            except Exception as e:  # handed to the call that collects it
-                job["error"] = e
-            finally:
-                job["done"].set()
-
-        _job["now"] = job
-        threading.Thread(target=run, daemon=True).start()
+    with _job_lock:
+        job, earlier = _job.get("now"), ""
+        if job and job["key"] != key and job["done"].is_set():
+            _waiting[job["key"]] = _job.pop("now")
+            job = None
+        if not job and key in _waiting:  # finished, not yet collected: its result, once
+            job = _waiting.pop(key)
+        if collect:
+            earlier = "".join(
+                f"The earlier download of {w['label']} failed: {w['error']}\n\n" if "error" in w
+                else f"The earlier download of {w['label']} finished:\n{w['result']}\n\n"
+                for w in _waiting.values())
+            _waiting.clear()
+        if job and job["key"] != key:
+            return (f"{earlier}Another download, {job['label']}, is still running. Wait for it with "
+                    f"{job['call']} before starting this one.")
+        if not job:
+            job = _start(key, label, call, work)
     report, sent, until = _reporter(ctx), None, time.monotonic() + JOB_WAIT
     while not job["done"].wait(1) and time.monotonic() < until:
         if job["last"] != sent:
             sent = job["last"]
             report(sent)
     if not job["done"].is_set():
-        return (f"The download of {label} is still running after {int(time.monotonic() - job['start'])} s"
+        return (f"{earlier}The download of {label} is still running after {int(time.monotonic() - job['start'])} s"
                 f"{': ' + job['last'].strip() if job['last'].strip() else ''}. It goes on in the background. "
                 f"Call {call} again for its progress, and its summary once it is done.")
-    _job.pop("now", None)
+    with _job_lock:
+        if _job.get("now") is job:  # a parallel call may have collected it already
+            _job.pop("now")
     if "error" in job:
+        if earlier:
+            raise RuntimeError(f"{earlier}{job['error']}") from job["error"]
         raise job["error"]
-    return job["result"]
+    return earlier + job["result"]
 
 
 COLUMNS = ("files", "pictures", "announcements", "links", "videos", "broken")
@@ -166,7 +201,21 @@ def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
     """download_course's work, for one org unit id. prefix leads the status
     line, so a term download can say which course of how many it is on.
     report gets the same line as plain text, for _reporter. Returns a row
-    for _summary: the course number, its counts and its problems."""
+    for _summary: the course number, its counts and its problems. Two
+    downloads of one course in this process take turns."""
+    with _course_locks.setdefault(ou, threading.Lock()):
+        return _fetch_course(ou, prefix, report)
+
+
+def _without_hidden(texts: list, hidden: list) -> None:
+    """Take text set at size 0 (_hidden_text, as [page, text] pairs) out of
+    a file's search text, a string per page, in place."""
+    for n, text in hidden:
+        if 0 < n <= len(texts or ()):
+            texts[n - 1] = texts[n - 1].replace(" ".join(text.split()), "").strip()
+
+
+def _fetch_course(ou: int, prefix: str, report) -> tuple:
     name = _course_name(ou)
 
     def say(what, done=0, total=0):
@@ -189,7 +238,12 @@ def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
     # ponytail: eight at a time; a course is a few hundred files at most, so
     # nothing here needs a rate limiter or a resumable queue.
     with _client() as c, ThreadPoolExecutor(max_workers=8) as pool:
-        tasks = [partial(_save_topic, c, ou, root, *job) for job in jobs]
+        # Saved by title, so titles one unit shares (also once cut to length,
+        # or differing only in case) get their topic ids too.
+        place = [tuple(p.lower() for p in parents) + (_safe(t.get("Title", "")).lower(),)
+                 for parents, t in jobs]
+        shared = Counter(place)
+        tasks = [partial(_save_topic, c, ou, root, *job, shared[at] > 1) for job, at in zip(jobs, place)]
         tasks += [partial(_save_attachment, c, ou, root, *job) for job in atts]
         results = _each(pool, lambda task: task(), tasks, "files", say)
 
@@ -204,9 +258,7 @@ def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
         marks = dict(zip((key for key, _ in pdfs),
                          _each(pool, lambda job: _page_marks(job[1]), pdfs, "figures and math", say)))
         for key, found in marks.items():  # hidden text is left out of search too (_hidden_text)
-            for n, hidden in found.get("hidden", ()):
-                if 0 < n <= len(texts.get(key) or ()):
-                    texts[key][n - 1] = texts[key][n - 1].replace(" ".join(hidden.split()), "").strip()
+            _without_hidden(texts.get(key), found.get("hidden", ()))
         html, docs = _index_html(name, ou, modules, news, index, texts)
         # The index and every saved HTML page can show pictures and link to
         # files in D2L's file area. Fetch each of those once, then point the
@@ -231,11 +283,17 @@ def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
         # may reach one file, which is searched once.
         topic_files = set(saved_files)
         own = list(dict.fromkeys(d for d in linked.values() if d not in topic_files))
+        def linked_text(dest):  # with its hidden text left out, as a topic's is
+            found = _search_pages(dest)
+            if found and dest.suffix.lower() == ".pdf":
+                _without_hidden(found, _pdf_hidden(dest))
+            return found
+
         docs += [
             _search_entry(dest.name, quote(dest.relative_to(root).as_posix()),
                           dest.suffix[1:].upper() or "file", found)
             for dest, found in zip(own, _each(
-                pool, _search_pages, own, "search text of linked files", say))
+                pool, linked_text, own, "search text of linked files", say))
             if found
         ]
     say("writing the pages")
