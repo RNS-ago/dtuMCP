@@ -679,6 +679,7 @@ class Tty(io.StringIO):
     def isatty(self):
         return True
 
+real_shutil, real_sys = mod.shutil, mod.sys  # put back after, for the tests below
 mod.shutil = types.SimpleNamespace(get_terminal_size=lambda: os.terminal_size((11, 24)))
 os.environ.pop("NO_COLOR", None)
 mod.sys = types.SimpleNamespace(stderr=Tty())
@@ -692,6 +693,7 @@ del os.environ["NO_COLOR"]
 mod.sys = types.SimpleNamespace(stderr=io.StringIO())
 mod._status(("1", "files 3/9"))
 assert mod.sys.stderr.getvalue() == ""
+mod.shutil, mod.sys = real_shutil, real_sys
 
 # --- _summary ----------------------------------------------------------------
 # One aligned row per course, problems under the table, one pointer to the
@@ -1277,7 +1279,6 @@ with tempfile.TemporaryDirectory() as tmp:
     assert not copy.exists() and other.exists() and hollow.exists()
 
 # Saved courses live in the platform's data folder.
-mod.sys = __import__("sys")  # tests above stand in their own
 assert mod._data_dir().parts[-2:] == ("dtumcp", "courses")
 
 # --- _file_text: a PDF with no text says why ------------------------------
