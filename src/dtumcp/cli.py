@@ -62,6 +62,8 @@ def _usage() -> str:
         "      Print a saved file's text, as get_file does a topic's",
         "  --json <command> [arguments]",
         "      Print a command's result as MCP content blocks, images included",
+        "  <command> --args '<JSON object>'",
+        "      Take the command's arguments by name, as LearnHarness passes them",
         "",
         "With no command, runs as an MCP server on stdin/stdout, which is how",
         "Claude Code, Cursor and other MCP clients start it.",
@@ -153,13 +155,26 @@ def main() -> None:
         params = list(inspect.signature(COMMANDS[name]).parameters.values())
         args = [int(a) if a.lstrip("-").isdigit() and i < len(params) and params[i].annotation in (int, "int")
                 else a for i, a in enumerate(sys.argv[2:])]
+        named = {}
+        if sys.argv[2:3] == ["--args"] and len(sys.argv) == 4:
+            # The arguments by name, as one JSON object: how the LearnHarness
+            # plugin calls, so a tools.json older than this dtumcp can lack an
+            # argument but never put a value in another's place. null is left
+            # to the default, and ctx is the MCP server's alone.
+            try:
+                named = json.loads(sys.argv[3])
+            except ValueError as e:
+                raise SystemExit(f"{name}: --args takes a JSON object: {e}")
+            if not isinstance(named, dict):
+                raise SystemExit(f"{name}: --args takes a JSON object, not {sys.argv[3]}")
+            args, named = [], {k: v for k, v in named.items() if v is not None and k != "ctx"}
         try:
             # Let inspect report a wrong argument count instead of a traceback.
-            inspect.signature(COMMANDS[name]).bind(*args)
+            inspect.signature(COMMANDS[name]).bind(*args, **named)
         except TypeError as e:
             raise SystemExit(f"{name}: {e}\n\n{_usage()}")
         try:
-            result = COMMANDS[name](*args)
+            result = COMMANDS[name](*args, **named)
         except RuntimeError as e:
             # Expired sessions, unknown course ids and the like are ordinary
             # outcomes here; a traceback only buries the message.

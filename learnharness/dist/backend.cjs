@@ -362,14 +362,14 @@ exports.activate = ctx => {
 					const hits = found.hits.map(({ ou, title, kind, page, course, where, target, missing }) => ({ ou, title, kind, page, course, where, target, missing }));
 					return { content: [{ type: "text", text }], details: { total: found.total, hits } };
 				}
-				// The command line takes arguments in order, so a left-out
-				// optional one is filled with its default. --json returns MCP
-				// content blocks, which have the shape of native ones: text,
-				// and page images from get_pdf_pages.
-				const props = Object.entries(tool.parameters.properties ?? {});
-				const args = props.map(([key, p]) => input?.[key] ?? p.default ?? "");
+				// By name, as one JSON object (--args), so a tools.json older
+				// than the installed dtumcp can only lack an argument, never
+				// put a value in another's place. --json returns MCP content
+				// blocks, which have the shape of native ones: text, and page
+				// images from get_pdf_pages.
+				const named = JSON.stringify(input && typeof input === "object" ? input : {});
 				// No details: the plugin's card, or else the host's, reads the content.
-				return { content: JSON.parse(await run(["--json", tool.name, ...args], signal)), details: undefined };
+				return { content: JSON.parse(await run(["--json", tool.name, "--args", named], signal)), details: undefined };
 			},
 		})),
 	});

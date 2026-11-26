@@ -580,6 +580,21 @@ with tempfile.TemporaryDirectory() as tmp:
     answers = [json.loads(line) for line in done.stdout.splitlines()]
     assert [a["id"] for a in answers] == [None, None, 3] and "error" in answers[0] and "result" in answers[2], done
 
+# --args takes a command's arguments by name, as one JSON object; null is
+# the default, and ctx is not the caller's to give.
+with tempfile.TemporaryDirectory() as tmp:
+    def cli(*argv):
+        return subprocess.run(
+            [sys.executable, "-c", "import sys; from dtumcp.cli import main; sys.argv[0] = 'dtumcp'; main()", *argv],
+            capture_output=True, text=True, timeout=60, env={**os.environ, "DTU_DOWNLOADS": tmp})
+    done = cli("search_courses", "--args", '{"limit": 3, "query": "feed", "org_unit_id": null, "ctx": 1}')
+    assert done.returncode == 0 and "No course is downloaded yet" in done.stdout, done
+    done = cli("--json", "search_courses", "--args", '{"query": "feed"}')
+    assert json.loads(done.stdout)[0]["type"] == "text", done
+    for bad, says in [("[1]", "takes a JSON object"), ("{", "takes a JSON object"), ('{"query": "x", "nope": 1}', "unexpected keyword")]:
+        done = cli("search_courses", "--args", bad)
+        assert done.returncode and says in done.stderr, (bad, done)
+
 # A failing page analysis costs the marks, not the file or its course.
 saved_marks = mod._marks
 mod._marks = lambda path: 1 / 0
