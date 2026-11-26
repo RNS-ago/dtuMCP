@@ -1,89 +1,42 @@
-"""Self-checks for the pure logic in server.py. Run: uv run test_server.py"""
-import ast
-import configparser
-import datetime as datetime_module
+"""Self-checks for the pure logic in the dtumcp package. Run: uv run test_server.py"""
+import importlib
 import io
 import json
 import os
-from urllib.parse import quote, unquote, urlparse
-import re
-import subprocess
+from urllib.parse import quote
 import tempfile
 import time
 import types
 import zipfile
-from html import escape, unescape
-from html.parser import HTMLParser
 from pathlib import Path
 
-# Load the functions under test without importing the mcp dependency.
-tree = ast.parse(open("server.py", encoding="utf-8").read())
-wanted = {"_flatten", "_profiles", "_pick_browser", "_pasted_cookies", "_cookies_from_chrome", "_term", "_pdf_text", "_TextExtractor",
-          "_html_text", "_urn_kind", "_ooxml_text", "_description",
-          "_calendar_lines", "_local", "_safe", "_file_topics", "_index_html",
-          "_d2l_file", "_linked_dest", "_dedupe_linked", "_relink",
-          "_search_pages", "_search_entry", "_landing_html",
-          "_each", "_status", "_summary", "_code",
-          "_copies", "_copy", "_data_dir", "_saved_text", "_file_text", "_decode",
-          "_numbered_pages", "_poppler", "_picture_pages", "_page_marks", "_math_pages",
-          "_hidden_text", "_figure_shape", "_delimiters", "_delimiter", "_drawing_pages", "_displayed", "_rule", "_script", "_nest",
-          "_rebuild_page", "_write_math_text", "_math_text", "_pdf_objects", "_pdf_stream",
-          "_utf16", "_cmap_entries", "_cmap", "_tex_maps", "_unmapped_fonts", "_font_pages", "_word_boxes", "_save", "_rich", "_group_rows",
-          "_humps", "_parts", "_terms", "_index", "_drop_course", "_index_course", "_sync_index",
-          "_search_docs", "_search", "_search_answer", "search_courses", "_background", "_number"}
-constants_extra = {"OOXML_MEMBERS"}
-constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT", "INDEX_VERSION", "INDEX_SCHEMA", "INDEX_WEIGHTS",
-             "MATH_FONT", "SVG", "SVG_HIDDEN", "NUMBER",
-             "OMX", "CAPITALS", "TEX_GLYPHS", "CAMBRIA", "OFFICE_NARY", "PIECES", "PDF_OBJECT", "HEX",
-             "BIG_OPERATORS", "PRIMES", "TEX_EXTENSION", "DELIMITER_PIECES", "WORD_BOX", "ACCENTS", "MATH_TEXT", "MATH_NOTATION", "JOB_WAIT", "_job"}
+MODULES = [importlib.import_module(f"dtumcp.{name}") for name in (
+    "app", "text", "client", "pdfmath", "courses", "files", "index_page",
+    "search", "download", "video", "tools", "auth", "cli")]
 
 
-def needed(node):
-    if getattr(node, "name", None) in wanted:
-        return True
-    targets = getattr(node, "targets", [])
-    return any(getattr(t, "id", None) in constants for t in targets)
+class _Package:
+    """The modules as the one namespace the tests were written against:
+    mod.X reads X where it is defined, and mod.X = stand_in sets it in every
+    module that has X, so the stand-in reaches every caller."""
+
+    def __getattr__(self, name):
+        for m in MODULES:
+            if name in vars(m):
+                return vars(m)[name]
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        hits = [m for m in MODULES if name in vars(m)]
+        if not hits:
+            raise AttributeError(f"no module has {name}")
+        for m in hits:
+            setattr(m, name, value)
 
 
-mod = types.ModuleType("m")
-mod.__dict__.update(
-    configparser=configparser,
-    filecmp=__import__("filecmp"),
-    shutil=__import__("shutil"),
-    partial=__import__("functools").partial,
-    CHROMES=[],  # a Chrome on the machine running the tests is not one to list
-    mimetypes=__import__("mimetypes"),
-    os=os,
-    sys=__import__("sys"),
-    re=re,
-    subprocess=subprocess,
-    Path=Path,
-    HTMLParser=HTMLParser,
-    zipfile=zipfile,
-    unescape=unescape,
-    escape=escape,
-    json=json,
-    quote=quote,
-    unquote=unquote,
-    urlparse=urlparse,
-    datetime=datetime_module.datetime,
-    sqlite3=__import__("sqlite3"),
-    closing=__import__("contextlib").closing,
-    ET=__import__("xml.etree.ElementTree", fromlist=["ElementTree"]),
-    Counter=__import__("collections").Counter,
-    tempfile=tempfile,
-    zlib=__import__("zlib"),
-    mcp=types.SimpleNamespace(tool=lambda: lambda f: f),
-    _tool=lambda f: f,
-    Context=object,
-    threading=__import__("threading"),
-    time=__import__("time"),
-    unicodedata=__import__("unicodedata"),
-)
-exec(
-    compile(ast.Module([n for n in tree.body if needed(n)], []), "server.py", "exec"),
-    mod.__dict__,
-)
+mod = _Package()
+mod.CHROMES = []  # a Chrome on the machine running the tests is not one to list
+
 
 # --- _flatten -------------------------------------------------------------
 toc = [
@@ -1174,10 +1127,5 @@ with tempfile.TemporaryDirectory() as tmp:
             assert "pages 1 to 4" in str(e), e
     finally:
         mod._pdf_text, mod.TEXT_LIMIT = real
-
-# pyproject.toml (uv tool install) and server.py's inline metadata (uv run
-# --script) must ask for the same dependencies.
-deps = lambda text: re.search(r"dependencies = (\[.*?\])", text).group(1)
-assert deps(open("pyproject.toml", encoding="utf-8").read()) == deps(open("server.py", encoding="utf-8").read())
 
 print("OK")

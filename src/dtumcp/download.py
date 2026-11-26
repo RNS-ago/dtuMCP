@@ -1,0 +1,312 @@
+"""Downloading courses and terms, in the background, with a status line."""
+
+import json
+import os
+import re
+import shutil
+import sqlite3
+import sys
+import threading
+import time
+from datetime import datetime
+from collections import Counter
+from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from itertools import count
+from urllib.parse import quote
+
+import anyio
+from mcp.server.mcpserver import Context
+
+from .app import DOWNLOADS, LE
+from .client import _client, _get
+from .courses import _copy
+from .pdfmath import _page_marks
+from .files import (
+    REFERENCE, _course_name, _d2l_file, _dedupe_linked, _file_topics, _relink, _safe,
+    _save_attachment, _save_linked, _save_topic,
+)
+from .index_page import _index_html, _search_entry, _search_pages, _write_landing
+from .search import _index, _sync_index
+
+
+def _course(ou: int, ctx: Context | None = None) -> dict:
+    """A course's offline copy, downloading the course first if it has none.
+    Course material is read from the copy once it exists, so the first read
+    of a course is slow and every later one is local."""
+    # ponytail: two first reads of one course at once both download it; the
+    # second overwrites the first with the same files. Lock per course if
+    # that ever costs more than the wait.
+    copy = _copy(ou)
+    if copy is None:
+        _download(ou, report=_reporter(ctx))
+        copy = _copy(ou)
+    return copy
+
+
+# Claude Desktop gives up on a tool call after 140 s, progress or not, and a
+# term's download takes minutes. So an MCP call waits this long and then
+# leaves the download running; calling again picks it up.
+JOB_WAIT = 110
+_job = {}  # the download running in the background, if any
+
+
+def _background(key: str, label: str, call: str, work, ctx: Context | None) -> str:
+    """Run work(report) -- a download -- and return what it returns. From
+    the command line it simply runs. For an MCP client it runs in a thread,
+    one at a time, and the call waits up to JOB_WAIT seconds for it; if it
+    is still going, the call says so and the next call with the same key
+    waits on, and returns its summary once done."""
+    if ctx is None:
+        return work(lambda text: None)
+    job = _job.get("now")
+    if job and job["key"] != key:
+        return (f"Another download, {job['label']}, is still running. Wait for it with "
+                f"{job['call']} before starting this one.")
+    if not job:
+        job = {"key": key, "label": label, "call": call, "last": "", "start": time.monotonic(),
+               "done": threading.Event()}
+
+        def run():
+            try:
+                job["result"] = work(lambda text: job.__setitem__("last", text))
+            except Exception as e:  # handed to the call that collects it
+                job["error"] = e
+            finally:
+                job["done"].set()
+
+        _job["now"] = job
+        threading.Thread(target=run, daemon=True).start()
+    report, sent, until = _reporter(ctx), None, time.monotonic() + JOB_WAIT
+    while not job["done"].wait(1) and time.monotonic() < until:
+        if job["last"] != sent:
+            sent = job["last"]
+            report(sent)
+    if not job["done"].is_set():
+        return (f"The download of {label} is still running after {int(time.monotonic() - job['start'])} s"
+                f"{': ' + job['last'].strip() if job['last'].strip() else ''}. It goes on in the background. "
+                f"Call {call} again for its progress, and its summary once it is done.")
+    _job.pop("now", None)
+    if "error" in job:
+        raise job["error"]
+    return job["result"]
+
+
+COLUMNS = ("files", "pictures", "announcements", "links", "videos", "broken")
+
+
+def _code(name: str) -> str:
+    """The course number a course name starts with, to label its summary row."""
+    found = re.match(r"\d{5}\b", name)
+    return found.group() if found else name[:20]
+
+
+def _summary(rows: list) -> str:
+    """What the download tools end with: a row of counts per course, then
+    what went wrong, then where to browse. rows are _download's results;
+    a course that failed outright has None for counts."""
+    width = max(len(code) for code, _, _ in rows)
+    table = [" " * width + "".join(f"  {c}" for c in COLUMNS)]
+    table += [
+        code.ljust(width) + "".join(f"  {counts[c]:>{len(c)}}" for c in COLUMNS)
+        for code, counts, _ in rows if counts
+    ]
+    out = [f"  {line}" for line in table] if len(table) > 1 else []
+    problems = [
+        line
+        for code, _, found in rows for head, details in found
+        for line in [f"  ✗ {code}: {head}", *(f"      {d}" for d in details)]
+    ]
+    if problems:
+        out += ["", *problems]
+    out += ["", f"  Open {DOWNLOADS / 'index.html'} to see every course."]
+    return "\n".join(out).lstrip("\n")
+
+
+def _status(*parts: tuple[str, str], keep: bool = False) -> None:
+    """Rewrite the live status line on stderr, or leave it behind with keep.
+    parts are (SGR colour code, text) pairs, cut to the terminal's width.
+    Only on a terminal: under an MCP client stderr goes to a log, where a line
+    per file would only fill it."""
+    if not sys.stderr.isatty():
+        return
+    room, line = shutil.get_terminal_size().columns - 1, ""
+    for colour, text in parts:
+        text = text[:room]
+        room -= len(text)
+        line += f"\033[{colour}m{text}\033[0m" if colour and not os.environ.get("NO_COLOR") else text
+    print("\r\033[K" + line, end="\n" if keep else "", file=sys.stderr, flush=True)
+
+
+def _reporter(ctx: Context | None):
+    """Send each status line to an MCP client as a progress notification too.
+    A no-op from the CLI, and in the SDK when the client asked for none."""
+    if ctx is None:
+        return lambda text: None
+    # The spec wants progress to rise with every notification. The counts
+    # restart each step, so they ride in the message and this only ticks.
+    ticks = count(1)
+    # Tools run in an anyio worker thread; the notification goes out on the
+    # event loop.
+    return lambda text: anyio.from_thread.run(partial(ctx.report_progress, next(ticks), None, text))
+
+
+def _each(pool, fn, items, phase: str, say) -> list:
+    """pool.map that reports "phase 12/245" through say as results come in."""
+    items, out = list(items), []
+    say(phase, 0, len(items))
+    for result in pool.map(fn, items):
+        out.append(result)
+        say(phase, len(out), len(items))
+    return out
+
+
+def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
+    """download_course's work, for one org unit id. prefix leads the status
+    line, so a term download can say which course of how many it is on.
+    report gets the same line as plain text, for _reporter. Returns a row
+    for _summary: the course number, its counts and its problems."""
+    name = _course_name(ou)
+
+    def say(what, done=0, total=0):
+        bar, tally = [], f" {done}/{total}" if total else ""
+        if total:
+            filled = 12 * done // total
+            bar = [("36", "█" * filled), ("2", "░" * (12 - filled) + " ")]
+        # Counts first: a long course name is what gets cut.
+        _status(("2", "    " + prefix), *bar, ("1", what + tally), ("2", " · "), ("", name))
+        report(f"{prefix}{what}{tally} · {name}")
+
+    say("reading the course")
+    modules = _get(f"/d2l/api/le/{LE}/{ou}/content/toc").get("Modules")
+    news = _get(f"/d2l/api/le/{LE}/{ou}/news/")
+    jobs = list(_file_topics(modules))
+    atts = [(n["Id"], a) for n in news for a in n.get("Attachments") or []]
+
+    root = DOWNLOADS / _safe(name)
+    root.mkdir(parents=True, exist_ok=True)
+    # ponytail: eight at a time; a course is a few hundred files at most, so
+    # nothing here needs a rate limiter or a resumable queue.
+    with _client() as c, ThreadPoolExecutor(max_workers=8) as pool:
+        tasks = [partial(_save_topic, c, ou, root, *job) for job in jobs]
+        tasks += [partial(_save_attachment, c, ou, root, *job) for job in atts]
+        results = _each(pool, lambda task: task(), tasks, "files", say)
+
+        keys = [t["TopicId"] for _, t in jobs] + [(nid, a["FileId"]) for nid, a in atts]
+        index = {
+            key: quote(p.relative_to(root).as_posix())
+            for key, (p, _) in zip(keys, results) if p
+        }
+        found = _each(pool, lambda r: _search_pages(r[0]) if r[0] else [], results, "search text", say)
+        texts = dict(zip(keys, found))
+        pdfs = [(key, p) for key, (p, _) in zip(keys, results) if p and p.suffix.lower() == ".pdf"]
+        marks = dict(zip((key for key, _ in pdfs),
+                         _each(pool, lambda job: _page_marks(job[1]), pdfs, "figures and math", say)))
+        for key, found in marks.items():  # hidden text is left out of search too (_hidden_text)
+            for n, hidden in found.get("hidden", ()):
+                if 0 < n <= len(texts.get(key) or ()):
+                    texts[key][n - 1] = texts[key][n - 1].replace(" ".join(hidden.split()), "").strip()
+        html, docs = _index_html(name, ou, modules, news, index, texts)
+        # The index and every saved HTML page can show pictures and link to
+        # files in D2L's file area. Fetch each of those once, then point the
+        # pages at the copies.
+        pages = {root / "index.html": html}
+        for p, _ in results:
+            if p and p.suffix.lower() in (".html", ".htm"):
+                try:
+                    pages[p] = p.read_bytes().decode("utf-8")
+                except UnicodeDecodeError:
+                    pass  # not ours to mangle; it keeps its online links
+        refs = {
+            url for html in pages.values() for m in REFERENCE.finditer(html)
+            if (url := _d2l_file(m.group(2)))
+        }
+        linked = dict(_each(pool, lambda url: _save_linked(c, root, url), refs,
+                            "pictures and linked files", say))
+        saved_files = [p for p, _ in results if p]
+        linked = _dedupe_linked({url: dest for url, dest in linked.items() if dest}, saved_files)
+        # Linked files have no topic, so they are searchable by their file name;
+        # one that is a topic's file is found as that topic already. Two links
+        # may reach one file, which is searched once.
+        topic_files = set(saved_files)
+        own = list(dict.fromkeys(d for d in linked.values() if d not in topic_files))
+        docs += [
+            _search_entry(dest.name, quote(dest.relative_to(root).as_posix()),
+                          dest.suffix[1:].upper() or "file", found)
+            for dest, found in zip(own, _each(
+                pool, _search_pages, own, "search text of linked files", say))
+            if found
+        ]
+    say("writing the pages")
+    for page, html in pages.items():
+        page.write_text(_relink(html, page, linked), encoding="utf-8")
+    # A script file rather than JSON: a page opened from disk may load a
+    # <script src> but not fetch() a file beside it.
+    (root / "_search.js").write_text(
+        f"window.SEARCH = {json.dumps(docs, ensure_ascii=False)};\n", encoding="utf-8"
+    )
+    # What the reading tools answer from once the course is saved: the tree
+    # and announcements as D2L sent them, and where each saved file went,
+    # keyed by topic id or by "news id/file id". Written last and swapped in
+    # whole, so a copy exists only once everything above has been saved.
+    record = {
+        "ou": ou, "name": name, "saved": f"{datetime.now():%Y-%m-%d %H:%M}",
+        "modules": modules, "news": news,
+        "files": {
+            "/".join(map(str, key)) if isinstance(key, tuple) else str(key):
+                p.relative_to(root).as_posix()
+            for key, (p, _) in zip(keys, results) if p
+        },
+        # What each saved PDF's pages hold that their text loses, for
+        # get_file's page headings: {"images": [3], "drawing": [5], "math": [...]}.
+        "marks": {"/".join(map(str, key)) if isinstance(key, tuple) else str(key): found
+                  for key, found in marks.items()},
+        # Files the course's pages link to, by the link as the page has it:
+        # a /content/ address, or a short link to a course file.
+        "linked": {url: dest.relative_to(root).as_posix() for url, dest in linked.items()},
+        # Videos are downloaded only on demand, by download_video; a refresh
+        # keeps the ones still on disk.
+        "videos": {
+            topic: path for topic, path in ((_copy(ou) or {}).get("videos") or {}).items()
+            if (root / path).exists()
+        },
+    }
+    part = root / f"_course-{ou}.json.part"
+    part.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    part.replace(root / f"_course-{ou}.json")
+    _write_landing()
+    # Indexed now rather than on the first search, which would wait for it.
+    # A failure here costs nothing: the next search indexes the course.
+    try:
+        say("indexing for search")
+        with closing(_index()) as db:
+            _sync_index(db)
+    except sqlite3.Error:
+        pass
+    # The course's bar collapses into one line that stays.
+    _status(("32", "  ✓ "), ("2", prefix), ("", name), keep=True)
+
+    def topics(modules):
+        for m in modules or []:
+            yield from m.get("Topics") or []
+            yield from topics(m.get("Modules"))
+
+    kinds = Counter("broken" if t.get("IsBroken") else t.get("TypeIdentifier") for t in topics(modules))
+    counts = {
+        "files": sum(1 for p, _ in results if p),
+        "pictures": len(linked),
+        "announcements": len(news),
+        # Videos are ContentService topics; any other kind is a link of some sort.
+        "videos": kinds["ContentService"],
+        "broken": kinds["broken"],
+        "links": sum(n for kind, n in kinds.items() if kind not in ("File", "ContentService", "broken")),
+    }
+    problems = []
+    failed = [err for p, err in results if err]
+    if failed:
+        problems.append((f"{len(failed)} files failed", failed))
+    if len(refs) > len(linked):
+        problems.append((f"{len(refs) - len(linked)} pictures or linked files could not be "
+                         "fetched; the pages link to them online", []))
+    return _code(name), counts, problems

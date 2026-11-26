@@ -1,6 +1,6 @@
 // Gives LearnHarness's tutors the dtuMCP tools and answers the DTU Learn view.
-// Every call runs server.py's command line once. server.py and tools.json (its
-// tool list) sit beside this file; install.py copies them here.
+// Every call runs the installed dtumcp command line once. tools.json (its tool
+// list) sits beside this file; install.py writes it there.
 const { execFile, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -8,9 +8,9 @@ const path = require("node:path");
 
 const home = os.homedir();
 // Started from a desktop entry, LearnHarness does not get the shell's PATH,
-// and that is where uv usually lives.
+// and that is where uv tool install puts dtumcp.
 const env = { ...process.env, PATH: [process.env.PATH, `${home}/.local/bin`, `${home}/.cargo/bin`].join(path.delimiter) };
-// Where server.py keeps the saved courses, as its DOWNLOADS: the platform's
+// Where dtumcp keeps the saved courses, as its DOWNLOADS: the platform's
 // place for an app's data, ~/.local/share on Windows too.
 const downloads = process.env.DTU_DOWNLOADS ? process.env.DTU_DOWNLOADS.replace(/^~(?=$|[\\/])/, home)
 	: path.join(
@@ -18,8 +18,8 @@ const downloads = process.env.DTU_DOWNLOADS ? process.env.DTU_DOWNLOADS.replace(
 			: process.env.XDG_DATA_HOME || path.join(home, ".local", "share"),
 		"dtumcp", "courses");
 const agents = ["teacher", "practice", "prober"];
-// DTU Learn's host, as server.py's DTU_BASE has it, and the session
-// server.py's login saved, as it reads them.
+// DTU Learn's host, as dtumcp's DTU_BASE has it, and the session
+// dtumcp's login saved, as it reads them.
 const dtuBase = process.env.DTU_BASE || "https://learn.inside.dtu.dk";
 const dtuHost = new URL(dtuBase).host;
 const cookieFile = (process.env.DTU_COOKIE_FILE || "~/.config/dtumcp/cookie").replace(/^~(?=$|\/)/, home);
@@ -105,7 +105,7 @@ unit 326350 1222219 | Week 7's plan
 - Read a unit with dtu_unit_info before its files when asked what a week covers or what to do. Fetch only the topics you need with dtu_get_file; courses have hundreds.
 - dtu_get_file returns a file's text, with a PDF's pages headed [Page n]. A long PDF's text stops after about 25k tokens, at the end of a page, with a note naming the page to go on from: call dtu_get_file again with that first_page. When you need only part of a long PDF, find its pages with dtu_search_courses and ask for just those, with first_page and last_page. Figures, diagrams and mathematical notation do not survive extraction: when they matter, look at just those pages with dtu_get_pdf_pages. Each page image costs about 2k tokens, so never ask for a whole document. On pages with math, formulas are written out from their layout: x_{i} is a subscript, x^{2} a superscript, (a)/(b) a fraction and ∑_{i=1}^{n} a sum with its limits; matrices, cases and aligned equations come out only roughly, so look at those pages when their layout matters. A page's heading says what its text lost, as [Page n, has images, drawing, math]; in a mathematical text most pages have math, so look at those only when the exact notation matters. A figure made only of level and upright lines (a grid, a table, a number line) is not marked: find it by what the text keeps, a caption or label (Figure 3.2, Theorem 4) and the lines that refer to it, or a page with only a title and a few words. A page headed has unreadable symbols uses a font whose characters the text cannot name, so its symbols come out as stray letters, digits or punctuation (L^8_{6!7$0} for L^Σ_{CPA−0}): look at that page before quoting or explaining any formula on it. Sums, products, calligraphic and blackboard letters (∑, ∏, 𝒩𝒫, ℕ) come through in PDFs set with TeX, except encrypted or signed ones and copies saved before the fix, where a sum still reads as a capital X or P and 𝒩𝒫 as N P; where a formula needs a sum, check the page before reading such a capital as a variable. Spreadsheet text is cell values only. A link returns its URL. A video has no transcript: tell the learner to watch it. dtu_course_contents leaves out topics copied from an earlier year without their files and counts them on their unit's line; if what the learner asks for is not listed and its unit has broken ones, say the material is missing from the course.
 - dtu_list_assignments does not say whether the learner submitted. Never claim a submission status.
-- If a tool says the session was rejected or has expired, ask the learner to run \`uv run --script server.py login\` in their dtuMCP folder. You cannot do it for them. Downloaded courses can still be read meanwhile.
+- If a tool says the session was rejected or has expired, ask the learner to run \`dtumcp login\`. You cannot do it for them. Downloaded courses can still be read meanwhile.
 
 When what the learner studies comes from one of their DTU courses, that course is the reference:
 - Use its definitions, notation and names for things (≤p, DHC, 3-Sat and so on), as its slides and notes write them. Where your usual ones differ, say once how they map, then keep to the course's, so what you build matches what its exercises and exam expect.
@@ -133,7 +133,7 @@ const id = value => {
 	return value;
 };
 
-// Each course's newest record, _course-<id>.json, which server.py writes when
+// Each course's newest record, _course-<id>.json, which dtumcp writes when
 // it downloads the course: org unit id -> { file, mtime }.
 function copies() {
 	const found = new Map();
@@ -196,7 +196,7 @@ const STOPWORDS = new Set("a an and are as at be by can does each for from has h
 // 40 pages) says little about which week covers it, so a match in shorter
 // material is taken first. The units are the course's top level, in order,
 // to show what has nothing studied yet.
-// Each search goes to server.py's index (ask, from activate).
+// Each search goes to dtumcp's index (ask, from activate).
 // ponytail: a search per name per proposition, cached per course copy; a
 // map of thousands would want them sent as one request.
 const coverageCache = new Map(); // "<ou>:<mtime>:<id>:<name>" -> match or null
@@ -247,21 +247,24 @@ async function coverage(learning, ou, ask) {
 }
 
 exports.activate = ctx => {
-	const server = path.join(ctx.directory, "server.py");
 	const tools = JSON.parse(fs.readFileSync(path.join(ctx.directory, "tools.json"), "utf8"));
+	// The installed dtumcp (uv tool install), the one every other client runs.
+	const why = error => error.code === "ENOENT" ? new Error(
+		"dtumcp is not installed. Run `uv tool install git+https://github.com/RNS-ago/dtuMCP` "
+		+ "(or `uv tool install -e .` in a clone), then restart LearnHarness.") : error;
 
-	// One server.py command line; its output, or its error message as the error.
+	// One dtumcp command line; its output, or its error message as the error.
 	const run = (args, signal) => new Promise((resolve, reject) => {
-		execFile("uv", ["run", "--quiet", "--script", server, ...args.map(String)], {
+		execFile("dtumcp", args.map(String), {
 			env, maxBuffer: 64 << 20, signal: signal ? AbortSignal.any([signal, ctx.signal]) : ctx.signal,
-		}, (error, stdout, stderr) => error ? reject(new Error(stderr.trim() || error.message)) : resolve(stdout.trimEnd()));
+		}, (error, stdout, stderr) => error ? reject(new Error(stderr.trim() || why(error).message)) : resolve(stdout.trimEnd()));
 	});
 
 	// Like run, for a long command that reports progress: each "progress
 	// <done> <total>" line it writes to stderr goes to the view as a
 	// notification (topic, with data and the two numbers) while it runs.
 	const runReporting = (args, topic, data) => new Promise((resolve, reject) => {
-		const child = spawn("uv", ["run", "--quiet", "--script", server, ...args.map(String)], {
+		const child = spawn("dtumcp", args.map(String), {
 			env: { ...env, DTU_PROGRESS: "1" }, signal: ctx.signal,
 		});
 		let out = "", errors = "", partial = "";
@@ -275,18 +278,18 @@ exports.activate = ctx => {
 				else errors += `${line}\n`;
 			}
 		});
-		child.on("error", reject);
-		child.on("close", code => code === 0 ? resolve(out.trimEnd()) : reject(new Error((errors + partial).trim() || `server.py exited with ${code}`)));
+		child.on("error", error => reject(why(error)));
+		child.on("close", code => code === 0 ? resolve(out.trimEnd()) : reject(new Error((errors + partial).trim() || `dtumcp exited with ${code}`)));
 	});
 
-	// The searches: server.py's index, asked through one search_serve process
+	// The searches: dtumcp's index, asked through one search_serve process
 	// that answers a JSON line per request, started on the first search and
 	// again after it ends, so typing in the search box costs no process each.
 	let searcher, asked = 0;
 	const waiting = new Map(); // request id -> { resolve, reject }
 	const ask = request => new Promise((resolve, reject) => {
 		if (!searcher) {
-			const child = spawn("uv", ["run", "--quiet", "--script", server, "search_serve"], { env, signal: ctx.signal });
+			const child = spawn("dtumcp", ["search_serve"], { env, signal: ctx.signal });
 			let partial = "", errors = "";
 			child.stdout.setEncoding("utf8"); // a character split over two chunks stays whole
 			child.stdout.on("data", chunk => {
@@ -308,7 +311,7 @@ exports.activate = ctx => {
 				for (const wait of waiting.values()) wait.reject(error);
 				waiting.clear();
 			};
-			child.on("error", ended);
+			child.on("error", error => ended(why(error)));
 			child.on("close", code => ended(new Error(errors.trim() || `The search process ended (${code}).`)));
 			searcher = child;
 		}

@@ -56,8 +56,9 @@ This puts a `dtumcp` command in `~/.local/bin` (`%USERPROFILE%\.local\bin` on
 Windows). Add `--reinstall` to update.
 
 To work on the code, run `uv tool install -e .` in a clone instead: `dtumcp`
-then runs the clone's `server.py`, so a `git pull` or an edit takes effect at
-the next start. `uv run --script server.py` also works in place of `dtumcp`.
+then runs the clone's code, so a `git pull` or an edit takes effect at the
+next start. `uv run dtumcp` in the clone also works in place of `dtumcp`. The
+code is the package in `src/dtumcp/`; its `__init__.py` lists the modules.
 
 ### 4. Sign in
 
@@ -148,7 +149,7 @@ forward slashes.
     `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json`
 
 **Quit the client fully and reopen it after any change** to the config, to
-`server.py`, or by `uv tool install --reinstall`. A client starts the server
+the code in `src/dtumcp/`, or by `uv tool install --reinstall`. A client starts the server
 once and keeps running the code it loaded.
 
 ### Tell your agent to use it
@@ -408,5 +409,5 @@ for another Brightspace instance.
 ## Test
 
 ```bash
-uv run --no-project test_server.py
+uv run test_server.py
 ```

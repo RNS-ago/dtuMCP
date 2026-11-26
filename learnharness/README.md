@@ -6,24 +6,28 @@ view to the sidebar.
 
 ## Install
 
-Set up dtuMCP and run `dtumcp login` first (see the [main README](../README.md)).
-Then, from the repository folder, and again after any change to `server.py`:
+Install dtuMCP with `uv tool install` and run `dtumcp login` first (see the
+[main README](../README.md)). Then, from the repository folder, and again after
+any change to the plugin or to the tools' names, descriptions or arguments:
 
 ```bash
 uv run learnharness/install.py
 ```
 
-That copies the plugin, `server.py` and its tool list into
+That copies the plugin and the installed `dtumcp`'s tool list into
 `~/.config/LearnHarness/data/plugins/dtu-learn/dist/`
 (`%APPDATA%\LearnHarness\data\plugins\dtu-learn\dist\` on Windows). If
 **Settings → Community plugins** shows a different plugins directory, pass that
 one as the argument. Restart LearnHarness, which loads plugin code only at
 start, and enable **DTU Learn** under Settings → Community plugins.
 
-The plugin runs its copy of `server.py` through `uv`, looking for `uv` on
-`PATH`, in `~/.local/bin` and in `~/.cargo/bin` (under `%USERPROFILE%` on
+The plugin runs the installed `dtumcp`, the same one every other client runs,
+looking for it on `PATH` and in `~/.local/bin` (under `%USERPROFILE%` on
 Windows), since an app started from a desktop entry or the Start menu may not
-get your shell's `PATH`. It reads the same session file as every other client.
+get your shell's `PATH`. With `uv tool install -e .` in a clone, a code change
+reaches the plugin at its next call; a changed tool list needs `install.py`
+and a restart.
+It reads the same session file as every other client.
 
 ## Agents
 
@@ -141,7 +145,7 @@ scrolled to the first, an announcement outlined. The tree opens down to it,
 and the results stay. Escape or emptying the box goes back to the tree, where
 the result sits.
 
-The plugin keeps one `server.py search_serve` process, which takes about a
+The plugin keeps one `dtumcp search_serve` process, which takes about a
 second to start on the first search. Files a course's pages link to are
 missing from copies saved before the record listed them (`linked` in
 `_course-<id>.json`); **Refresh** the course to find them.

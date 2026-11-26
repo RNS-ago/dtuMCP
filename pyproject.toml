@@ -1,6 +1,5 @@
-# For `uv tool install`, which puts a `dtumcp` command on PATH. server.py
-# keeps its own inline metadata too, for `uv run --script server.py`; the
-# dependencies must match, which test_server.py checks.
+# For `uv tool install`, which puts a `dtumcp` command on PATH, and for
+# `uv run dtumcp` in a clone. The code is the package in src/dtumcp.
 [project]
 name = "dtumcp"
 version = "0.1.0"
@@ -10,11 +9,8 @@ requires-python = ">=3.10"
 dependencies = ["mcp[cli]>=2", "httpx", "websockets>=12"]
 
 [project.scripts]
-dtumcp = "server:main"
+dtumcp = "dtumcp.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-only-include = ["server.py"]
