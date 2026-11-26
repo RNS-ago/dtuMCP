@@ -39,6 +39,13 @@ def _decode(content: bytes, ctype: str) -> str:
         return content.decode("utf-8", "replace")
 
 
+# Python's own table has no Office types: without the system's (/etc/mime.types,
+# the Windows registry) a saved workbook would read as an unknown file.
+for _suffix, _kind in ((".docx", "wordprocessingml.document"), (".xlsx", "spreadsheetml.sheet"),
+                       (".pptx", "presentationml.presentation")):
+    mimetypes.add_type(f"application/vnd.openxmlformats-officedocument.{_kind}", _suffix)
+
+
 def _saved_text(path: Path, title, marks: dict | None = None, pages: tuple = (1, 0), link=None,
                 first_row: int = 1, find: str = "") -> str:
     """_file_text for a file in an offline copy. The copy keeps no content
@@ -150,7 +157,11 @@ def _safe(name: str) -> str:
     """A title becomes a directory or file name, so drop what a filesystem
     would choke on and keep the rest recognisable."""
     # Strip after cutting, or a long course name ends in ", " once cut at 80.
-    return re.sub(r'[\x00-\x1f\\/:*?"<>|]+', "_", name)[:80].strip(" .,") or "untitled"
+    name = re.sub(r'[\x00-\x1f\\/:*?"<>|]+', "_", name)[:80].strip(" .,") or "untitled"
+    # Names Windows keeps for devices, with or without an extension: "Aux"
+    # cannot be a file or folder there. Changed everywhere, so a course saves
+    # under the same names on every system.
+    return re.sub(r"^(CON|PRN|AUX|NUL|COM\d|LPT\d)(?=\.|$)", r"\1_", name, flags=re.I)
 
 
 def _file_topics(modules, parents=()):
@@ -175,6 +186,17 @@ def _course_name(ou: int) -> str:
     return str(ou)
 
 
+def _store(dest: Path, content: bytes) -> str | None:
+    """Write a downloaded file, and say what went wrong if the disk refused
+    it, so one file that cannot be written fails alone, not its course."""
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _save(dest, content)
+    except OSError as e:  # open in another program, a path too long for Windows
+        return f"could not be saved at {dest}: {e.strerror or e}"
+    return None
+
+
 def _save_topic(client, ou: int, root: Path, parents: tuple, topic, own_id: bool = False) -> tuple:
     try:
         r, name = _topic_fetch(ou, topic, client)
@@ -186,8 +208,8 @@ def _save_topic(client, ou: int, root: Path, parents: tuple, topic, own_id: bool
     # the unit shares, which would otherwise overwrite this one's file.
     stem = _safe(topic.get("Title", "")) + (f" ({topic['TopicId']})" if own_id else "")
     dest = root.joinpath(*parents, stem + Path(name).suffix)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    _save(dest, r.content)
+    if problem := _store(dest, r.content):
+        return None, f"{topic.get('Title', topic['TopicId'])}: {problem}"
     return dest, None
 
 
@@ -199,8 +221,8 @@ def _save_attachment(client, ou: int, root: Path, news_id: int, att) -> tuple:
         r.raise_for_status()
     except httpx.HTTPError as e:
         return None, f"{name}: {e}"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    _save(dest, r.content)
+    if problem := _store(dest, r.content):
+        return None, f"{name}: {problem}"
     return dest, None
 
 
@@ -244,8 +266,8 @@ def _save_linked(client, root: Path, url: str) -> tuple:
         return url, None
     # Kept by where it ended up: a short link names no file of its own.
     dest = _linked_dest(root, str(r.url))
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    _save(dest, r.content)
+    if _store(dest, r.content):
+        return url, None  # as when it cannot be fetched: the page keeps its online link
     return url, dest
 
 

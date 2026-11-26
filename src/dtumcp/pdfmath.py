@@ -32,10 +32,15 @@ def _numbered_pages(text: str, marks: dict | None = None, rebuilt: dict | None =
             on.setdefault(n, []).append(label)
     for n, hidden in (marks or {}).get("hidden", ()):  # _hidden_text: left out, said so
         if 0 < n <= len(pages):
-            pages[n - 1] = "\n".join(line for line in pages[n - 1].split("\n")
-                                     if line.strip() != hidden).replace(hidden, "")
-            if "hidden text left out" not in on.get(n, []):
-                on.setdefault(n, []).append("hidden text left out")
+            # pdftotext -layout pads words with runs of spaces and may wrap the
+            # sentence, so its words match with any white space between them;
+            # a line that held only them goes whole.
+            words = r"\s+".join(map(re.escape, hidden.split()))
+            page, whole = re.subn(rf"(?m)^[ \t]*{words}[ \t]*(?:\n|\Z)", "", pages[n - 1])
+            pages[n - 1], inline = re.subn(words, "", page)
+            label = "hidden text left out" if whole or inline else "hidden text it could not take out"
+            if label not in on.get(n, []):
+                on.setdefault(n, []).append(label)
     return [
         f"[Page {n}{', has ' + ', '.join(on[n]) if n in on else ''}]\n{page.strip(chr(10))}"
         for n, page in enumerate(pages, 1)
@@ -338,9 +343,12 @@ def _save(dest: Path, content: bytes) -> None:
         f.write(patched)
     before = pages.search(_poppler("pdfinfo", dest))
     after = pages.search(_poppler("pdfinfo", part))
-    if before and after and before.group(1) == after.group(1):
-        part.replace(dest)
-    else:
+    try:
+        if before and after and before.group(1) == after.group(1):
+            part.replace(dest)  # refused on Windows while the PDF is open: the file as sent stays
+    except OSError:
+        pass
+    finally:
         part.unlink(missing_ok=True)
 
 

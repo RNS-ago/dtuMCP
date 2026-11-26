@@ -310,7 +310,9 @@ def search_courses(query: str, org_unit_id: int | str = 0, limit: int = 15, kind
     Each match comes with its course, the units above it, its kind, its best
     PDF page and others as good, the ids that get_file, unit_info,
     get_pdf_pages or get_announcement_attachment take, and the text around
-    the match.
+    the match. A match found only in an item's title or units has no page
+    and no text around it, and says so: the item as a whole is on the
+    subject, so read it from its start.
     org_unit_id limits it to one course (an org unit id or a DTU course
     number); left out, every downloaded course. limit is at most 50.
     kind limits it to kinds of item, one or several ("pdf", "xlsx pptx" or

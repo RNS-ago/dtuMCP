@@ -10,7 +10,7 @@ import anyio
 import httpx
 from mcp.server.transport_security import TransportSecuritySettings
 
-from .app import BASE, COOKIE_FILE, DOWNLOADS, RUN, mcp
+from .app import BASE, COOKIE_FILE, DOWNLOADS, RUN, _status_error, mcp
 from .auth import login
 from .courses import _stored_marks
 from .files import _blocks, _saved_text
@@ -168,7 +168,13 @@ def main() -> None:
                 raise SystemExit(f"{name}: --args takes a JSON object: {e}")
             if not isinstance(named, dict):
                 raise SystemExit(f"{name}: --args takes a JSON object, not {sys.argv[3]}")
-            args, named = [], {k: v for k, v in named.items() if v is not None and k != "ctx"}
+            # As MCP takes them: a name the command lacks is dropped (a tools.json
+            # newer than this dtumcp), and a number sent as text is a number
+            # where the command takes an int.
+            takes = inspect.signature(COMMANDS[name]).parameters
+            args, named = [], {
+                k: int(v) if isinstance(v, str) and v.lstrip("-").isdigit() and takes[k].annotation in (int, "int") else v
+                for k, v in named.items() if v is not None and k != "ctx" and k in takes}
         try:
             # Let inspect report a wrong argument count instead of a traceback.
             inspect.signature(COMMANDS[name]).bind(*args, **named)
@@ -185,6 +191,9 @@ def main() -> None:
             # No network, or DTU Learn down: also an ordinary outcome.
             _status()
             raise SystemExit(f"Could not reach DTU Learn or Brightspace: {e}")
+        except httpx.HTTPStatusError as e:
+            _status()
+            raise SystemExit(_status_error(e))
         if result is not None:
             blocks = _blocks(result)
             print(json.dumps(blocks) if as_json else "\n".join(

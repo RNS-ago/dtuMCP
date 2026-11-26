@@ -22,7 +22,7 @@ const agents = ["teacher", "practice", "prober"];
 // dtumcp's login saved, as it reads them.
 const dtuBase = process.env.DTU_BASE || "https://learn.inside.dtu.dk";
 const dtuHost = new URL(dtuBase).host;
-const cookieFile = (process.env.DTU_COOKIE_FILE || "~/.config/dtumcp/cookie").replace(/^~(?=$|\/)/, home);
+const cookieFile = (process.env.DTU_COOKIE_FILE || "~/.config/dtumcp/cookie").replace(/^~(?=$|[\\/])/, home);
 const session = () => process.env.DTU_COOKIE?.trim() || (fs.existsSync(cookieFile) ? fs.readFileSync(cookieFile, "utf8").trim() : "");
 
 // What a DTU Learn link points at, when it is something a saved course
@@ -321,11 +321,15 @@ exports.activate = ctx => {
 				const lines = (partial + chunk).split("\n");
 				partial = lines.pop();
 				for (const line of lines) {
-					const { id, result, error } = JSON.parse(line);
-					const wait = waiting.get(id);
-					waiting.delete(id);
-					if (error !== undefined) wait?.reject(new Error(error));
-					else wait?.resolve(result);
+					// A line that is no answer (a warning a library prints) is skipped:
+					// thrown here, it would end the host's process.
+					let answer;
+					try { answer = JSON.parse(line); } catch { continue; }
+					const wait = waiting.get(answer?.id);
+					if (!wait) continue;
+					waiting.delete(answer.id);
+					if (answer.error !== undefined) wait.reject(new Error(answer.error));
+					else wait.resolve(answer.result);
 				}
 			});
 			child.stderr.setEncoding("utf8");

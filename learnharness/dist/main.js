@@ -286,7 +286,7 @@ function mountToolCard(ctx, container, tool, open) {
 			row.type = "button";
 			row.append(make("strong", undefined, hit.title),
 				// The course only when the search went over several.
-				make("span", undefined, [hit.page && `p. ${hit.page}`, !input.org_unit_id && hit.course, hit.where, hit.missing?.length && `lacks ${hit.missing.join(", ")}`].filter(Boolean).join(" · ")));
+				make("span", undefined, [hit.page && `p. ${hit.page}`, !input.org_unit_id && hit.course, hit.where, hit.only && `in ${hit.only} only`, hit.missing?.length && `lacks ${hit.missing.join(", ")}`].filter(Boolean).join(" · ")));
 			row.addEventListener("click", () => open({ ou: hit.ou, target: hit.target, title: hit.title, page: hit.page }));
 			list.append(row);
 		});
@@ -661,6 +661,9 @@ function mount(ctx, container, signal, tutor, opener) {
 				const text = el("p", "dtu-learn-snippet");
 				hit.snippet.forEach((part, i) => text.append(i % 2 ? el("mark", undefined, part) : part));
 				item.append(text);
+			} else if (hit.only) {
+				// No snippet: the words are in its title or units, not its text.
+				item.append(el("p", "dtu-learn-snippet", `Found in its ${hit.only} only, not its text.`));
 			}
 			items.append(item);
 		}

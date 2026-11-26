@@ -40,9 +40,6 @@ def _ooxml_text(path: Path, ctype: str) -> str | None:
     return re.sub(r"[ \t]*\n[ \t\n]*", "\n", text).strip() or None
 
 
-# A workbook's XML: its sheets, cells and the relations naming each sheet's file.
-SHEET = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-RELATION = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 # Excel's own number formats that show a date or a time.
 DATE_FORMATS = {*range(14, 23), *range(27, 37), *range(45, 48), *range(50, 59)}
 
@@ -50,33 +47,53 @@ DATE_FORMATS = {*range(14, 23), *range(27, 37), *range(45, 48), *range(50, 59)}
 class _Workbook:
     """An .xlsx read a sheet at a time, its cells as text by address: a
     stdlib zipfile and streamed XML, so even a sheet of 25,000 rows is read
-    without a dependency and only when asked for. Raises zipfile.BadZipFile,
-    KeyError or ET.ParseError for a file that is not one."""
+    without a dependency and only when asked for. Transitional or Strict
+    Open XML alike: the parts are found through the package's relations, and
+    the tags in the namespace the workbook itself is written in. Raises
+    zipfile.BadZipFile, KeyError or ET.ParseError for a file that is not one."""
 
     def __init__(self, path: Path):
         self.zip = zipfile.ZipFile(path)
-        book = ET.fromstring(self.zip.read("xl/workbook.xml"))
-        rels = {r.get("Id"): r.get("Target") or "" for r in ET.fromstring(self.zip.read("xl/_rels/workbook.xml.rels"))}
-        pr = book.find(SHEET + "workbookPr")
+        main = "xl/workbook.xml"
+        if "_rels/.rels" in self.zip.namelist():
+            main = {kind: m for _, kind, m in self._related("_rels/.rels", "")}.get("officeDocument", main)
+        book = ET.fromstring(self.zip.read(main))
+        # Transitional's spreadsheetml/2006/main, or Strict's ooxml/spreadsheetml/main.
+        ns = self.ns = book.tag[:book.tag.find("}") + 1]
+        folder, name = posixpath.split(main)
+        related = self._related(posixpath.join(folder, "_rels", name + ".rels"), folder)
+        rels, parts = {i: m for i, _, m in related}, {kind: m for _, kind, m in related}
+        self.parts = {kind: parts.get(kind, posixpath.join(folder, kind + ".xml")) for kind in ("sharedStrings", "styles")}
+        pr = book.find(ns + "workbookPr")
         self.epoch = datetime(1904, 1, 1) if pr is not None and pr.get("date1904") in ("1", "true") \
             else datetime(1899, 12, 30)  # Excel counts from 1900 as if it were a leap year
         # (name, zip member, hidden) per sheet, in the workbook's order.
         self.sheets = []
-        for sheet in book.iter(SHEET + "sheet"):
-            target = rels.get(sheet.get(RELATION + "id"), "")
-            member = target.lstrip("/") if target.startswith("/") else posixpath.normpath("xl/" + target)
-            self.sheets.append((sheet.get("name") or "?", member, sheet.get("state") in ("hidden", "veryHidden")))
+        for sheet in book.iter(ns + "sheet"):
+            rid = next((v for k, v in sheet.attrib.items() if k.endswith("}id")), "")  # r:id, in either namespace
+            self.sheets.append((sheet.get("name") or "?", rels.get(rid, ""), sheet.get("state") in ("hidden", "veryHidden")))
         self._strings = self._dates = None
+
+    def _related(self, rels: str, folder: str) -> list[tuple[str, str, str]]:
+        """What a relations part points at, as (id, the last word of its type,
+        such as officeDocument, sharedStrings or styles, zip member); a
+        relative target is from folder."""
+        found = []
+        for r in ET.fromstring(self.zip.read(rels)):
+            target = r.get("Target") or ""
+            member = target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join(folder, target))
+            found.append((r.get("Id"), (r.get("Type") or "").rsplit("/", 1)[-1], member))
+        return found
 
     def strings(self) -> list[str]:
         """The shared strings a text cell points at by number."""
         if self._strings is None:
-            self._strings = []
-            if "xl/sharedStrings.xml" in self.zip.namelist():
-                for _, el in ET.iterparse(self.zip.open("xl/sharedStrings.xml")):
-                    if el.tag == SHEET + "si":  # its runs' text, less phonetic guides
-                        guides = {t for r in el.iter(SHEET + "rPh") for t in r.iter(SHEET + "t")}
-                        self._strings.append("".join(t.text or "" for t in el.iter(SHEET + "t") if t not in guides))
+            self._strings, ns = [], self.ns
+            if self.parts["sharedStrings"] in self.zip.namelist():
+                for _, el in ET.iterparse(self.zip.open(self.parts["sharedStrings"])):
+                    if el.tag == ns + "si":  # its runs' text, less phonetic guides
+                        guides = {t for r in el.iter(ns + "rPh") for t in r.iter(ns + "t")}
+                        self._strings.append("".join(t.text or "" for t in el.iter(ns + "t") if t not in guides))
                         el.clear()
         return self._strings
 
@@ -84,15 +101,15 @@ class _Workbook:
         """The cell styles (s=) whose number format shows a date or time."""
         if self._dates is None:
             self._dates = set()
-            if "xl/styles.xml" in self.zip.namelist():
-                styles = ET.fromstring(self.zip.read("xl/styles.xml"))
+            if self.parts["styles"] in self.zip.namelist():
+                styles = ET.fromstring(self.zip.read(self.parts["styles"]))
                 custom = set()
-                for fmt in styles.iter(SHEET + "numFmt"):
+                for fmt in styles.iter(self.ns + "numFmt"):
                     # A date's code has d, m, y, h or s outside quotes, [colours] and \escapes.
                     code = re.sub(r'"[^"]*"|\[[^\]]*\]|\\.', "", fmt.get("formatCode") or "")
                     if re.search(r"[dmyhs]", code, re.I) and code.lower() != "general":
                         custom.add(int(fmt.get("numFmtId", -1)))
-                xfs = styles.find(SHEET + "cellXfs")
+                xfs = styles.find(self.ns + "cellXfs")
                 for i, xf in enumerate(xfs if xfs is not None else []):
                     if int(xf.get("numFmtId", 0)) in DATE_FORMATS | custom:
                         self._dates.add(i)
@@ -102,9 +119,9 @@ class _Workbook:
         """Sheet n's used range as Excel states it (A1:O25427), read off its start."""
         try:
             for _, el in ET.iterparse(self.zip.open(self.sheets[n - 1][1]), events=("start",)):
-                if el.tag == SHEET + "dimension":
+                if el.tag == self.ns + "dimension":
                     return el.get("ref") or ""
-                if el.tag == SHEET + "sheetData":
+                if el.tag == self.ns + "sheetData":
                     return ""
         except (KeyError, ET.ParseError):
             pass
@@ -125,19 +142,19 @@ class _Workbook:
             return
         number = 0
         for _, el in ET.iterparse(source):
-            if el.tag != SHEET + "row":
+            if el.tag != self.ns + "row":
                 continue
             number = int(el.get("r") or number + 1)
             cells, column = [], 0
-            for c in el.iter(SHEET + "c"):
+            for c in el.iter(self.ns + "c"):
                 ref = c.get("r") or ""
                 letters = re.match(r"[A-Z]*", ref).group() or _column(column + 1)
                 column = _column_number(letters)
                 text = self._value(c, strings, dates)
-                if formulas and (f := c.find(SHEET + "f")) is not None:
+                if formulas and (f := c.find(self.ns + "f")) is not None:
                     if f.get("t") == "shared" and f.get("ref"):
                         shared[f.get("si")] = ref
-                    formula = f.text or (f"as in {shared[f.get('si')]}" if f.get("si") in shared else "")
+                    formula = _one_line(f.text) or (f"as in {shared[f.get('si')]}" if f.get("si") in shared else "")
                     if formula:
                         text = f"{text} = {formula}" if text else f"= {formula}"
                 if text:
@@ -147,18 +164,24 @@ class _Workbook:
                 yield number, ("" if addresses else f"{number}: ") + " · ".join(cells)
 
     def _value(self, c, strings, dates) -> str:
-        kind, v = c.get("t"), c.find(SHEET + "v")
+        kind, v = c.get("t"), c.find(self.ns + "v")
         if kind == "inlineStr":
-            return json.dumps("".join(t.text or "" for t in c.iter(SHEET + "t")), ensure_ascii=False)
+            return _quoted("".join(t.text or "" for t in c.iter(self.ns + "t")))
         if v is None or v.text is None:
             return ""
         if kind == "s":
             i = int(v.text)
-            return json.dumps(strings[i] if 0 <= i < len(strings) else "", ensure_ascii=False)
+            return _quoted(strings[i] if 0 <= i < len(strings) else "")
         if kind in ("str", "e"):  # a formula's text result, or an error such as #DIV/0!
-            return json.dumps(v.text, ensure_ascii=False) if kind == "str" else v.text
+            return _quoted(v.text) if kind == "str" else v.text
         if kind == "b":
             return "TRUE" if v.text == "1" else "FALSE"
+        if kind == "d":  # a date written out, as Strict writes every date
+            try:
+                when = datetime.fromisoformat(v.text.removesuffix("Z"))
+            except ValueError:
+                return v.text
+            return when.strftime("%Y-%m-%d") if when.time() == datetime.min.time() else when.strftime("%Y-%m-%d %H:%M")
         try:
             x = float(v.text)
         except ValueError:
@@ -168,6 +191,18 @@ class _Workbook:
             return (when.strftime("%H:%M:%S") if x < 1 else when.strftime("%Y-%m-%d")
                     if x == int(x) else when.strftime("%Y-%m-%d %H:%M"))
         return str(int(x)) if x.is_integer() and abs(x) < 1e15 else repr(x)
+
+
+def _one_line(text: str | None) -> str:
+    """A cell's text or formula on one line: a break typed in the cell (Alt+Enter)
+    would split its row, or, quoted, stick a \\n to the next word, and a search
+    or find for that word would miss it."""
+    return re.sub(r"\s*[\r\n]+\s*|\t", " ", text or "")
+
+
+def _quoted(text: str) -> str:
+    """A text cell as a row line shows it: in quotes, on one line."""
+    return json.dumps(_one_line(text), ensure_ascii=False)
 
 
 def _column(n: int) -> str:

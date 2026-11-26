@@ -56,6 +56,10 @@ def _course(ou: int, ctx: Context | None = None) -> dict:
 # term's download takes minutes. So an MCP call waits this long and then
 # leaves the download running; calling again picks it up.
 JOB_WAIT = 110
+# A finished download's summary waits this long for the call that collects
+# it. Later, a call with its key is a new request (a refresh days on, after
+# reads used the copy without collecting it), so it downloads again.
+JOB_KEEP = 600
 _job = {}  # the download running in the background, if any
 _waiting = {}  # finished downloads nobody has collected yet, by key
 _job_lock = threading.Lock()  # MCP runs sync tools in parallel threads
@@ -73,6 +77,7 @@ def _start(key: str, label: str, call: str, work) -> dict:
         except Exception as e:  # handed to the call that collects it
             job["error"] = e
         finally:
+            job["ended"] = time.monotonic()
             job["done"].set()
 
     _job["now"] = job
@@ -88,10 +93,16 @@ def _background(key: str, label: str, call: str, work, ctx: Context | None, coll
     waits on, and returns its summary once done. A finished download nobody
     collected does not block another key: it moves to _waiting, where a call
     with its key gets its summary, and a collect call puts every waiting
-    summary ahead of its own."""
+    summary ahead of its own. A summary left uncollected past JOB_KEEP
+    seconds is dropped."""
     if ctx is None:
         return work(lambda text: None)
     with _job_lock:
+        stale = lambda j: j["done"].is_set() and time.monotonic() - j["ended"] > JOB_KEEP
+        if _job.get("now") and stale(_job["now"]):
+            _job.pop("now")
+        for old in [k for k, w in _waiting.items() if stale(w)]:
+            del _waiting[old]
         job, earlier = _job.get("now"), ""
         if job and job["key"] != key and job["done"].is_set():
             _waiting[job["key"]] = _job.pop("now")

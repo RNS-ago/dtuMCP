@@ -42,6 +42,16 @@ RUN = _run_command(sys.argv[0])
 mcp = MCPServer("dtu-learn")
 
 
+def _status_error(e: httpx.HTTPStatusError) -> str:
+    """What an error answer from DTU Learn means, for the model or the terminal.
+    The URL goes without its query, which for a video can be a signed link."""
+    r = e.response
+    said = f"DTU Learn answered {r.status_code} {r.reason_phrase} for {e.request.url.copy_with(query=None)}"
+    if r.status_code >= 500:
+        return f"{said}: DTU Learn is down or overloaded, not this server. Try again in a few minutes."
+    return f"{said}."
+
+
 def _tool(fn):
     """Register fn as an MCP tool and return it as it is, for the command line.
     MCP hands the model a ToolError's message but only "Error executing tool"
@@ -55,6 +65,8 @@ def _tool(fn):
             raise ToolError(str(e)) from e
         except httpx.TransportError as e:
             raise ToolError(f"Could not reach DTU Learn or Brightspace: {e}") from e
+        except httpx.HTTPStatusError as e:
+            raise ToolError(_status_error(e)) from e
     mcp.tool()(run)
     return fn
 logging.getLogger("httpx").setLevel(logging.WARNING)  # one INFO line per request

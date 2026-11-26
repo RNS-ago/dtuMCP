@@ -591,7 +591,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert done.returncode == 0 and "No course is downloaded yet" in done.stdout, done
     done = cli("--json", "search_courses", "--args", '{"query": "feed"}')
     assert json.loads(done.stdout)[0]["type"] == "text", done
-    for bad, says in [("[1]", "takes a JSON object"), ("{", "takes a JSON object"), ('{"query": "x", "nope": 1}', "unexpected keyword")]:
+    for bad, says in [("[1]", "takes a JSON object"), ("{", "takes a JSON object"), ('{"nope": 1}', "missing a required argument: 'query'")]:
         done = cli("search_courses", "--args", bad)
         assert done.returncode and says in done.stderr, (bad, done)
 

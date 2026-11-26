@@ -12,9 +12,10 @@ from .text import _html_text, _ooxml_text, _pdf_text, _sheet_pages
 from .courses import SEASON_NAMES, _description, _term, _urn_kind
 
 
-# Spreadsheets are left out: their cells are mostly numbers from data tables,
-# which in one course came to 235 MB of search text against 8 MB for
-# everything else. They are still found by title.
+# Word and PowerPoint files are read whole. Workbooks go through _sheet_pages,
+# a page per sheet, each cut at TEXT_LIMIT: their cells are mostly numbers
+# from data tables, which read whole came to 235 MB of search text in one
+# course against 8 MB for everything else.
 OOXML_KINDS = {".docx": "wordprocessingml", ".pptx": "presentationml"}
 
 
