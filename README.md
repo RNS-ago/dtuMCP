@@ -227,11 +227,11 @@ online.
 | `list_courses` | Enrolled courses grouped by term, newest first |
 | `course_contents(org_unit_id)` | Unit/topic tree, with their IDs and any external links |
 | `unit_info(org_unit_id, unit_id)` | One unit's own text, plus its contents |
-| `get_file(org_unit_id, topic_id, first_page=1, last_page=0, linked="")` | A topic's content, whatever kind it is; for a PDF, from `first_page` to `last_page`. `linked` reads a file the course's pages link to instead |
+| `get_file(org_unit_id, topic_id, first_page=1, last_page=0, linked="", first_row=1, find="")` | A topic's content, whatever kind it is; for a PDF, from `first_page` to `last_page`. An Excel workbook reads with its sheets as pages, a row a line, each formula after its result; `first_row` goes on within a long sheet, and `find` gives only the rows with its words. `linked` reads a file the course's pages link to instead |
 | `get_pdf_pages(org_unit_id, topic_id, first_page, last_page=0, linked="")` | Pages of a PDF topic, or a linked PDF, as images, for figures and notation |
 | `list_assignments(org_unit_id)` | Assignment folders and due dates |
 | `list_announcements(org_unit_id)` | Course announcements |
-| `get_announcement_attachment(org_unit_id, news_id, file_id, first_page=1, last_page=0)` | A file attached to an announcement, read like `get_file` |
+| `get_announcement_attachment(org_unit_id, news_id, file_id, first_page=1, last_page=0, first_row=1, find="")` | A file attached to an announcement, read like `get_file` |
 | `search_courses(query, org_unit_id=0, limit=15)` | Where words occur in the downloaded courses, with the ids and PDF page to read next |
 | `calendar(days=7, org_unit_id=0)` | What is scheduled in the next `days` days |
 | `download_course(org_unit_id)` | The whole course saved for offline use, with an `index.html` to browse it |

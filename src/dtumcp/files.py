@@ -14,7 +14,7 @@ import httpx
 from mcp.server.mcpserver import Image
 
 from .app import BASE, DOWNLOADS, LE, LP
-from .text import TEXT_LIMIT, _html_text, _ooxml_text, _pdf_text
+from .text import TEXT_LIMIT, _html_text, _ooxml_text, _pdf_text, _sheet_text
 from .client import _paged
 from .courses import _topic_fetch
 from .pdfmath import MATH_NOTATION, _math_text, _numbered_pages, _page_marks, _save
@@ -39,7 +39,8 @@ def _decode(content: bytes, ctype: str) -> str:
         return content.decode("utf-8", "replace")
 
 
-def _saved_text(path: Path, title, marks: dict | None = None, pages: tuple = (1, 0), link=None) -> str:
+def _saved_text(path: Path, title, marks: dict | None = None, pages: tuple = (1, 0), link=None,
+                first_row: int = 1, find: str = "") -> str:
     """_file_text for a file in an offline copy. The copy keeps no content
     type, so the extension stands in. Anything but a page, a PDF or an Office
     file is left to the bytes, as D2L's unknown type is: guess_type calls a
@@ -47,18 +48,20 @@ def _saved_text(path: Path, title, marks: dict | None = None, pages: tuple = (1,
     ctype = mimetypes.guess_type(path.name)[0] or ""
     if not any(kind in ctype for kind in ("html", "pdf", "officedocument")):
         ctype = "d2l/unknowntype"
-    return _file_text(path.read_bytes(), ctype, path.name, title, path, marks, pages, link)
+    return _file_text(path.read_bytes(), ctype, path.name, title, path, marks, pages, link, first_row, find)
 
 
 def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None = None,
-               marks: dict | None = None, pages: tuple = (1, 0), link=None) -> str:
+               marks: dict | None = None, pages: tuple = (1, 0), link=None, first_row: int = 1,
+               find: str = "") -> str:
     """Turn a file into text for the caller, saving it to disk when the bytes
     are not text themselves. Shared by content topics and announcement
     attachments, fetched or read from an offline copy; path is where a copy
     already keeps the file, and marks what _page_marks found in it when the
     copy was saved; a PDF without them is looked at now. pages is the first
     and last page of a PDF to give (0: to its end), whole pages up to
-    TEXT_LIMIT."""
+    TEXT_LIMIT; a workbook's pages are its sheets, from first_row of the
+    first, or only the rows with every word of find (_sheet_text)."""
     if "html" in ctype:
         return f"[{title}]\n\n{_html_text(_decode(content, ctype), link)}"
     if ctype.startswith("text/") or "json" in ctype:
@@ -127,13 +130,13 @@ def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None =
                "it has no text layer, as a scanned PDF has none; get_pdf_pages shows its pages as images")
         return f"No text could be extracted from {name}: {why}. It is saved at {path}."
 
+    if "spreadsheetml" in ctype and (sheets := _sheet_text(path, name, pages, first_row, find)) is not None:
+        return (f"{sheets}\n\nThe workbook itself is at {path}. To search or sum a long sheet, open it with "
+                "pandas or openpyxl if you can run code.")
     office = _ooxml_text(path, ctype)
     if office:
-        note = "" if "spreadsheetml" not in ctype else (
-            " Cell values only; the row and column layout is not preserved."
-        )
         cut = "\n\n[Text truncated here.]" if len(office) > TEXT_LIMIT else ""
-        return f"[Text of {name}.{note}]\n\n{office[:TEXT_LIMIT]}{cut}"
+        return f"[Text of {name}.]\n\n{office[:TEXT_LIMIT]}{cut}"
 
     # Saved, but no text could be got out of it. The path is on the machine
     # running this server, which is not necessarily where the caller can read.

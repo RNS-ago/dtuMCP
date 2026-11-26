@@ -83,7 +83,7 @@ def unit_info(org_unit_id: int | str, unit_id: int, ctx: Context | None = None) 
 @_tool
 def get_file(
     org_unit_id: int | str, topic_id: int = 0, first_page: int = 1, last_page: int = 0,
-    linked: str = "", ctx: Context | None = None,
+    linked: str = "", first_row: int = 1, find: str = "", ctx: Context | None = None,
 ) -> str:
     """Fetch one content topic: a file's text, an HTML page's text, or a link's target.
 
@@ -92,6 +92,13 @@ def get_file(
     Read from the course's offline copy, like course_contents. A PDF's text
     runs from first_page to last_page (0: its last page), cut after the page
     that reaches about 25k tokens, with a note saying where to go on from.
+    An Excel workbook (.xlsx) reads the same way with its sheets as pages:
+    it lists them, then gives each a row a line, cells by address with each
+    formula after its result; first_row goes on within a long first sheet.
+    find gives only a workbook's rows with every word of it (each at the
+    start of a word, ignoring case),
+    from all its sheets or first_page to last_page: the way to look up a row
+    in a data sheet of thousands.
     A page's links to saved files are marked in its text, as [saved file:
     topic_id 7] or [saved file: linked="_linked/..."]. For a file the course's
     pages link to, which has no topic, pass that linked path instead of
@@ -102,7 +109,7 @@ def get_file(
     if linked:
         path = _linked_file(copy, linked)
         return _saved_text(path, path.name, _stored_marks(path), (first_page, last_page),
-                           _link_note(copy, path))
+                           _link_note(copy, path), first_row, find)
     topic = _toc_index(copy["modules"])[0].get(topic_id)
     if topic is None:
         raise RuntimeError(
@@ -129,10 +136,11 @@ def get_file(
     saved = copy["files"].get(str(topic_id))
     if saved:
         return _saved_text(copy["root"] / saved, title, (copy.get("marks") or {}).get(str(topic_id)),
-                           (first_page, last_page), _link_note(copy, copy["root"] / saved))
+                           (first_page, last_page), _link_note(copy, copy["root"] / saved), first_row, find)
     # Not in the copy: its download failed, so try DTU Learn once more.
     r, name = _topic_fetch(ou, topic)
-    return _file_text(r.content, r.headers.get("content-type", ""), name, title, pages=(first_page, last_page))
+    return _file_text(r.content, r.headers.get("content-type", ""), name, title, pages=(first_page, last_page),
+                      first_row=first_row, find=find)
 
 
 PAGE_LIMIT = 10  # ponytail: ~2k tokens a page; raise it if real questions need more at once
@@ -349,20 +357,21 @@ def list_announcements(org_unit_id: int | str, ctx: Context | None = None) -> st
 @_tool
 def get_announcement_attachment(
     org_unit_id: int | str, news_id: int, file_id: int, first_page: int = 1, last_page: int = 0,
-    ctx: Context | None = None,
+    first_row: int = 1, find: str = "", ctx: Context | None = None,
 ) -> str:
     """Fetch a file attached to an announcement: its text, or where it was saved.
 
     The ids come from list_announcements: news_id from the heading, file_id
     from the Attachment line. Handled like get_file handles a content file,
-    first_page and last_page included.
+    first_page, last_page, first_row and find included.
     """
     ou = _resolve(org_unit_id)
     copy = _course(ou, ctx)
     saved = copy["files"].get(f"{news_id}/{file_id}")
     if saved:
         marks = (copy.get("marks") or {}).get(f"{news_id}/{file_id}")
-        return _saved_text(copy["root"] / saved, Path(saved).name, marks, (first_page, last_page))
+        return _saved_text(copy["root"] / saved, Path(saved).name, marks, (first_page, last_page),
+                           first_row=first_row, find=find)
     with _client() as c:
         r = c.get(f"/d2l/api/le/{LE}/{ou}/news/{news_id}/attachments/{file_id}")
     if r.status_code in (401, 403):
@@ -377,7 +386,8 @@ def get_announcement_attachment(
         )
     r.raise_for_status()
     name = _filename(r, f"attachment-{file_id}")
-    return _file_text(r.content, r.headers.get("content-type", ""), name, name, pages=(first_page, last_page))
+    return _file_text(r.content, r.headers.get("content-type", ""), name, name, pages=(first_page, last_page),
+                      first_row=first_row, find=find)
 
 
 @_tool

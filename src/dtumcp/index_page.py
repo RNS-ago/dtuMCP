@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import quote, unquote
 
 from .app import BASE, DOWNLOADS
-from .text import _html_text, _ooxml_text, _pdf_text
+from .text import _html_text, _ooxml_text, _pdf_text, _sheet_pages
 from .courses import SEASON_NAMES, _description, _term, _urn_kind
 
 
@@ -19,12 +19,14 @@ OOXML_KINDS = {".docx": "wordprocessingml", ".pptx": "presentationml"}
 
 
 def _search_pages(path: Path) -> list[str]:
-    """A saved file's text for the search box: one string per page of a PDF,
-    one for anything else. Empty when no text can be got out of it."""
+    """A saved file's text for the search box: one string per page of a PDF
+    or sheet of a workbook, one for anything else. Empty when no text can be got out of it."""
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         # pdftotext ends each page with \f; split on all, the last makes a page past the end.
         pages = (_pdf_text(path) or "").removesuffix("\f").split("\f")
+    elif suffix == ".xlsx":
+        pages = _sheet_pages(path)
     elif suffix in OOXML_KINDS:
         pages = [_ooxml_text(path, OOXML_KINDS[suffix]) or ""]
     elif suffix in (".html", ".htm"):
