@@ -212,6 +212,9 @@ def _search(query, only: int = 0, limit: int = 15, partial: bool = True, hide_br
     anything = " OR ".join(term for _, term in terms)
     with closing(_index()) as db:
         _sync_index(db)
+        # One snapshot for every read below (WAL), so a course another process
+        # indexes meanwhile is seen whole or not at all. Closing ends it.
+        db.execute("BEGIN")
         courses = {ou: (name, mtime) for ou, name, mtime in db.execute("SELECT ou, name, mtime FROM courses")}
         docs = {row[0]: row for row in db.execute(
             "SELECT id, ou, title, place, kind, target, broken, pages FROM docs"
