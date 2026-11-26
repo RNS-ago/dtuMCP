@@ -120,11 +120,36 @@ const roleInstructions = {
 	practice: `When the session's material is a DTU course topic, pose problems in the course's style and notation. Draw on its exercise sheets, problem sheets and old exams (dtu_search_courses "exercise", "exam" and the topic): adapt rather than copy a problem whose solution the course publishes, and check your model solution against the course's suggested solutions where they exist. Never pose a question from an open graded hand-in or quiz. In your closing words after concluding a problem drawn from the course, cite its source with a dtu-learn block.`,
 };
 
-// Extensions Windows runs rather than shows when told to open a file, so a
-// course's .exe or .js would start on one click. Empty off Windows.
-const WINDOWS_RUNS = new Set(process.platform !== "win32" ? [] : [
-	...(process.env.PATHEXT ?? "").toLowerCase().split(";").filter(Boolean),
-	".lnk", ".url", ".msi", ".hta", ".scr", ".cpl", ".reg", ".jar",
+// The only kinds of file Windows is told to open, all ones it shows in an
+// app rather than runs. Windows runs many kinds on a click (.exe, .js, .pif,
+// .chm, .application, ...), and no list of those is ever complete, so
+// anything not listed here is shown in Explorer instead. Left out on purpose:
+// scripts that run when opened (.py, .js, .vbs, .ps1, .bat) and Office files
+// and files made to carry code that runs on opening: Office macro files
+// (.docm, .xlsm, .pptm, .xlsb, templates), OneNote, Publisher and Project
+// files, and Simulink models (.slx, whose load callbacks run MATLAB code).
+const WINDOWS_OPENS = new Set([
+	// Documents and text
+	".pdf", ".txt", ".md", ".rtf", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".log",
+	".tex", ".bib", ".html", ".htm", ".epub", ".xps", ".oxps",
+	// Office and its kin
+	// (.doc, .xls and .ppt can hold macros too, but courses hand them out
+	// and Office asks before it runs any in a file from outside.)
+	".doc", ".docx", ".dotx", ".xls", ".xlsx", ".xltx",
+	".ppt", ".pptx", ".pps", ".ppsx", ".potx", ".odt", ".ods", ".odp", ".odg", ".vsdx",
+	// Pictures
+	".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".svg", ".heic", ".ico", ".eps",
+	// Sound and video
+	".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".wma",
+	".mp4", ".m4v", ".mov", ".avi", ".mkv", ".webm", ".wmv", ".mpg", ".mpeg",
+	// Archives, which open as folders or in an archive app
+	".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".xz",
+	// Course code and data, which open in an editor or the subject's app
+	".ipynb", ".m", ".mat", ".mlx", ".r", ".rmd", ".qmd", ".rdata", ".rds",
+	".c", ".h", ".cpp", ".hpp", ".cs", ".java", ".kt", ".scala", ".hs", ".ml", ".rs", ".go",
+	".sql", ".sas", ".sav", ".dta", ".gms", ".mod", ".dat", ".lp", ".mps", ".pm", ".nm", ".pctl", ".prism",
+	".dwg", ".dxf", ".stl", ".step", ".stp", ".iges", ".igs", ".sldprt", ".sldasm", ".ipt", ".iam",
+	".kml", ".kmz", ".shp", ".gpx", ".geojson", ".nc", ".h5", ".hdf5", ".parquet",
 ]);
 
 // The id arguments the view sends, checked before they reach a command line.
@@ -508,13 +533,16 @@ exports.activate = ctx => {
 	ctx.handle("open", async input => {
 		const link = typeof input?.url === "string";
 		const target = link ? webAddress(input.url) : savedFile(input);
-		if (!link && WINDOWS_RUNS.has(path.extname(target).toLowerCase())) {
-			throw new Error(`Not opened: Windows would run ${path.basename(target)} as a program. It is saved at ${target}.`);
-		}
+		// A file of a kind not known to be safe to open is shown in Explorer,
+		// selected, for the learner to decide about.
+		const reveal = process.platform === "win32" && !link && !WINDOWS_OPENS.has(path.extname(target).toLowerCase());
 		// PowerShell reads the target from the environment, so no character in
-		// a file name or a link needs quoting for a command line.
+		// a file name or a link needs quoting for a command line. A Windows
+		// path cannot hold a double quote, so the one around it is safe.
 		const [command, args] = process.platform === "win32"
-			? ["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "[Diagnostics.Process]::Start($env:DTU_OPEN)"]]
+			? ["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", reveal
+				? `Start-Process explorer.exe -ArgumentList ('/select,"' + $env:DTU_OPEN + '"')`
+				: "[Diagnostics.Process]::Start($env:DTU_OPEN)"]]
 			: [process.platform === "darwin" ? "open" : "xdg-open", [target]];
 		const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true, env: { ...env, DTU_OPEN: target } });
 		child.unref();
