@@ -12,6 +12,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from .app import BASE, COOKIE_FILE, DOWNLOADS, RUN, mcp
 from .auth import login
+from .courses import _stored_marks
 from .files import _blocks, _saved_text
 from .download import _status
 from .search import _search, _search_answer
@@ -109,7 +110,7 @@ def main() -> None:
             # course links to, which have no topic. Command line only; the
             # LearnHarness plugin checks the path is one a course saved.
             path = Path(sys.argv[2])
-            print(_saved_text(path, path.name))
+            print(_saved_text(path, path.name, _stored_marks(path)))
             raise SystemExit(0)
         if name == "search_serve":
             # The LearnHarness plugin's searches: a JSON request a line on

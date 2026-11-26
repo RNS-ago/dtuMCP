@@ -475,6 +475,21 @@ with tempfile.TemporaryDirectory() as tmp:
     assert (plain.name, own.name) == ("Slides.txt", "Slides (8).txt"), (plain, own)
 mod._topic_fetch = saved_fetch
 
+# file_text reads a saved file's marks from its course's record: a linked
+# file's by path, a topic's file by its topic id; with no record, none.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / "02231 Crypto"
+    (root / "_linked" / "x").mkdir(parents=True)
+    (root / "Week 1").mkdir()
+    (root / "_course-1.json").write_text(json.dumps({
+        "files": {"7": "Week 1/Slides.pdf"},
+        "marks": {"7": {"math": [2]}, "_linked/x/notes.pdf": {"images": [1]}},
+    }))
+    assert mod._stored_marks(root / "_linked" / "x" / "notes.pdf") == {"images": [1]}
+    assert mod._stored_marks(root / "Week 1" / "Slides.pdf") == {"math": [2]}
+    assert mod._stored_marks(root / "_linked" / "x" / "other.pdf") is None
+    assert mod._stored_marks(Path(tmp) / "loose.pdf") is None
+
 # A failing page analysis costs the marks, not the file or its course.
 saved_marks = mod._marks
 mod._marks = lambda path: 1 / 0

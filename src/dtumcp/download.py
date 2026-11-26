@@ -22,7 +22,7 @@ from mcp.server.mcpserver import Context
 from .app import DOWNLOADS, LE
 from .client import _client, _get
 from .courses import _copy
-from .pdfmath import _page_marks, _pdf_hidden
+from .pdfmath import _page_marks
 from .files import (
     REFERENCE, _course_name, _d2l_file, _dedupe_linked, _file_topics, _relink, _safe,
     _save_attachment, _save_linked, _save_topic,
@@ -283,10 +283,15 @@ def _fetch_course(ou: int, prefix: str, report) -> tuple:
         # may reach one file, which is searched once.
         topic_files = set(saved_files)
         own = list(dict.fromkeys(d for d in linked.values() if d not in topic_files))
+        # Linked PDFs get their marks now too, as topic PDFs do, so file_text
+        # does not work them out again on every open (_stored_marks).
+        own_pdfs = [d for d in own if d.suffix.lower() == ".pdf"]
+        linked_marks = dict(zip(own_pdfs, _each(pool, _page_marks, own_pdfs,
+                                                "figures and math of linked files", say)))
+
         def linked_text(dest):  # with its hidden text left out, as a topic's is
             found = _search_pages(dest)
-            if found and dest.suffix.lower() == ".pdf":
-                _without_hidden(found, _pdf_hidden(dest))
+            _without_hidden(found, (linked_marks.get(dest) or {}).get("hidden", ()))
             return found
 
         docs += [
@@ -318,8 +323,10 @@ def _fetch_course(ou: int, prefix: str, report) -> tuple:
         },
         # What each saved PDF's pages hold that their text loses, for
         # get_file's page headings: {"images": [3], "drawing": [5], "math": [...]}.
+        # A linked PDF's are kept by its path, as "_linked/...": it has no topic.
         "marks": {"/".join(map(str, key)) if isinstance(key, tuple) else str(key): found
-                  for key, found in marks.items()},
+                  for key, found in marks.items()}
+                 | {dest.relative_to(root).as_posix(): found for dest, found in linked_marks.items()},
         # Files the course's pages link to, by the link as the page has it:
         # a /content/ address, or a short link to a course file.
         "linked": {url: dest.relative_to(root).as_posix() for url, dest in linked.items()},

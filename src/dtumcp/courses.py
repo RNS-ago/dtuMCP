@@ -85,6 +85,29 @@ def _copy(ou: int) -> dict | None:
     return json.loads(found[-1].read_text(encoding="utf-8")) | {"root": found[-1].parent}
 
 
+def _stored_marks(path: Path) -> dict | None:
+    """What _page_marks found in a saved file when its course downloaded, from
+    the record in the course's folder: by path for a file a page links to, by
+    topic or attachment key for one the course lists. None when no record has
+    it, as for a course saved before linked files were looked at."""
+    path = path.resolve()
+    for root in path.parents:
+        records = sorted(root.glob("_course-*.json"))
+        if not records:
+            continue
+        try:
+            record = json.loads(records[-1].read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        marks, saved = record.get("marks") or {}, path.relative_to(root).as_posix()
+        if saved in marks:
+            return marks[saved]
+        # A linked file that is a copy of a topic's is that topic's file (_dedupe_linked).
+        key = next((k for k, p in (record.get("files") or {}).items() if p == saved), None)
+        return marks.get(key)
+    return None
+
+
 def _saved_note(copy: dict) -> str:
     return (f"(From the offline copy saved {copy['saved']}. download_course "
             "brings it up to date.)")

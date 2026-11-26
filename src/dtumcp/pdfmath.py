@@ -68,11 +68,6 @@ def _page_marks(path: Path) -> dict:
         return {}
 
 
-def _pdf_hidden(path: Path) -> list:
-    """A PDF's text set at size 0 (_hidden_text), without _page_marks' slow passes."""
-    return _hidden_text(_poppler("pdftohtml", "-xml", "-i", "-stdout", "-q", path))
-
-
 def _marks(path: Path) -> dict:
     xml = _poppler("pdftohtml", "-xml", "-i", "-stdout", "-q", path)
     math, pages = _math_pages(xml)
