@@ -565,6 +565,16 @@ with tempfile.TemporaryDirectory() as tmp:
     assert got.endswith("[Page 1 is cut here, after 100,000 characters. get_pdf_pages shows it whole.]"), got[-200:]
 mod._pdf_text, mod._math_text = saved_pdf_text, saved_math
 
+# search_serve answers a line it cannot read with an error and goes on.
+with tempfile.TemporaryDirectory() as tmp:
+    import subprocess, sys
+    done = subprocess.run(
+        [sys.executable, "-c", "import sys; from dtumcp.cli import main; sys.argv = ['dtumcp', 'search_serve']; main()"],
+        input='not json\n[1]\n{"id": 3, "query": "feed"}\n', capture_output=True, text=True, timeout=60,
+        env={**os.environ, "DTU_DOWNLOADS": tmp})
+    answers = [json.loads(line) for line in done.stdout.splitlines()]
+    assert [a["id"] for a in answers] == [None, None, 3] and "error" in answers[0] and "result" in answers[2], done
+
 # A failing page analysis costs the marks, not the file or its course.
 saved_marks = mod._marks
 mod._marks = lambda path: 1 / 0

@@ -122,8 +122,9 @@ def main() -> None:
             # other {"id", "query", "only", "limit", "partial", "hideBroken"}
             # answers with the search alone.
             for line in sys.stdin:
-                ask = json.loads(line)
+                ask = {}
                 try:
+                    ask = json.loads(line)  # in the try: one bad line must not end the process either
                     if ask.get("tool"):
                         text, found = _search_answer(ask.get("query", ""), int(ask.get("org_unit_id") or 0),
                                                      int(ask.get("limit") or 15))
@@ -133,7 +134,8 @@ def main() -> None:
                                          bool(ask.get("partial")), bool(ask.get("hideBroken")))
                     print(json.dumps({"id": ask.get("id"), "result": answer}, ensure_ascii=False), flush=True)
                 except Exception as e:  # one bad search must not end the process
-                    print(json.dumps({"id": ask.get("id"), "error": str(e) or type(e).__name__}), flush=True)
+                    asked = ask.get("id") if isinstance(ask, dict) else None
+                    print(json.dumps({"id": asked, "error": str(e) or type(e).__name__}), flush=True)
             raise SystemExit(0)
         if name == "tools":
             # Names, descriptions and argument schemas as MCP clients see
