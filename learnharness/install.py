@@ -10,9 +10,9 @@ not the default. Restart LearnHarness afterwards to load the new code.
 
     uv run learnharness/install.py [plugins directory]
 
-The new dist/ is built beside the old one and swapped in only once it is
-complete, so a failed install leaves the working plugin in place and an
-update leaves no stale files. The sibling data/ is never touched.
+The new dist/ is built beside the old one and swapped in by renames only
+once it is complete, so a failed install leaves the working plugin in place
+and an update leaves no stale files. The sibling data/ is never touched.
 """
 
 import os
@@ -41,7 +41,26 @@ new = dest.with_name("dist.new")
 shutil.rmtree(new, ignore_errors=True)
 shutil.copytree(here / "dist", new)
 (new / "tools.json").write_bytes(tools.stdout)
+# Swapped by renames, each done whole or not at all, so the plugin folder is
+# never left half deleted: the old dist/ moves aside, the new one takes its
+# place, and only then is the old one deleted.
+aside = dest.with_name("dist.old")
+shutil.rmtree(aside, ignore_errors=True)  # one an earlier install could not delete
 if dest.exists():
-    shutil.rmtree(dest)
-new.rename(dest)
+    try:
+        dest.rename(aside)
+    except OSError as e:  # on Windows, a file in it is open
+        shutil.rmtree(new, ignore_errors=True)
+        raise SystemExit(f"Could not move the installed plugin aside ({e}), so it is left as it was. "
+                         "Close LearnHarness and try again.")
+try:
+    new.rename(dest)
+except OSError as e:
+    if aside.exists():
+        aside.rename(dest)
+    shutil.rmtree(new, ignore_errors=True)
+    raise SystemExit(f"Could not put the new plugin in place ({e}), so the old one is back.")
+shutil.rmtree(aside, ignore_errors=True)
+if aside.exists():
+    print(f"Could not delete the old plugin at {aside}; the next install does.")
 print(f"Installed into {dest}")
