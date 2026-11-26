@@ -157,7 +157,7 @@ teachers actually handed me this term.
   the call says so: call the same tool again with the same course or term
   for its progress and, once done, its summary. Start no other download
   until it is done.
-- `search_courses(query, org_unit_id, limit)` — searches the saved courses
+- `search_courses(query, org_unit_id, limit, kind)` — searches the saved courses
   for words: titles, unit text, announcements and the text inside files, a
   PDF's page by page. Each word matches the start of a word, so `reduc` finds
   "reductions". Matches with every word come first, best first, then those
@@ -165,7 +165,12 @@ teachers actually handed me this term.
   course, the units above it, its page (a PDF's page, a workbook's sheet),
   and the ids `get_file`, `unit_info`, `get_pdf_pages` or
   `get_announcement_attachment` take; a file the pages link to gives the
-  `linked` path that `get_file` and `get_pdf_pages` take instead. Pass an
+  `linked` path that `get_file` and `get_pdf_pages` take instead. Pass
+  `kind` to keep to kinds of item, the kind each match shows in brackets:
+  one or several, as `"pdf pptx"` or `["pdf", "pptx"]`: a file's extension, or `unit`, `announcement`,
+  `attachment`, `linked`, `link` or `video` — for instance `kind="xlsx"`
+  when you are after a calculation, or `kind="pdf pptx"` for slides and
+  notes. Left out, every kind is searched. Pass an
   `org_unit_id` to keep to one course. Courses use their own terms and
   abbreviations: when a search comes back thin, try those, or fewer words.
   Only saved courses are searched.

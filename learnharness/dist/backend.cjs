@@ -96,7 +96,7 @@ const instructions = `The learner's DTU Learn courses (DTU's Brightspace) are av
 - For questions about the learner's DTU courses, material, schedule or deadlines, answer from what these tools return, not from memory. Never invent an org unit, unit or topic id: get them from dtu_list_courses and dtu_course_contents.
 - org_unit_id takes the bracketed id or the DTU course number (02231). A course number taken in several terms is ambiguous; the tool lists the offerings, so ask which one unless the context settles it.
 - Course material is read from an offline copy. The first read of a course without one downloads it, which takes a minute or two, so say so before that call. dtu_course_contents and dtu_list_announcements give the date the copy was saved; call dtu_download_course when the learner asks for it to be brought up to date or about something newer. dtu_calendar and dtu_list_assignments are always live.
-- To find where something is covered, search with dtu_search_courses first: it looks inside every downloaded file and names the page (a PDF's page, a workbook's sheet), so dtu_get_pdf_pages can show just that page. A file the course's pages link to has no topic id: the search gives its linked path, which dtu_get_file and dtu_get_pdf_pages take in place of topic_id. The text of a page or unit marks each link to a saved file as [saved file: linked="_linked/..."] or [saved file: topic_id 7]; follow those when a page points to a reading.
+- To find where something is covered, search with dtu_search_courses first: it looks inside every downloaded file and names the page (a PDF's page, a workbook's sheet), so dtu_get_pdf_pages can show just that page. Pass kind to keep to kinds of item, as each match shows in brackets: a file's extension ("pdf", "xlsx pptx") or unit, announcement, attachment, linked, link or video; left out, every kind. A file the course's pages link to has no topic id: the search gives its linked path, which dtu_get_file and dtu_get_pdf_pages take in place of topic_id. The text of a page or unit marks each link to a saved file as [saved file: linked="_linked/..."] or [saved file: topic_id 7]; follow those when a page points to a reading.
 - When you point the learner to course material, add a fenced block with the language dtu-learn to your answer, one line per item: "topic <org_unit_id> <topic_id> pages <first>-<last> | <what to look at>" for a file (pages optional), "unit <org_unit_id> <unit_id> | <what to look at>" for a unit. The learner sees each as a card that opens it in their DTU Learn view, at that page. Use ids the dtu_ tools gave you; never invent them. For example:
 \`\`\`dtu-learn
 topic 326350 1289393 pages 4-10 | the 3-Sat ≤p DHC construction
@@ -358,7 +358,7 @@ exports.activate = ctx => {
 				// A search goes to the search process, and its hits, the
 				// titles, pages and where each opens, to the tool's card.
 				if (tool.name === "search_courses") {
-					const { text, found } = await ask({ tool: true, query: input?.query, org_unit_id: input?.org_unit_id, limit: input?.limit });
+					const { text, found } = await ask({ tool: true, query: input?.query, org_unit_id: input?.org_unit_id, limit: input?.limit, kind: input?.kind });
 					const hits = found.hits.map(({ ou, title, kind, page, course, where, target, missing }) => ({ ou, title, kind, page, course, where, target, missing }));
 					return { content: [{ type: "text", text }], details: { total: found.total, hits } };
 				}
@@ -394,7 +394,7 @@ exports.activate = ctx => {
 		// base: what the course's own relative links (/content/..., /d2l/...) are relative to.
 		return copy ? { saved: copy.saved, modules: copy.modules, files: copy.files, news: copy.news, videos: copy.videos ?? {}, base: dtuBase } : null;
 	});
-	ctx.handle("search", input => ask({ query: input?.query, hideBroken: !!input?.hideBroken }));
+	ctx.handle("search", input => ask({ query: input?.query, hideBroken: !!input?.hideBroken, kind: typeof input?.kind === "string" ? input.kind : "" }));
 	// What a reference in a tutor's answer names: its title and its course's
 	// name, from the saved copy, or nothing when the copy lacks it.
 	// A tool card's course alone ({ou}) too, and a course number for ou, as

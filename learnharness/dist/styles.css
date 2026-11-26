@@ -284,6 +284,14 @@
 .dtu-learn-outbox .dtu-learn-remove { flex: none; font-size: 1rem; line-height: 1; }
 .dtu-learn-outbox > p { margin: 0; font-size: .75rem; }
 .dtu-learn-toggle { display: flex; align-items: center; gap: .4rem; margin-bottom: .5rem; font-size: .8125rem; cursor: pointer; }
+/* The search's kind filter: chips under the box, a pressed one filled. */
+.dtu-learn-kinds { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .5rem; }
+.dtu-learn-kinds[hidden] { display: none; }
+/* 24px tall at least, as a pointer target must be (WCAG 2.5.8); more on a touch screen. */
+.dtu-learn-kind { display: inline-flex; align-items: center; min-block-size: 24px; box-sizing: border-box; }
+@media (pointer: coarse) { .dtu-learn-kind { min-block-size: 32px; padding-inline: .7rem; } }
+.dtu-learn-kind[aria-pressed="true"] { background: var(--tint-press); border-color: color-mix(in oklab, var(--foreground) 55%, transparent); font-weight: 600; }
+.dtu-learn-kind-count { margin-left: .3rem; opacity: .65; font-variant-numeric: tabular-nums; }
 /* The search box over the tree, and its results in the tree's place. */
 .dtu-learn-search, .dtu-learn-find input {
 	display: block; width: 100%; box-sizing: border-box; margin-bottom: .5rem;

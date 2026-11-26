@@ -668,6 +668,16 @@ with tempfile.TemporaryDirectory() as tmp:
     (Path(tmp) / "broken.xlsx").write_bytes(b"not a zip")
     assert mod._sheet_text(Path(tmp) / "broken.xlsx", "broken.xlsx") is None and mod._sheet_pages(Path(tmp) / "broken.xlsx") == []
 
+# search_courses' kind: an item's shown kind, an attachment's extension too,
+# linked for a file the pages link to; asked for by words or a comma list.
+assert mod._kinds("PDF", "Slides", '{"topic": 7}') == {"pdf"}
+assert mod._kinds("File, broken · online", "Exam", '{"topic": 8}') == {"file"}
+assert mod._kinds("Link · online", "Site", '{"topic": 9}') == {"link"}
+assert mod._kinds("attachment", "homework1.PDF", '{"attachment": "1/2"}') == {"attachment", "pdf"}
+assert mod._kinds("XLSX", "data.xlsx", '{"linked": "_linked/x/data.xlsx"}') == {"xlsx", "linked"}
+assert mod._kind_list(" .PDF, xlsx  unit,") == {"pdf", "xlsx", "unit"} and mod._kind_list("") == set()
+assert mod._kind_list(["pdf", ".PPTX"]) == {"pdf", "pptx"} and mod._kind_list([]) == set()
+
 # A failing page analysis costs the marks, not the file or its course.
 saved_marks = mod._marks
 mod._marks = lambda path: 1 / 0
@@ -1329,6 +1339,15 @@ with tempfile.TemporaryDirectory() as tmp:
     assert mod.search_courses("quokka").startswith("No matches")
     os.utime(record, (time.time() + 5, time.time() + 5))
     assert mod.search_courses("quokka").startswith("1 match:")
+    assert mod.search_courses("quokka", kind="unit").startswith("1 match:")
+    assert mod._search("quokka")["kinds"] == {"unit": 1}  # for the view's filter, counted before kinds keeps to any
+    assert mod._search("quokka", kinds={"pdf"})["kinds"] == {"unit": 1} and not mod._search("quokka", kinds={"pdf"})["hits"]
+    assert mod.search_courses("wombat", kind="unit").startswith('No matches for "wombat" among items of kind unit')
+    try:
+        mod.search_courses("quokka", kind="pdf")
+        raise AssertionError("an unknown kind is named")
+    except RuntimeError as e:
+        assert "of kind pdf. The kinds there are: unit." in str(e), e
     record.unlink()
     assert mod.search_courses("quokka").startswith("No course is downloaded yet")
     try:

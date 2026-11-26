@@ -293,7 +293,7 @@ def download_term(term: str = "", ctx: Context | None = None) -> str:
 
 
 @_tool
-def search_courses(query: str, org_unit_id: int | str = 0, limit: int = 15) -> str:
+def search_courses(query: str, org_unit_id: int | str = 0, limit: int = 15, kind: str | list[str] = "") -> str:
     """Search the downloaded courses for words: titles, unit text, announcements
     and the text inside files, a PDF's page by page. Use it to find where
     something is covered before reading files one by one.
@@ -310,9 +310,15 @@ def search_courses(query: str, org_unit_id: int | str = 0, limit: int = 15) -> s
     the match.
     org_unit_id limits it to one course (an org unit id or a DTU course
     number); left out, every downloaded course. limit is at most 50.
+    kind limits it to kinds of item, one or several ("pdf", "xlsx pptx" or
+    ["pdf", "pptx"]): a
+    file's extension as its kind shows it (pdf, xlsx, pptx, docx, html,
+    txt, ...), or unit, announcement, attachment (also found by its
+    extension), linked (a file the pages link to), link or video. Left out,
+    every kind.
     Only downloaded courses are searched; download_course adds one.
     """
-    return _search_answer(query, org_unit_id, limit)[0]
+    return _search_answer(query, org_unit_id, limit, kind)[0]
 
 
 @_tool

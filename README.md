@@ -232,7 +232,7 @@ online.
 | `list_assignments(org_unit_id)` | Assignment folders and due dates |
 | `list_announcements(org_unit_id)` | Course announcements |
 | `get_announcement_attachment(org_unit_id, news_id, file_id, first_page=1, last_page=0, first_row=1, find="")` | A file attached to an announcement, read like `get_file` |
-| `search_courses(query, org_unit_id=0, limit=15)` | Where words occur in the downloaded courses, with the ids and PDF page to read next |
+| `search_courses(query, org_unit_id=0, limit=15, kind="")` | Where words occur in the downloaded courses, with the ids and page to read next. `kind` keeps to kinds of item (`"pdf"`, `"xlsx pptx"`, `"unit"`, `"announcement"`, `"linked"`, ...) |
 | `calendar(days=7, org_unit_id=0)` | What is scheduled in the next `days` days |
 | `download_course(org_unit_id)` | The whole course saved for offline use, with an `index.html` to browse it |
 | `download_term(term="")` | Every course of a term saved the same way; the newest term if none is given |

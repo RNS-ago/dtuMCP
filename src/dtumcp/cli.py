@@ -15,7 +15,7 @@ from .auth import login
 from .courses import _stored_marks
 from .files import _blocks, _saved_text
 from .download import _status
-from .search import _search, _search_answer
+from .search import _kind_list, _search, _search_answer
 from .tools import (
     calendar, course_contents, course_tab, download_course, download_term, download_video,
     get_announcement_attachment, get_file, get_pdf_pages, list_announcements, list_assignments,
@@ -119,21 +119,22 @@ def main() -> None:
             # The LearnHarness plugin's searches: a JSON request a line on
             # stdin, its answer a line on stdout, from one process that stays,
             # rather than a process per keystroke in the view's search box.
-            # {"id", "tool": true, "query", "org_unit_id", "limit"} answers as
-            # search_courses does, with the search for the tool card; any
-            # other {"id", "query", "only", "limit", "partial", "hideBroken"}
-            # answers with the search alone.
+            # {"id", "tool": true, "query", "org_unit_id", "limit", "kind"}
+            # answers as search_courses does, with the search for the tool
+            # card; any other {"id", "query", "only", "limit", "partial",
+            # "hideBroken", "kind"} answers with the search alone.
             for line in sys.stdin:
                 ask = {}
                 try:
                     ask = json.loads(line)  # in the try: one bad line must not end the process either
                     if ask.get("tool"):
                         text, found = _search_answer(ask.get("query", ""), int(ask.get("org_unit_id") or 0),
-                                                     int(ask.get("limit") or 15))
+                                                     int(ask.get("limit") or 15), ask.get("kind") or "")
                         answer = {"text": text, "found": found}
                     else:
                         answer = _search(ask.get("query", ""), int(ask.get("only") or 0), int(ask.get("limit") or 100),
-                                         bool(ask.get("partial")), bool(ask.get("hideBroken")))
+                                         bool(ask.get("partial")), bool(ask.get("hideBroken")),
+                                         _kind_list(ask.get("kind") or ""))
                     print(json.dumps({"id": ask.get("id"), "result": answer}, ensure_ascii=False), flush=True)
                 except Exception as e:  # one bad search must not end the process
                     asked = ask.get("id") if isinstance(ask, dict) else None

@@ -1,6 +1,7 @@
 """The search index over the saved courses."""
 
 import json
+from collections import Counter
 import re
 import sqlite3
 from contextlib import closing
@@ -194,7 +195,29 @@ def _search_docs(copy: dict) -> list[dict]:
     return entries
 
 
-def _search(query, only: int = 0, limit: int = 15, partial: bool = True, hide_broken: bool = True) -> dict:
+def _kinds(kind: str, title: str, target: str) -> set[str]:
+    """The kinds a search item can be asked for by (search_courses' kind):
+    the first word of the kind it shows, lowercased (pdf, xlsx, unit,
+    announcement, link, video, file for a broken one), an attachment's file
+    extension too, and linked for a file the course's pages link to."""
+    found = {re.split(r"[\s,·]+", kind.strip())[0].lower()}
+    if "attachment" in found and "." in title:
+        found.add(title.rsplit(".", 1)[1].lower())
+    if '"linked"' in target:
+        found.add("linked")
+    return found
+
+
+def _kind_list(kind: str | list[str]) -> set[str]:
+    """search_courses' kind as the set it asks for: a list, or words or a
+    comma list in one string, a leading dot and case ignored; empty for
+    every kind."""
+    text = " ".join(kind) if isinstance(kind, (list, tuple)) else kind or ""
+    return {k.lower().lstrip(".") for k in re.split(r"[\s,]+", text) if k.strip(" .")}
+
+
+def _search(query, only: int = 0, limit: int = 15, partial: bool = True, hide_broken: bool = True,
+            kinds: set | tuple = ()) -> dict:
     """The saved courses searched for query's words, ranked. A course
     material item (a file, a unit's text, an announcement) ranks by how many
     of the words it has, then by its best page: how many of the words that
@@ -205,10 +228,12 @@ def _search(query, only: int = 0, limit: int = 15, partial: bool = True, hide_br
     and with every word) and the first limit hits, as the plugin's view
     shows them: the item, its course, what it points at, its best PDF page
     and others as good, the words it lacks, and a snippet split so that its
-    odd parts are matches."""
+    odd parts are matches. kinds keeps to items of those kinds (_kinds);
+    kinds counts the matches of each kind before that, for the view's
+    filter."""
     terms = _terms(query)
     if not terms:
-        return {"total": 0, "complete": 0, "hits": []}
+        return {"total": 0, "complete": 0, "hits": [], "kinds": {}}
     anything = " OR ".join(term for _, term in terms)
     with closing(_index()) as db:
         _sync_index(db)
@@ -236,6 +261,12 @@ def _search(query, only: int = 0, limit: int = 15, partial: bool = True, hide_br
                 pages.sort(key=lambda p: (-p[0], p[1]))  # most of the words, then the best score
                 found.append((len(words), pages[0][0], pages[0][1], doc, pages, words))
         found.sort(key=lambda f: (-f[0], -f[1], f[2]))
+        # Counted before kinds keeps to some, so the view's filter can offer
+        # every kind there is; an item counts under each kind it answers to.
+        of = {f[3]: _kinds(docs[f[3]][4], docs[f[3]][2], docs[f[3]][5]) for f in found}
+        counts = Counter(k for f in found for k in of[f[3]])
+        if kinds:
+            found = [f for f in found if of[f[3]] & set(kinds)]
         hits = []
         for _, on_page, _, doc, pages, words in found[:limit]:
             _, ou, title, place, kind, target, _, count = docs[doc]
@@ -258,14 +289,21 @@ def _search(query, only: int = 0, limit: int = 15, partial: bool = True, hide_br
         for hit, row in zip(hits, rows):
             if snippet := snippets.get(row):
                 hit["snippet"] = re.split("[\x02\x03]", snippet)
-    return {"total": len(found), "complete": sum(1 for f in found if f[0] == len(terms)), "hits": hits}
+    return {"total": len(found), "complete": sum(1 for f in found if f[0] == len(terms)), "hits": hits,
+            "kinds": dict(counts.most_common())}
 
 
-def _search_answer(query, org_unit_id: int | str = 0, limit: int = 15) -> tuple[str, dict]:
+def _search_answer(query, org_unit_id: int | str = 0, limit: int = 15,
+                   kind: str | list[str] = "") -> tuple[str, dict]:
     """search_courses' text, and the search it shows, for the plugin's tool card."""
     with closing(_index()) as db:
         _sync_index(db)
         names = dict(db.execute("SELECT ou, name FROM courses ORDER BY folder"))
+        known = set().union(*(_kinds(*row) for row in db.execute("SELECT kind, title, target FROM docs")))
+    kinds = _kind_list(kind)
+    if kinds - known and names:
+        raise RuntimeError(f"No item in the downloaded courses is of kind {', '.join(sorted(kinds - known))}. "
+                           f"The kinds there are: {', '.join(sorted(known))}.")
     only = org_unit_id = _number(org_unit_id or 0)
     if 0 < org_unit_id <= 99999:
         # A course number, as _resolve tells them apart, matched to the saved courses.
@@ -277,13 +315,14 @@ def _search_answer(query, org_unit_id: int | str = 0, limit: int = 15) -> tuple[
                 "Pass the org unit id." if matches else
                 f"Course {code} is not downloaded. Run list_courses and download_course.")
         only = matches[0]
-    found = _search(query, only, min(50, max(1, limit)))
+    found = _search(query, only, min(50, max(1, limit)), kinds=kinds)
     total, hits, complete = found["total"], found["hits"], found["complete"]
     if not total:
         if not names:
             return "No course is downloaded yet, so there is nothing to search. download_course saves one.", found
         saved = "; ".join(f"[{ou}] {name}" for ou, name in names.items())
-        return (f'No matches for "{query}" in {f"course {only}" if only else "the downloaded courses"}. '
+        among = f" among items of kind {', '.join(sorted(kinds))}" if kinds else ""
+        return (f'No matches for "{query}"{among} in {f"course {only}" if only else "the downloaded courses"}. '
                 f"Downloaded: {saved}."), found
     shown = f"; the best {len(hits)} shown" if total > len(hits) else ""
     if complete == total:

@@ -380,7 +380,15 @@ function mount(ctx, container, signal, tutor, opener) {
 	const results = el("div", "dtu-learn-tree-scroll dtu-learn-results");
 	results.setAttribute("aria-live", "polite");
 	results.hidden = true;
-	left.append(note, search, toggle, treeBox, results);
+	// While searching, a chip per kind among the matches (PDF 45, XLSX 26,
+	// unit 4): pressed ones keep the results to those kinds, none pressed
+	// shows every kind. The choice lasts while the view is open.
+	const kindBar = el("div", "dtu-learn-kinds");
+	kindBar.setAttribute("role", "group");
+	kindBar.setAttribute("aria-label", "Keep the results to these kinds");
+	kindBar.hidden = true;
+	const chosen = new Set();
+	left.append(note, search, kindBar, toggle, treeBox, results);
 	pane.append(el("p", "dtu-learn-muted", "Pick a unit or a topic to read it here."));
 	// The bar between the tree and the pane: drag it, or focus it and use the
 	// arrow keys, to share the width differently; a double click puts it
@@ -549,6 +557,7 @@ function mount(ctx, container, signal, tutor, opener) {
 		const query = search.value.trim();
 		if (!query) {
 			results.replaceChildren();
+			kindBar.hidden = true;
 			if (results.hidden) return;
 			results.hidden = true;
 			treeBox.hidden = false;
@@ -560,7 +569,7 @@ function mount(ctx, container, signal, tutor, opener) {
 		pending = setTimeout(async () => {
 			let answer;
 			try {
-				answer = await ctx.call("search", { query, hideBroken });
+				answer = await ctx.call("search", { query, hideBroken, kind: [...chosen].join(" ") });
 			} catch (error) {
 				answer = error;
 			}
@@ -599,13 +608,39 @@ function mount(ctx, container, signal, tutor, opener) {
 		search.select();
 	}, { capture: true, signal });
 
+	// A file kind is named as the results tag it (PDF); a kind of item as a word (unit).
+	const ITEM_KINDS = new Set(["unit", "announcement", "attachment", "linked", "link", "video", "file"]);
+	function kinds(counts) {
+		// The chip that had the focus keeps it across the redraw.
+		const focused = kindBar.contains(container.ownerDocument.activeElement) ? container.ownerDocument.activeElement.dataset.kind : undefined;
+		const shown = { ...counts };
+		for (const kind of chosen) shown[kind] ??= 0; // a pressed kind with no matches stays, to be let go
+		kindBar.replaceChildren(...Object.entries(shown).map(([kind, n]) => {
+			const chip = el("button", "dtu-learn-chip dtu-learn-kind");
+			chip.type = "button";
+			chip.dataset.kind = kind;
+			chip.setAttribute("aria-pressed", String(chosen.has(kind)));
+			chip.append(ITEM_KINDS.has(kind) ? kind : kind.toUpperCase(), el("span", "dtu-learn-kind-count", String(n)));
+			chip.addEventListener("click", () => {
+				if (chosen.has(kind)) chosen.delete(kind);
+				else chosen.add(kind);
+				find();
+			});
+			return chip;
+		}));
+		kindBar.hidden = !kindBar.childElementCount;
+		if (focused) kindBar.querySelector(`[data-kind="${CSS.escape(focused)}"]`)?.focus();
+	}
+
 	function list(answer, query) {
 		if (answer instanceof Error) {
+			kindBar.hidden = true;
 			results.replaceChildren(el("p", "dtu-learn-error", answer.message));
 			return;
 		}
 		const { total, hits } = answer;
-		const count = el("p", "dtu-learn-muted", !total ? "No results. Only downloaded courses are searched."
+		kinds(answer.kinds ?? {});
+		const count = el("p", "dtu-learn-muted", !total ? (chosen.size ? "No results of the kinds chosen." : "No results. Only downloaded courses are searched.")
 			: total > hits.length ? `${total} results, the first ${hits.length} shown` : `${total} result${total === 1 ? "" : "s"}`);
 		const items = el("ul", "dtu-learn-hits");
 		for (const hit of hits) {
