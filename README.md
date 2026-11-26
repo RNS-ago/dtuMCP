@@ -53,7 +53,8 @@ uv tool install git+https://github.com/RNS-ago/dtuMCP
 ```
 
 This puts a `dtumcp` command in `~/.local/bin` (`%USERPROFILE%\.local\bin` on
-Windows). Add `--reinstall` to update.
+Windows). Add `--reinstall` to update. With an SSH key at GitHub,
+`uv tool install git+ssh://git@github.com/RNS-ago/dtuMCP` does the same.
 
 To work on the code, run `uv tool install -e .` in a clone instead: `dtumcp`
 then runs the clone's code, so a `git pull` or an edit takes effect at the
