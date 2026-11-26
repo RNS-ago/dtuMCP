@@ -234,8 +234,8 @@ online.
 | `get_announcement_attachment(org_unit_id, news_id, file_id, first_page=1, last_page=0, first_row=1, find="")` | A file attached to an announcement, read like `get_file` |
 | `search_courses(query, org_unit_id=0, limit=15, kind="")` | Where words occur in the downloaded courses, with the ids and page to read next. `kind` keeps to kinds of item (`"pdf"`, `"xlsx pptx"`, `"unit"`, `"announcement"`, `"linked"`, ...) |
 | `calendar(days=7, org_unit_id=0)` | What is scheduled in the next `days` days |
-| `download_course(org_unit_id)` | The whole course saved for offline use, with an `index.html` to browse it |
-| `download_term(term="")` | Every course of a term saved the same way; the newest term if none is given |
+| `download_course(org_unit_id, force=False)` | The whole course saved for offline use, with an `index.html` to browse it; `force` (`-f`, `--force` on the command line) replaces its folder with a fresh copy, keeping the old one if the download fails |
+| `download_term(term="", force=False)` | Every course of a term saved the same way; the newest term if none is given |
 
 - **Course numbers work as ids**: `course_contents 02231` is the same as
   `course_contents 326352`. A number offered in more than one term is

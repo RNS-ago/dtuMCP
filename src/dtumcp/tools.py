@@ -230,7 +230,7 @@ def _pdf_images(path: Path, title, first_page: int, last_page: int) -> list[str 
 
 
 @_tool
-def download_course(org_unit_id: int | str, ctx: Context | None = None) -> str:
+def download_course(org_unit_id: int | str, force: bool = False, ctx: Context | None = None) -> str:
     """Save a course for offline use: its files, unit text and announcements.
 
     Files land in <course>/<unit>/ in this server's data folder
@@ -242,11 +242,14 @@ def download_course(org_unit_id: int | str, ctx: Context | None = None) -> str:
     Nothing comes back as text -- for that, ask for the one topic with get_file.
     One that takes over about two minutes goes on in the background: call
     download_course again with the same course for its progress and summary.
+    force replaces the course's folder with a fresh copy once that copy is
+    whole, so files the course no longer has, and videos saved by
+    download_video, are removed. A download that fails keeps the old copy.
     """
     ou = _resolve(org_unit_id)
 
     def work(report):
-        row = _download(ou, report=report)
+        row = _download(ou, report=report, force=force)
         _status(keep=True)  # a blank line between the ✓ line and the table
         return _summary([row])
 
@@ -254,7 +257,7 @@ def download_course(org_unit_id: int | str, ctx: Context | None = None) -> str:
 
 
 @_tool
-def download_term(term: str = "", ctx: Context | None = None) -> str:
+def download_term(term: str = "", force: bool = False, ctx: Context | None = None) -> str:
     """Download every course of one term for offline use, as download_course does.
 
     term is written like the headings of list_courses: "Fall 2026", "Jan 25".
@@ -262,6 +265,7 @@ def download_term(term: str = "", ctx: Context | None = None) -> str:
     is reported and the rest still download. A term takes minutes, so after
     about two minutes the download goes on in the background: call
     download_term again with the same term for its progress and summary.
+    force replaces each course's folder with a fresh copy, as download_course's does.
     """
     want = None
     if term:
@@ -280,7 +284,7 @@ def download_term(term: str = "", ctx: Context | None = None) -> str:
         for i, ou in enumerate(units, 1):
             prefix = f"[{i}/{len(units)}] "
             try:
-                rows.append(_download(ou["Id"], prefix, report))
+                rows.append(_download(ou["Id"], prefix, report, force))
             except (RuntimeError, httpx.HTTPError) as e:
                 rows.append((_code(ou["Name"]), None, [("could not download", [str(e)])]))
                 _status(("31", "  ✗ "), ("2", prefix), ("", ou["Name"]), keep=True)

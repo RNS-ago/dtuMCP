@@ -1,4 +1,5 @@
 """Tests for dtumcp.cli."""
+import io
 import json
 import os
 import subprocess
@@ -45,3 +46,35 @@ def test_args():
         for bad, says in [("[1]", "takes a JSON object"), ("{", "takes a JSON object"), ('{"nope": 1}', "missing a required argument: 'query'")]:
             done = cli("search_courses", "--args", bad)
             assert done.returncode and says in done.stderr, (bad, done)
+
+
+def test_force_flag():
+    # -f and --force reach the download tools as force=True, anywhere after the command.
+    script = ("import sys; from dtumcp import cli; "
+              "cli.COMMANDS['download_course'] = lambda org_unit_id, force=False, ctx=None: f'{org_unit_id} {force}'; "
+              "sys.argv[0] = 'dtumcp'; cli.main()")
+    for argv, says in [(["1"], "1 False"), (["-f", "1"], "1 True"), (["1", "--force"], "1 True")]:
+        done = subprocess.run([sys.executable, "-c", script, "download_course", *argv], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=60)
+        assert done.stdout.strip() == says, (argv, done)
+    assert "download_course <org_unit_id> [-f|--force]" in mod._usage()
+
+
+def test_confirm_force(monkeypatch):
+    # At a terminal, --force goes on only on a yes; no answer is a no.
+    for answer, goes_on in [("y\n", True), ("YES\n", True), ("n\n", False), ("\n", False), ("", False)]:
+        monkeypatch.setattr(sys, "stdin", io.StringIO(answer))
+        try:
+            mod._confirm_force("download_term", ["Fall 2026"])
+            went = True
+        except SystemExit as e:
+            went = False
+            assert str(e) == "Nothing was deleted.", e
+        assert went == goes_on, answer
+
+    # A course id names the folder about to be replaced, given as the command line gives it: text.
+    mod._copy = lambda ou: {"root": f"/courses/{ou}"} if ou == 326352 else None
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    mod._confirm_force("download_course", ["326352"])
+    assert "/courses/326352" in sys.stderr.getvalue(), sys.stderr.getvalue()

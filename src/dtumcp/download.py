@@ -214,14 +214,28 @@ def _each(pool, fn, items, phase: str, say) -> list:
     return out
 
 
-def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
+def _download(ou: int, prefix: str = "", report=lambda text: None, force: bool = False) -> tuple:
     """download_course's work, for one org unit id. prefix leads the status
     line, so a term download can say which course of how many it is on.
     report gets the same line as plain text, for _reporter. Returns a row
     for _summary: the course number, its counts and its problems. Two
-    downloads of one course in this process take turns."""
+    downloads of one course in this process take turns. force builds the
+    copy afresh, so files the course no longer has go too."""
     with _course_locks.setdefault(ou, threading.Lock()):
-        return _fetch_course(ou, prefix, report)
+        try:
+            return _fetch_course(ou, prefix, report, force)
+        finally:  # a forced download that failed leaves its half-built copy here
+            shutil.rmtree(_staging(ou), ignore_errors=True)
+            try:
+                _staging(ou).parent.rmdir()
+            except OSError:
+                pass  # absent, or another course's forced download is using it
+
+
+def _staging(ou: int):
+    """Where a forced download builds its copy, a level deeper than _copies
+    looks, so the old copy is the one read until the new one is whole."""
+    return DOWNLOADS / "_partial" / str(ou)
 
 
 def _without_hidden(texts: list, hidden: list) -> None:
@@ -232,7 +246,7 @@ def _without_hidden(texts: list, hidden: list) -> None:
             texts[n - 1] = texts[n - 1].replace(" ".join(text.split()), "").strip()
 
 
-def _fetch_course(ou: int, prefix: str, report) -> tuple:
+def _fetch_course(ou: int, prefix: str, report, force: bool = False) -> tuple:
     name = _course_name(ou)
 
     def say(what, done=0, total=0):
@@ -250,7 +264,9 @@ def _fetch_course(ou: int, prefix: str, report) -> tuple:
     jobs = list(_file_topics(modules))
     atts = [(n["Id"], a) for n in news for a in n.get("Attachments") or []]
 
-    root = DOWNLOADS / _safe(name)
+    final = DOWNLOADS / _safe(name)
+    root = _staging(ou) if force else final
+    shutil.rmtree(_staging(ou), ignore_errors=True)  # left by a process that died mid-download
     root.mkdir(parents=True, exist_ok=True)
     # ponytail: eight at a time; a course is a few hundred files at most, so
     # nothing here needs a rate limiter or a resumable queue.
@@ -357,6 +373,19 @@ def _fetch_course(ou: int, prefix: str, report) -> tuple:
     part = root / f"_course-{ou}.json.part"
     part.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
     part.replace(root / f"_course-{ou}.json")
+    if root != final:
+        # The whole new copy takes the old one's place; the old one goes only then.
+        old = root.with_name(f"{ou}.old")
+        shutil.rmtree(old, ignore_errors=True)
+        if final.exists():
+            final.rename(old)
+        try:
+            root.rename(final)
+        except OSError:
+            if old.exists():
+                old.rename(final)  # the old copy back, or the course would have none
+            raise
+        shutil.rmtree(old, ignore_errors=True)
     _write_landing()
     # Indexed now rather than on the first search, which would wait for it.
     # A failure here costs nothing: the next search indexes the course.

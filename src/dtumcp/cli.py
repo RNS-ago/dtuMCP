@@ -12,7 +12,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from .app import BASE, COOKIE_FILE, DOWNLOADS, RUN, _status_error, mcp
 from .auth import login
-from .courses import _stored_marks
+from .courses import _copy, _stored_marks
 from .files import _blocks, _saved_text
 from .download import _status
 from .search import _kind_list, _search, _search_answer
@@ -50,8 +50,9 @@ def _usage() -> str:
     """Build the help text from the same docstrings the MCP tools advertise."""
     lines = [f"Usage: {RUN} [command] [arguments]", "", "Commands:"]
     for name, fn in COMMANDS.items():
-        params = " ".join(f"<{p}>" for p in inspect.signature(fn).parameters if p != "ctx")
-        lines.append(f"  {name} {params}".rstrip())
+        takes = inspect.signature(fn).parameters
+        params = " ".join(f"<{p}>" for p in takes if p not in ("ctx", "force"))
+        lines.append(f"  {name} {params}{' [-f|--force]' if 'force' in takes else ''}".rstrip())
         lines.append(f"      {inspect.getdoc(fn).splitlines()[0]}")
     lines += [
         "  tools",
@@ -85,8 +86,27 @@ def _usage() -> str:
         f"  {RUN} list_courses",
         f"  {RUN} course_contents 326350",
         f'  {RUN} download_term "Fall 2026"',
+        f'  {RUN} download_course 326350 --force',
     ]
     return "\n".join(lines)
+
+
+def _confirm_force(name: str, args: list) -> None:
+    """Say what --force deletes and stop unless the user says yes."""
+    # The id comes as text: download_course takes int | str, which main leaves alone.
+    copy = _copy(int(args[0])) if name == "download_course" and args and str(args[0]).isdigit() else None
+    what = (f"the saved copy in\n  {copy['root']}\n" if copy
+            else "the saved copy of every course in that term\n" if name == "download_term"
+            else "the course's saved copy ")
+    print(f"--force replaces {what}with a fresh download. Files the course no longer has,\n"
+          "and videos saved with download_video, are deleted.", file=sys.stderr)
+    print("Continue? [y/N] ", end="", file=sys.stderr, flush=True)
+    try:
+        answer = input()
+    except EOFError:
+        answer = ""
+    if answer.strip().lower() not in ("y", "yes"):
+        raise SystemExit("Nothing was deleted.")
 
 
 def main() -> None:
@@ -151,6 +171,12 @@ def main() -> None:
             raise SystemExit(0)
         if name not in COMMANDS:
             raise SystemExit(f"Unknown command {name!r}.\n\n{_usage()}")
+        # -f or --force, anywhere after the command, for the downloads: replace
+        # each course's folder with a fresh copy.
+        forced = "force" in inspect.signature(COMMANDS[name]).parameters and bool(
+            {"-f", "--force"} & set(sys.argv[2:]))
+        if forced:
+            sys.argv[2:] = [a for a in sys.argv[2:] if a not in ("-f", "--force")]
         # Numbers only where the command takes an int: download_term "2026"
         # stays text, and a course number keeps its leading 0.
         params = list(inspect.signature(COMMANDS[name]).parameters.values())
@@ -175,11 +201,17 @@ def main() -> None:
             args, named = [], {
                 k: int(v) if isinstance(v, str) and v.lstrip("-").isdigit() and takes[k].annotation in (int, "int") else v
                 for k, v in named.items() if v is not None and k != "ctx" and k in takes}
+        if forced:
+            named["force"] = True
         try:
             # Let inspect report a wrong argument count instead of a traceback.
             inspect.signature(COMMANDS[name]).bind(*args, **named)
         except TypeError as e:
             raise SystemExit(f"{name}: {e}\n\n{_usage()}")
+        if forced and sys.stdin.isatty():
+            # Asked only at a terminal: an MCP client asks before running a tool,
+            # and LearnHarness and scripts have no one to answer.
+            _confirm_force(name, args)
         try:
             result = COMMANDS[name](*args, **named)
         except RuntimeError as e:

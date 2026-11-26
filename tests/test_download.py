@@ -167,3 +167,26 @@ def test_summary():
 
   Open /dl/index.html to see every course.""", got
     assert mod._summary([("02242", None, [("could not download", ["timed out"])])]).startswith("  ✗ 02242")
+
+
+def test_force():
+    # force empties the course's folder before saving; without it, old files stay.
+    mod._course_name = lambda ou: "Forced course"
+    mod._get = lambda path, **kw: {"Modules": []} if path.endswith("/toc") else []
+    root = mod.DOWNLOADS / "Forced course"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "gone.pdf").write_text("old")
+    mod._download(21)
+    assert (root / "gone.pdf").exists()
+    mod._download(21, force=True)
+    assert not (root / "gone.pdf").exists() and (root / "_course-21.json").exists()
+    assert not mod._staging(21).exists()
+    # A forced download that fails partway keeps the old copy and leaves nothing behind.
+    (root / "kept.pdf").write_text("old")
+    mod._index_html = lambda *a: 1 / 0
+    try:
+        mod._download(21, force=True)
+    except ZeroDivisionError:
+        pass
+    assert (root / "kept.pdf").exists() and (root / "_course-21.json").exists()
+    assert not mod._staging(21).parent.exists()
