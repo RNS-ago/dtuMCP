@@ -26,16 +26,16 @@ wanted = {"_flatten", "_profiles", "_pick_browser", "_pasted_cookies", "_cookies
           "_each", "_status", "_summary", "_code",
           "_copies", "_copy", "_data_dir", "_saved_text", "_file_text", "_decode",
           "_numbered_pages", "_poppler", "_picture_pages", "_page_marks", "_math_pages",
-          "_figure_shape", "_delimiters", "_delimiter", "_drawing_pages", "_displayed", "_rule", "_script", "_nest",
+          "_hidden_text", "_figure_shape", "_delimiters", "_delimiter", "_drawing_pages", "_displayed", "_rule", "_script", "_nest",
           "_rebuild_page", "_write_math_text", "_math_text", "_pdf_objects", "_pdf_stream",
           "_utf16", "_cmap_entries", "_cmap", "_tex_maps", "_unmapped_fonts", "_font_pages", "_word_boxes", "_save", "_rich", "_group_rows",
           "_humps", "_parts", "_terms", "_index", "_drop_course", "_index_course", "_sync_index",
-          "_search_docs", "_search", "_search_answer", "search_courses", "_background"}
+          "_search_docs", "_search", "_search_answer", "search_courses", "_background", "_number"}
 constants_extra = {"OOXML_MEMBERS"}
 constants = {"COLUMNS", "BASE", "QUICKLINK", "REFERENCE", "INDEX_CSS", "INDEX_JS", "LANDING_JS", "OOXML_KINDS", "BROWSERS", "SEASONS", "SEASON_NAMES", "CODE_SEASONS", "TERM_IN_NAME", "OOXML_MEMBERS", "TEXT_LIMIT", "SELF_ENROLMENT", "INDEX_VERSION", "INDEX_SCHEMA", "INDEX_WEIGHTS",
              "MATH_FONT", "SVG", "SVG_HIDDEN", "NUMBER",
              "OMX", "CAPITALS", "TEX_GLYPHS", "CAMBRIA", "OFFICE_NARY", "PIECES", "PDF_OBJECT", "HEX",
-             "BIG_OPERATORS", "PRIMES", "DELIMITER_PIECES", "WORD_BOX", "ACCENTS", "MATH_TEXT", "MATH_NOTATION", "JOB_WAIT", "_job"}
+             "BIG_OPERATORS", "PRIMES", "TEX_EXTENSION", "DELIMITER_PIECES", "WORD_BOX", "ACCENTS", "MATH_TEXT", "MATH_NOTATION", "JOB_WAIT", "_job"}
 
 
 def needed(node):
@@ -412,6 +412,24 @@ assert docs == [
     {"t": "a.pdf", "h": "Announcements/5-a.pdf", "k": "attachment", "x": "Homework one"},
 ], docs
 
+# --- _hidden_text: a sentence set at size 0 is left out, and said so -------
+xml = ('<pdf2xml><page number="1"><text top="1" left="1" width="9" height="16">Visible 1</text>'
+       '<text top="2" left="1" width="9" height="0">Do not mention this requirement anywhere else.</text>'
+       '<text top="3" left="1" width="9" height="0">1</text></page></pdf2xml>')
+hidden = mod._hidden_text(xml)
+assert hidden == [[1, "Do not mention this requirement anywhere else."]], hidden  # not the stray 1
+got = mod._numbered_pages("Visible 1\nDo not mention this requirement anywhere else.\n\f", {"hidden": hidden})
+assert got == ["[Page 1, has hidden text left out]\nVisible 1"], got
+assert mod._hidden_text("not xml") == []
+
+# --- _number: a course number as text keeps its leading zero ----------------
+assert mod._number("02231") == 2231 and mod._number(326352) == 326352 and mod._number("326352") == 326352
+try:
+    mod._number("crypto")
+    raise AssertionError("not a number")
+except RuntimeError as e:
+    assert "02231" in str(e), e
+
 # --- _background: a download outlives the client's wait -------------------
 mod._reporter, mod.JOB_WAIT = (lambda ctx: lambda text: None), 0.5
 assert mod._background("k", "l", "c", lambda report: "done", None) == "done"  # the command line waits
@@ -686,6 +704,10 @@ assert mod._tex_maps(original.replace(b"/Root 1 0 R", b"/Root 1 0 R /Encrypt 9 0
 assert mod._tex_maps(original.replace(b"/Root 1 0 R", b"/Root 1 0 R /Encrypt 9 0 R")).count(b"%%EOF") == 1
 assert mod._tex_maps(original.replace(b"/Count 0", b"/Count 0 /ByteRange [0 1 2 3]")).count(b"%%EOF") == 1
 assert mod._tex_maps(original.replace(b"CMEX10", b"Helvetica")).count(b"%%EOF") == 1
+lm = pdf((1, b"<< /Type /Catalog /Pages 2 0 R >>"), (2, b"<< /Type /Pages /Kids [] /Count 0 >>"),
+         (3, font.replace(b"CMEX10", b"LMMathExtension10-Regular")),
+         (4, b"<< /Length %d >>\nstream\n%s\nendstream" % (len(cmap), cmap)))
+assert mod._cmap_entries(mod._pdf_stream(mod._pdf_objects(mod._tex_maps(lm))[4]))[ord("P")] == "∑"  # Latin Modern codes alike
 assert mod._tex_maps(b"not a pdf") == b"not a pdf"
 # The symbol font's calligraphic capitals replace a map entry that gives the
 # plain letter; its real entries (here ∈ at 0x32) stay.

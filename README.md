@@ -267,6 +267,9 @@ online.
     of its glyphs, as PowerPoint for the Mac embeds Cambria Math. Text tools
     then write its codes instead, so `L^Σ_{CPA−0}` reads `L^8_{6!7$0}`. Only
     the page image shows those symbols.
+  - *hidden text left out*: sentences set at size 0, which no reader sees,
+    such as a course's planted instructions to catch AI help. They are taken
+    out of the page's text and of search.
 
   These are worked out once per PDF while a course downloads (a few seconds
   for a long deck) and kept in its `_course-<id>.json`; a copy saved before
@@ -347,7 +350,8 @@ symbols but tell text tools the wrong characters: pdfTeX's map from font codes
 to Unicode leaves out the big operators, the calligraphic and blackboard
 capitals and the `\big` brackets, so a sum reads as `X` or `P`, 𝒩𝒫 as `N P`,
 ℕ as `N`, and brackets as invisible control characters. The download completes
-those maps (for TeX's `CMEX`, `CMSY` and `MSBM` fonts) in an update added at
+those maps (for TeX's `CMEX`, `CMSY` and `MSBM` fonts, and Latin Modern's
+`LMMathExtension` and `LMMathSymbols`) in an update added at
 the end of the file, which leaves every original byte and every drawn page as
 it was and is kept only when poppler reads the result with as many pages. So
 `get_file`, search, a PDF viewer's copy and paste and the LearnHarness viewer

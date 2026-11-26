@@ -426,8 +426,17 @@ def _get(path: str, **params):
     return r.json()
 
 
+def _number(value: int | str) -> int:
+    """An org unit id or course number as a number. A course number written
+    as text keeps its leading zero, "02231", which JSON has no integer for."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise RuntimeError(f"{value!r} is not an org unit id or a course number, such as 02231.") from None
+
+
 @lru_cache(maxsize=None)
-def _resolve(org_unit_id: int) -> int:
+def _resolve(org_unit_id: int | str) -> int:
     """Course-scoped calls need the org unit id that list_courses prints in
     brackets, but the DTU course number is the memorable one and sits right
     there in the course name, so accept either.
@@ -436,6 +445,7 @@ def _resolve(org_unit_id: int) -> int:
     ids are six digits, course numbers at most five. If that ever stops holding,
     look the value up in the enrollment list both ways instead.
     """
+    org_unit_id = _number(org_unit_id)
     if org_unit_id >= 100000:
         return org_unit_id
 
@@ -680,7 +690,7 @@ def list_courses() -> str:
 
 
 @_tool
-def course_contents(org_unit_id: int, ctx: Context | None = None) -> str:
+def course_contents(org_unit_id: int | str, ctx: Context | None = None) -> str:
     """Show a course's content tree. Takes an org unit id or a DTU course number.
 
     The topic ids it prints are what get_file takes. Topics copied from an
@@ -695,7 +705,7 @@ def course_contents(org_unit_id: int, ctx: Context | None = None) -> str:
 
 
 @_tool
-def unit_info(org_unit_id: int, unit_id: int, ctx: Context | None = None) -> str:
+def unit_info(org_unit_id: int | str, unit_id: int, ctx: Context | None = None) -> str:
     """Show a unit's own text: its schedule, instructions and notes, plus its topics.
 
     Unit ids are the bracketed numbers on the `#` lines of course_contents. Only
@@ -753,7 +763,7 @@ def _filename(r: httpx.Response, fallback: str) -> str:
 
 @_tool
 def get_file(
-    org_unit_id: int, topic_id: int, first_page: int = 1, last_page: int = 0,
+    org_unit_id: int | str, topic_id: int, first_page: int = 1, last_page: int = 0,
     ctx: Context | None = None,
 ) -> str:
     """Fetch one content topic: a file's text, an HTML page's text, or a link's target.
@@ -813,6 +823,12 @@ def _numbered_pages(text: str, marks: dict | None = None, rebuilt: dict | None =
                         ("symbols", "unreadable symbols")):
         for n in (marks or {}).get(kind, ()):
             on.setdefault(n, []).append(label)
+    for n, hidden in (marks or {}).get("hidden", ()):  # _hidden_text: left out, said so
+        if 0 < n <= len(pages):
+            pages[n - 1] = "\n".join(line for line in pages[n - 1].split("\n")
+                                     if line.strip() != hidden).replace(hidden, "")
+            if "hidden text left out" not in on.get(n, []):
+                on.setdefault(n, []).append("hidden text left out")
     return [
         f"[Page {n}{', has ' + ', '.join(on[n]) if n in on else ''}]\n{page.strip(chr(10))}"
         for n, page in enumerate(pages, 1)
@@ -851,8 +867,26 @@ def _page_marks(path: Path) -> dict:
         symbols = _font_pages(xml, _unmapped_fonts(path.read_bytes()))
     except OSError:
         symbols = set()
-    return {kind: sorted(found) for kind, found in
-            (("images", images), ("drawing", drawing), ("math", math), ("symbols", symbols)) if found}
+    marks = {kind: sorted(found) for kind, found in
+             (("images", images), ("drawing", drawing), ("math", math), ("symbols", symbols)) if found}
+    if hidden := _hidden_text(xml):
+        marks["hidden"] = hidden
+    return marks
+
+
+def _hidden_text(xml: str) -> list:
+    """Text set at size 0, which no reader sees, as [page, text] pairs from
+    pdftohtml's XML. Left out of what the tools give, as a course's trap
+    for AI help or a planted instruction would otherwise read as part of
+    the page."""
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return []
+    return [[int(page.get("number")), text]
+            for page in root.iter("page") for t in page.iter("text")
+            # a sentence, not a stray digit: taken out wherever it occurs
+            if t.get("height") == "0" and len(text := "".join(t.itertext()).strip()) >= 20]
 
 
 # TeX's fonts as pdfTeX embeds them draw the right shapes but tell text tools
@@ -870,8 +904,8 @@ OMX = {  # TeX's big operators and delimiters, CMEX
 }
 CAPITALS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 TEX_GLYPHS = (  # by font name: what its codes stand for
-    (re.compile(r"CMEX\d"), OMX),
-    (re.compile(r"CMB?SY\d"), dict(zip(CAPITALS, "𝒜ℬ𝒞𝒟ℰℱ𝒢ℋℐ𝒥𝒦ℒℳ𝒩𝒪𝒫𝒬ℛ𝒮𝒯𝒰𝒱𝒲𝒳𝒴𝒵"))),
+    (re.compile(r"CMEX\d|LMMathExtension"), OMX),  # Latin Modern's math fonts code alike
+    (re.compile(r"CMB?SY\d|LMMathSymbols"), dict(zip(CAPITALS, "𝒜ℬ𝒞𝒟ℰℱ𝒢ℋℐ𝒥𝒦ℒℳ𝒩𝒪𝒫𝒬ℛ𝒮𝒯𝒰𝒱𝒲𝒳𝒴𝒵"))),
     (re.compile(r"MSBM\d"), dict(zip(CAPITALS, "𝔸𝔹ℂ𝔻𝔼𝔽𝔾ℍ𝕀𝕁𝕂𝕃𝕄ℕ𝕆ℙℚℝ𝕊𝕋𝕌𝕍𝕎𝕏𝕐ℤ"))),
 )
 # Word and PowerPoint's Cambria Math maps tell the same kind of lie about its
@@ -1085,6 +1119,7 @@ def _save(dest: Path, content: bytes) -> None:
 # TeX's math fonts (Computer Modern, AMS, Fraktur, script) and any font named
 # for math, which covers Cambria Math, STIX, New Computer Modern (Typst's) and
 # Latin Modern.
+TEX_EXTENSION = re.compile(r"CMEX|LMMathExtension")  # TeX's big operators and delimiters
 MATH_FONT = re.compile(r"CMMI|CMSY|CMEX|CMBSY|MSAM|MSBM|EUFM|EUSM|RSFS|Math", re.I)
 
 
@@ -1196,18 +1231,18 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
             top, left, width, height = (int(t.get(k)) for k in ("top", "left", "width", "height"))
         except (TypeError, ValueError):
             continue
-        if not text.strip():
+        if not text.strip() or height == 0:  # size 0: no reader sees it (_hidden_text)
             continue
         size, family = fonts.get(t.get("font"), (0, ""))
-        if "CMSY" in family:  # TeX's ↦ is CMSY's \mapstochar, read as 7, and →
+        if re.search(r"CMSY|LMMathSymbols", family):  # TeX's ↦ is CMSY's \mapstochar, read as 7, and →
             text = text.replace("7→", "↦")
         big = text.strip() in BIG_OPERATORS
         runs.append(dict(text=text, top=top, left=left, right=left + width, w=width, h=height,
                          # CMEX's tall brackets and operators hang well below their short box
-                         mid=top + (0.75 * size if "CMEX" in family and (big or text.strip() in "()[]{}⟨⟩⌊⌋⌈⌉")
+                         mid=top + (0.75 * size if TEX_EXTENSION.search(family) and (big or text.strip() in "()[]{}⟨⟩⌊⌋⌈⌉")
                                     else height / 2), size=size, big=big,
                          math=bool(MATH_FONT.search(family)),
-                         piece=not big and (set(text.strip()) <= DELIMITER_PIECES or "CMEX" in family)))
+                         piece=not big and (set(text.strip()) <= DELIMITER_PIECES or bool(TEX_EXTENSION.search(family)))))
     # A / set over a sign strikes it out, as TeX writes ∉: ∈ with / on it.
     for r in [r for r in runs if r["text"].strip() == "/"]:
         sign = next((b for b in runs if b is not r and b["text"].strip() in "∈∋=≡<>≤≥⊂⊃⊆⊇∼≃≅≈|∃" and b["text"].strip()
@@ -1534,6 +1569,9 @@ def _write_math_text(path: Path, xml: str, math: set, rules: list, width: float,
     if root is not None:
         fonts = {f.get("id"): (int(f.get("size") or 0), f.get("family") or "") for f in root.iter("fontspec")}
         plain = (_pdf_text(path) or "").removesuffix("\f").split("\f")
+        for n, hidden in _hidden_text(xml):  # the rebuild leaves it out too
+            if 0 < n <= len(plain):
+                plain[n - 1] = plain[n - 1].replace(hidden, "")
         # ↦ stands for pdftotext's 7→ (_rebuild_page)
         letters = lambda text: Counter(c for c in text.replace("↦", "7") if c.isalnum())
         for page in root.findall("page"):
@@ -1747,7 +1785,7 @@ PAGE_LIMIT = 10  # ponytail: ~2k tokens a page; raise it if real questions need 
 
 @_tool
 def get_pdf_pages(
-    org_unit_id: int, topic_id: int, first_page: int, last_page: int = 0,
+    org_unit_id: int | str, topic_id: int, first_page: int, last_page: int = 0,
     ctx: Context | None = None,
 ) -> list[str | Image]:
     """Show pages of a PDF topic as images, for what get_file's text loses.
@@ -2486,7 +2524,7 @@ def _background(key: str, label: str, call: str, work, ctx: Context | None) -> s
 
 
 @_tool
-def download_course(org_unit_id: int, ctx: Context | None = None) -> str:
+def download_course(org_unit_id: int | str, ctx: Context | None = None) -> str:
     """Save a course for offline use: its files, unit text and announcements.
 
     Files land in <course>/<unit>/ in this server's data folder
@@ -2658,6 +2696,10 @@ def _download(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
         pdfs = [(key, p) for key, (p, _) in zip(keys, results) if p and p.suffix.lower() == ".pdf"]
         marks = dict(zip((key for key, _ in pdfs),
                          _each(pool, lambda job: _page_marks(job[1]), pdfs, "figures and math", say)))
+        for key, found in marks.items():  # hidden text is left out of search too (_hidden_text)
+            for n, hidden in found.get("hidden", ()):
+                if 0 < n <= len(texts.get(key) or ()):
+                    texts[key][n - 1] = texts[key][n - 1].replace(" ".join(hidden.split()), "").strip()
         html, docs = _index_html(name, ou, modules, news, index, texts)
         # The index and every saved HTML page can show pictures and link to
         # files in D2L's file area. Fetch each of those once, then point the
@@ -3007,12 +3049,12 @@ def _search(query, only: int = 0, limit: int = 15, partial: bool = True, hide_br
     return {"total": len(found), "complete": sum(1 for f in found if f[0] == len(terms)), "hits": hits}
 
 
-def _search_answer(query, org_unit_id: int = 0, limit: int = 15) -> tuple[str, dict]:
+def _search_answer(query, org_unit_id: int | str = 0, limit: int = 15) -> tuple[str, dict]:
     """search_courses' text, and the search it shows, for the plugin's tool card."""
     with closing(_index()) as db:
         _sync_index(db)
         names = dict(db.execute("SELECT ou, name FROM courses ORDER BY folder"))
-    only = org_unit_id
+    only = org_unit_id = _number(org_unit_id or 0)
     if 0 < org_unit_id <= 99999:
         # A course number, as _resolve tells them apart, matched to the saved courses.
         code = f"{org_unit_id:05d}"
@@ -3063,7 +3105,7 @@ def _search_answer(query, org_unit_id: int = 0, limit: int = 15) -> tuple[str, d
 
 
 @_tool
-def search_courses(query: str, org_unit_id: int = 0, limit: int = 15) -> str:
+def search_courses(query: str, org_unit_id: int | str = 0, limit: int = 15) -> str:
     """Search the downloaded courses for words: titles, unit text, announcements
     and the text inside files, a PDF's page by page. Use it to find where
     something is covered before reading files one by one.
@@ -3086,7 +3128,7 @@ def search_courses(query: str, org_unit_id: int = 0, limit: int = 15) -> str:
 
 
 @_tool
-def list_assignments(org_unit_id: int) -> str:
+def list_assignments(org_unit_id: int | str) -> str:
     """List assignment folders in a course with their due and closing dates."""
     lines = []
     for f in _get(f"/d2l/api/le/{LE}/{_resolve(org_unit_id)}/dropbox/folders/"):
@@ -3103,7 +3145,7 @@ def list_assignments(org_unit_id: int) -> str:
 
 
 @_tool
-def list_announcements(org_unit_id: int, ctx: Context | None = None) -> str:
+def list_announcements(org_unit_id: int | str, ctx: Context | None = None) -> str:
     """List course announcements (news items), newest first.
 
     Each one's heading carries its id, and any attached files are listed under
@@ -3126,7 +3168,7 @@ def list_announcements(org_unit_id: int, ctx: Context | None = None) -> str:
 
 @_tool
 def get_announcement_attachment(
-    org_unit_id: int, news_id: int, file_id: int, first_page: int = 1, last_page: int = 0,
+    org_unit_id: int | str, news_id: int, file_id: int, first_page: int = 1, last_page: int = 0,
     ctx: Context | None = None,
 ) -> str:
     """Fetch a file attached to an announcement: its text, or where it was saved.
@@ -3224,13 +3266,13 @@ def _calendar_lines(events: list) -> list[str]:
 
 
 @_tool
-def calendar(days: int = 7, org_unit_id: int = 0) -> str:
+def calendar(days: int = 7, org_unit_id: int | str = 0) -> str:
     """Show what is scheduled from today to `days` ahead, in local time: lectures,
     exercise sessions, hand-in deadlines and material release dates.
 
     Covers every course of the current term, or one course when org_unit_id is
     given (an org unit id or a DTU course number)."""
-    ids = [_resolve(org_unit_id)] if org_unit_id else [ou["Id"] for ou in _term_units()]
+    ids = [_resolve(org_unit_id)] if _number(org_unit_id or 0) else [ou["Id"] for ou in _term_units()]
     if not ids:
         return "No course enrollments found."
     start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -3303,7 +3345,7 @@ def _video_link(ou: int, topic, disposition: str) -> str:
     return answer
 
 
-def _video_topic(org_unit_id: int, topic_id: int) -> tuple:
+def _video_topic(org_unit_id: int | str, topic_id: int) -> tuple:
     ou = _resolve(org_unit_id)
     copy = _course(ou)
     topic = _toc_index(copy["modules"])[0].get(topic_id)
@@ -3312,7 +3354,7 @@ def _video_topic(org_unit_id: int, topic_id: int) -> tuple:
     return ou, copy, topic
 
 
-def video_link(org_unit_id: int, topic_id: int) -> str:
+def video_link(org_unit_id: int | str, topic_id: int) -> str:
     """Print a short-lived link to play a video topic, for the LearnHarness view.
 
     Not an MCP tool: the link is a credential for as long as it lasts.
@@ -3321,7 +3363,7 @@ def video_link(org_unit_id: int, topic_id: int) -> str:
     return _video_link(ou, topic, "inline")
 
 
-def download_video(org_unit_id: int, topic_id: int) -> str:
+def download_video(org_unit_id: int | str, topic_id: int) -> str:
     """Download a video topic into its course's offline copy, next to its unit's files.
 
     Videos are left out of download_course, being large; this fetches one on
@@ -3402,7 +3444,7 @@ def _group_rows(categories: list, groups: list, me: int, classlist: list) -> lis
     return rows
 
 
-def course_tab(org_unit_id: int, tab: str) -> str:
+def course_tab(org_unit_id: int | str, tab: str) -> str:
     """Print one tab of a course's page in the LearnHarness view as JSON.
 
     tab is assignments, quizzes, groups or calendar, read live from DTU Learn.

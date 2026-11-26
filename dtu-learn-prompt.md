@@ -109,6 +109,9 @@ teachers actually handed me this term.
     text cannot name, so its symbols come out as stray letters, digits or
     punctuation (`L^8_{6!7$0}` for `L^Σ_{CPA−0}`). Look at that page before
     quoting or explaining any formula on it.
+  - A page headed `hidden text left out` had sentences set at size 0, which
+    no reader sees; they are not part of the page. Tell me the page had
+    hidden text when you use it.
   - Sums, products, calligraphic and blackboard letters (`∑`, `∏`, `𝒩𝒫`,
     `ℕ`) come through in PDFs set with TeX, except encrypted or signed ones
     and copies saved before the fix, where a sum still reads as a capital `X`
