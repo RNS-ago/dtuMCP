@@ -4,7 +4,7 @@
 	"name": "DTU Learn",
 	"version": "1.0.0",
 	"minAppVersion": "0.6.0",
-	"description": "DTU Learn course material for your tutors, and a view to browse it. Runs dtuMCP's server.py.",
+	"description": "DTU Learn course material for your tutors, and a view to browse it. Runs the installed dtumcp.",
 	"main": "main.js",
 	"backend": "backend.cjs",
 	"styles": "styles.css"
