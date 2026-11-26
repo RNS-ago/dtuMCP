@@ -10,6 +10,7 @@ DTU_COOKIE still overrides the saved file if you would rather paste a Cookie
 header from devtools yourself.
 
 The modules, each importing only those above it:
+  tasks       MCP tasks, for calls that outlast a client's wait
   app         settings, the MCP server, the tool decorator
   text        plain text out of HTML, Word, PowerPoint and PDF
   client      the HTTP client for DTU Learn

@@ -10,6 +10,8 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
+from .tasks import Tasks
+
 
 BASE = os.environ.get("DTU_BASE", "https://learn.inside.dtu.dk")
 LP, LE = "1.63", "1.97"
@@ -39,7 +41,7 @@ def _run_command(argv0: str) -> str:
 
 RUN = _run_command(sys.argv[0])
 
-mcp = MCPServer("dtu-learn")
+mcp = MCPServer("dtu-learn", extensions=[Tasks()])
 
 
 def _status_error(e: httpx.HTTPStatusError) -> str:

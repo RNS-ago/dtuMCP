@@ -29,6 +29,7 @@ from .files import (
 )
 from .index_page import _index_html, _search_entry, _search_pages, _write_landing
 from .search import _index, _sync_index
+from . import tasks
 
 
 def _course(ou: int, ctx: Context | None = None) -> dict:
@@ -120,7 +121,9 @@ def _background(key: str, label: str, call: str, work, ctx: Context | None, coll
                     f"{job['call']} before starting this one.")
         if not job:
             job = _start(key, label, call, work)
-    report, sent, until = _reporter(ctx), None, time.monotonic() + JOB_WAIT
+    # Run as an MCP task, the call has no client deadline to beat.
+    wait = JOB_WAIT if tasks.current.get() is None else float("inf")
+    report, sent, until = _reporter(ctx), None, time.monotonic() + wait
     while not job["done"].wait(1) and time.monotonic() < until:
         if job["last"] != sent:
             sent = job["last"]
@@ -186,10 +189,13 @@ def _status(*parts: tuple[str, str], keep: bool = False) -> None:
 
 
 def _reporter(ctx: Context | None):
-    """Send each status line to an MCP client as a progress notification too.
-    A no-op from the CLI, and in the SDK when the client asked for none."""
+    """Send each status line to an MCP client as a progress notification too,
+    or as an MCP task's statusMessage. A no-op from the CLI, and in the SDK
+    when the client asked for none."""
     if ctx is None:
         return lambda text: None
+    if task := tasks.current.get():
+        return partial(tasks.progress, task)
     # The spec wants progress to rise with every notification. The counts
     # restart each step, so they ride in the message and this only ticks.
     ticks = count(1)
