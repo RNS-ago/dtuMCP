@@ -27,18 +27,19 @@ plugins = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.environ.get("APP
 dest = Path(plugins).expanduser() / "dtu-learn" / "dist"
 if dest.is_symlink():
     raise SystemExit(f"Refusing to replace {dest}: it is a symlink.")
-new = dest.with_name("dist.new")
-shutil.rmtree(new, ignore_errors=True)
-shutil.copytree(here / "dist", new)
-# Looked for where the plugin looks, as backend.cjs extends PATH.
+# The tool list first, so a missing or failing dtumcp stops the install
+# before anything is written. Looked for where the plugin looks, as
+# backend.cjs extends PATH.
 dtumcp = shutil.which("dtumcp", path=os.pathsep.join([os.environ.get("PATH", ""), os.path.expanduser("~/.local/bin")]))
 if not dtumcp:
-    shutil.rmtree(new)
     raise SystemExit("dtumcp is not installed. Run `uv tool install git+https://github.com/RNS-ago/dtuMCP` "
                      "(or `uv tool install -e .` in a clone) first.")
 tools = subprocess.run([dtumcp, "tools"], stdout=subprocess.PIPE)
 if tools.returncode:
     raise SystemExit("dtumcp could not list its tools, so the installed plugin is left as it was.")
+new = dest.with_name("dist.new")
+shutil.rmtree(new, ignore_errors=True)
+shutil.copytree(here / "dist", new)
 (new / "tools.json").write_bytes(tools.stdout)
 if dest.exists():
     shutil.rmtree(dest)
