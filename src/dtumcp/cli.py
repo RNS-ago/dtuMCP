@@ -92,6 +92,7 @@ def main() -> None:
     # the LearnHarness plugin, reading UTF-8 lines, would garble or fail to match.
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", newline="\n")
+    sys.stdin.reconfigure(encoding="utf-8")  # search_serve's requests come in as UTF-8 lines too
     # A command name as the first argument runs that one thing and prints the
     # result, for pasting into claude.ai or any other chat. No server, no
     # network exposure.
