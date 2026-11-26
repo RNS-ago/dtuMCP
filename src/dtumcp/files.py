@@ -92,12 +92,17 @@ def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None =
                 raise RuntimeError(f"{name} has pages 1 to {len(blocks)}: ask for first_page "
                                    f"to last_page within them.")
             # Whole pages, so a page is never half read; a page longer than the
-            # limit on its own is cut.
+            # limit on its own is cut, and says so.
             shown, size = [], 0
-            for block in blocks[first - 1:last]:
+            for n, block in enumerate(blocks[first - 1:last], first):
+                if len(block) > TEXT_LIMIT:  # pdftotext -layout pads columns with spaces; most such pages fit squeezed
+                    block = re.sub(r" {3,}", "  ", block)
+                if len(block) > TEXT_LIMIT:
+                    block = (block[:TEXT_LIMIT] + f"\n\n[Page {n} is cut here, after {TEXT_LIMIT:,} "
+                             f"characters. get_pdf_pages shows it whole.]")
                 if shown and size + len(block) > TEXT_LIMIT:
                     break
-                shown.append(block[:TEXT_LIMIT])
+                shown.append(block)
                 size += len(block) + 2
             end = first + len(shown) - 1
             span = "" if (first, end) == (1, len(blocks)) else f", pages {first} to {end} of {len(blocks)}"

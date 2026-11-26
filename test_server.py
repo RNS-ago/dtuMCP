@@ -551,6 +551,20 @@ except RuntimeError as e:
 mod._enrolled = saved_enrolled
 mod._resolved.clear()
 
+# A PDF page over the text limit is squeezed of layout spaces first, and cut
+# with a note only if it is still too long.
+saved_pdf_text, saved_math = mod._pdf_text, mod._math_text
+mod._math_text = lambda path: None
+with tempfile.TemporaryDirectory() as tmp:
+    pdf = Path(tmp) / "x.pdf"
+    mod._pdf_text = lambda path: "left" + " " * 150_000 + "right\fpage two"
+    got = mod._file_text(b"", "application/pdf", "x.pdf", "x", pdf, {}, (1, 1))
+    assert "left  right" in got and "is cut here" not in got, got[-200:]
+    mod._pdf_text = lambda path: "word " * 30_000 + "\fpage two"
+    got = mod._file_text(b"", "application/pdf", "x.pdf", "x", pdf, {}, (1, 1))
+    assert got.endswith("[Page 1 is cut here, after 100,000 characters. get_pdf_pages shows it whole.]"), got[-200:]
+mod._pdf_text, mod._math_text = saved_pdf_text, saved_math
+
 # A failing page analysis costs the marks, not the file or its course.
 saved_marks = mod._marks
 mod._marks = lambda path: 1 / 0
