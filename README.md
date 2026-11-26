@@ -413,5 +413,6 @@ for another Brightspace instance.
 ## Test
 
 ```bash
-uv run test_server.py
+uv run pytest                          # every test, in tests/
+uv run pytest tests/test_search.py     # one module's
 ```

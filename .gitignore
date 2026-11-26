@@ -16,3 +16,4 @@ downloads/
 
 # graphify knowledge graph, rebuilt locally by its git hooks
 graphify-out/
+.pytest_cache/
