@@ -525,6 +525,32 @@ with tempfile.TemporaryDirectory() as tmp:
             assert "No linked file" in str(e), e
     mod._resolve, mod._course = saved_resolve, saved_course
 
+# A server's filename is saved under as a plain name: nothing in it leads
+# out of the data folder.
+for sent, want in [("..%2F..%2F.bashrc", "_.._.bashrc"), ("/etc/passwd", "_etc_passwd"),
+                   ("C:evil.pdf", "C_evil.pdf"), ("a\\\\..\\\\b.pdf", "a_.._b.pdf"),
+                   ("..", "topic-7"), ("Week%201.pdf", "Week 1.pdf")]:
+    r = mod.httpx.Response(200, headers={"content-disposition": f'attachment; filename="{sent}"'})
+    assert mod._filename(r, "topic-7") == want, (sent, mod._filename(r, "topic-7"))
+
+# A course number's offering is kept RESOLVE_FOR seconds, so a new term's
+# offering of the number shows up once that runs out.
+saved_enrolled = mod._enrolled
+offerings = [{"Id": 326352, "Name": "02231 Cryptography, Fall 2026"}]
+mod._enrolled = lambda: (offerings, "")
+mod._resolved.clear()
+assert mod._resolve("02231") == 326352
+offerings.append({"Id": 340001, "Name": "02231 Cryptography, Spring 2027"})
+assert mod._resolve(2231) == 326352  # still kept
+mod._resolved[2231] = (326352, mod.time.monotonic() - mod.RESOLVE_FOR)
+try:
+    mod._resolve("02231")
+    raise AssertionError("two offerings should be named")
+except RuntimeError as e:
+    assert "several offerings" in str(e) and "340001" in str(e), e
+mod._enrolled = saved_enrolled
+mod._resolved.clear()
+
 # A failing page analysis costs the marks, not the file or its course.
 saved_marks = mod._marks
 mod._marks = lambda path: 1 / 0

@@ -2,8 +2,8 @@
 
 import json
 import re
+import time
 from datetime import datetime, timezone
-from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -14,7 +14,13 @@ from .text import _html_text
 from .client import _client, _get, _number, _paged
 
 
-@lru_cache(maxsize=None)
+# How long a course number's offering is kept, in seconds. A new term's
+# offering of the same number then shows up within it, and one found from
+# the saved copies, with DTU Learn out of reach, is asked about again.
+RESOLVE_FOR = 600
+_resolved = {}  # course number -> (org unit id, time.monotonic() it was found)
+
+
 def _resolve(org_unit_id: int | str) -> int:
     """Course-scoped calls need the org unit id that list_courses prints in
     brackets, but the DTU course number is the memorable one and sits right
@@ -27,6 +33,8 @@ def _resolve(org_unit_id: int | str) -> int:
     org_unit_id = _number(org_unit_id)
     if org_unit_id >= 100000:
         return org_unit_id
+    if org_unit_id in _resolved and time.monotonic() - _resolved[org_unit_id][1] < RESOLVE_FOR:
+        return _resolved[org_unit_id][0]
 
     matches = [
         ou
@@ -35,6 +43,7 @@ def _resolve(org_unit_id: int | str) -> int:
         and int(m.group(1)) == org_unit_id
     ]
     if len(matches) == 1:
+        _resolved[org_unit_id] = matches[0]["Id"], time.monotonic()
         return matches[0]["Id"]
     if matches:
         # The same course number is offered again in later terms, so there is no
@@ -251,8 +260,13 @@ def _topic_fetch(ou: int, topic, client=None):
 def _filename(r: httpx.Response, fallback: str) -> str:
     disp = r.headers.get("content-disposition", "")
     match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)', disp)
-    # D2L percent-encodes the filename, so a space arrives as %20.
-    return unquote(match.group(1)) if match else fallback
+    if not match:
+        return fallback
+    # D2L percent-encodes the filename, so a space arrives as %20. The name is
+    # made a plain file name, as callers save under it: no folder, root or
+    # drive in it (../, /, C:) can lead outside the data folder.
+    name = re.sub(r'[\x00-\x1f\\/:*?"<>|]+', "_", unquote(match.group(1))).strip(" .")
+    return name or fallback
 
 
 def _term_units(want: tuple | None = None) -> list:
