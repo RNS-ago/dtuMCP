@@ -1,5 +1,9 @@
 # dtuMCP
 
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
+![MCP server](https://img.shields.io/badge/MCP-server-0A7E61)
+![DTU Learn](https://img.shields.io/badge/DTU%20Learn-Brightspace-990000)
+
 MCP server for DTU Learn (D2L Brightspace): course trees, files as text, PDF
 pages as images, announcements, assignments, the calendar, and full-text
 search over offline copies of your courses.
@@ -9,8 +13,9 @@ signs in with your own browser session cookies instead.
 
 ## Install
 
-Run these in a terminal, not from inside a client: the Microsoft Store build of
-Claude cannot set up Python for the programs it starts.
+> [!NOTE]
+> Run these in a terminal, not from inside a client: the Microsoft Store build
+> of Claude cannot set up Python for the programs it starts.
 
 ### 1. uv
 
@@ -53,13 +58,14 @@ uv tool install git+https://github.com/RNS-ago/dtuMCP
 ```
 
 This puts a `dtumcp` command in `~/.local/bin` (`%USERPROFILE%\.local\bin` on
-Windows). Add `--reinstall` to update. With an SSH key at GitHub,
+Windows). `dtumcp update` updates it later. With an SSH key at GitHub,
 `uv tool install git+ssh://git@github.com/RNS-ago/dtuMCP` does the same.
 
 To work on the code, run `uv tool install -e .` in a clone instead: `dtumcp`
 then runs the clone's code, so a `git pull` or an edit takes effect at the
-next start. `uv run dtumcp` in the clone also works in place of `dtumcp`. The
-code is the package in `src/dtumcp/`; its `__init__.py` lists the modules.
+next start, and `dtumcp update` pulls for you. `uv run dtumcp` in the clone
+also works in place of `dtumcp`. The code is the package in `src/dtumcp/`;
+its `__init__.py` lists the modules.
 
 ### 4. Sign in
 
@@ -73,6 +79,7 @@ your course list. The cookies are saved to `~/.config/dtumcp/cookie` (mode
 600; `%USERPROFILE%\.config\dtumcp\cookie` on Windows), which every client
 reads, so one login covers them all.
 
+> [!CAUTION]
 > **That file is your DTU session.** Anyone who reads it is logged in as you.
 > Keep it off shared machines and out of git.
 
@@ -107,10 +114,11 @@ session was rejected, run `dtumcp login` again.
 Clients start the server over stdio, as a child process. Nothing listens on a
 port.
 
-Use the **absolute path** to `dtumcp`: an app launched from a desktop icon or
-the Start menu may not get your shell's `PATH`, and a bare `dtumcp` then fails
-with `spawn dtumcp ENOENT`. Find it with `command -v dtumcp`, or in PowerShell
-`(Get-Command dtumcp).Source` (usually `C:\Users\you\.local\bin\dtumcp.exe`).
+> [!WARNING]
+> Use the **absolute path** to `dtumcp`: an app launched from a desktop icon or
+> the Start menu may not get your shell's `PATH`, and a bare `dtumcp` then fails
+> with `spawn dtumcp ENOENT`. Find it with `command -v dtumcp`, or in PowerShell
+> `(Get-Command dtumcp).Source` (usually `C:\Users\you\.local\bin\dtumcp.exe`).
 
 **Claude Code** (CLI and VS Code extension):
 
@@ -149,9 +157,10 @@ forward slashes.
     Microsoft Store install
     `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json`
 
-**Quit the client fully and reopen it after any change** to the config, to
-the code in `src/dtumcp/`, or by `uv tool install --reinstall`. A client starts the server
-once and keeps running the code it loaded.
+> [!IMPORTANT]
+> **Quit the client fully and reopen it after any change** to the config, to
+> the code in `src/dtumcp/`, or by `dtumcp update`. A client starts the server
+> once and keeps running the code it loaded.
 
 ### Tell your agent to use it
 
@@ -168,12 +177,15 @@ up. It updates with the server, so there is nothing to copy again when it
 changes. It also covers the public course websites, which need no login and
 are fetched with ordinary web tools.
 
-To make sure the agent reaches for it, and to say how you want to study,
-paste [`dtu-study-prompt.md`](dtu-study-prompt.md) into
-`~/.claude/CLAUDE.md` (`%USERPROFILE%\.claude\CLAUDE.md`), a Cursor rule or a
-Claude Desktop Project's custom instructions. Its first paragraph sends the
-agent to the skill. The rest, keeping to your course's notation and
-tutoring rather than lecturing, is a matter of taste: change it as you like.
+> [!TIP]
+> To make sure the agent reaches for it, and to say how you want to study,
+> paste [`dtu-study-prompt.md`](dtu-study-prompt.md) into
+> `~/.claude/CLAUDE.md` (`%USERPROFILE%\.claude\CLAUDE.md`), a Cursor rule or a
+> Claude Desktop Project's custom instructions.
+
+Its first paragraph sends the agent to the skill. The rest, keeping to your
+course's notation and tutoring rather than lecturing, is a matter of taste:
+change it as you like.
 It stays in your instructions because a rule there outweighs one the agent
 read from a tool, and a long conversation does not lose it.
 
@@ -193,6 +205,7 @@ sidebar with a PDF viewer, course pages, search and **Send to tutor**.
 claude.ai only reaches remote MCP servers over public HTTPS, so this needs the
 server in HTTP mode behind a tunnel.
 
+> [!CAUTION]
 > **The tunnel URL is a live door into your DTU account.** The cookies stay on
 > your machine, but anyone with the URL can call every tool. The secret path is
 > the only gate: make it long and random, never paste the URL anywhere, and stop
@@ -233,10 +246,13 @@ on. A quick tunnel gets a new hostname on every restart, so the connector URL
 changes too; a named Cloudflare tunnel keeps one. Your machine has to stay
 online.
 
-## Tools
+## MCP tools
+
+What an agent can call. Each also runs from the [command line](#command-line).
 
 | Tool | What it returns |
 | --- | --- |
+| `guide` | How to use these tools, the same text as the `dtu-learn` skill, for clients that load no skills from a server |
 | `list_courses` | Enrolled courses grouped by term, newest first |
 | `course_contents(org_unit_id)` | Unit/topic tree, with their IDs and any external links |
 | `unit_info(org_unit_id, unit_id)` | One unit's own text, plus its contents |
@@ -337,17 +353,6 @@ background: the call says it is still running, and calling the same tool
 again waits on it and returns its summary once done. One download runs at a
 time. The command line waits as before.
 
-`dtumcp reprocess [course]`, on the command line only, works the saved copies
-out again with the installed version: each PDF's font maps, figures and math,
-the search text and the index pages, from the files already on disk and
-without asking DTU Learn. Run it after updating dtumcp, so an improvement to
-how it reads PDFs reaches courses downloaded before; files new or changed on
-DTU Learn still need a download. Without a course it does every saved one.
-It starts each PDF from the bytes DTU Learn sent, which the saved file keeps
-ahead of dtumcp's own additions, so nothing an older version added is kept;
-for a course saved before dtumcp marked its additions, download it once more
-to get there.
-
 Each course gets an `index.html` laid out like the course site, with Content
 and Announcements tabs, and the data folder gets a landing page linking every
 saved course. Its search box (`/` focuses it) looks through titles, unit text,
@@ -364,9 +369,9 @@ start, write there to a private folder nothing else sees. Windows also limits
 paths to 260 characters unless `LongPathsEnabled` is on, which a deeply nested
 course can pass.
 
-Both tools end with counts:
+The downloads and `reprocess` end with counts:
 
-```
+```text
          files  pictures  announcements  links  videos  broken
   02249     45         0             11      9       0      75
   02231     54         1             12      0       2       0
@@ -417,8 +422,8 @@ Courses with neither go under `## No term`.
 
 ## Command line
 
-Run any tool directly and paste the output into any chat. This is also the
-quickest check that your cookies still work.
+Every MCP tool also runs as a command that prints its result, to paste into
+any chat. This is also the quickest check that your cookies still work.
 
 ```bash
 dtumcp --help
@@ -426,14 +431,66 @@ dtumcp list_courses
 dtumcp course_contents 02231
 dtumcp get_file 12345 67890
 dtumcp download_term "Fall 2026"
-dtumcp reprocess 02231
-dtumcp download_video 02231 1243820
 ```
 
 `get_pdf_pages` names each image instead of printing it; `--json` prints MCP
-content blocks with images in base64. `dtumcp --help` lists the environment
-variables, including `DTU_DOWNLOADS` for another data folder and `DTU_BASE`
-for another Brightspace instance.
+content blocks with images in base64. `-f` or `--force` is the downloads'
+`force`. `dtumcp --help` lists the environment variables, including
+`DTU_DOWNLOADS` for another data folder and `DTU_BASE` for another
+Brightspace instance.
+
+### Command-line only
+
+These are not MCP tools, so an agent cannot run them.
+
+| Command | What it does |
+| --- | --- |
+| `login` | Signs in through a browser and saves the session cookies ([Sign in](#4-sign-in)) |
+| `update [branch] [-fr\|--force-reprocess]` | Gets the newest dtumcp on the current branch, or on `branch`, then reprocesses the courses an older version saved |
+| `reprocess [course] [-f\|--force]` | Works saved courses out again with the installed version, without downloading them |
+| `download_video <course> <topic>` | Saves a video topic into its course's offline copy, next to its unit's files |
+| `file_text <path>` | Prints a saved file's text, as `get_file` gives a topic's, for files a course links to |
+
+`tools`, `search_serve`, `video_link`, `course_tab` and `<command> --args
+'<JSON>'` are for the [LearnHarness plugin](learnharness/README.md).
+
+```bash
+dtumcp reprocess 02231
+dtumcp update
+dtumcp download_video 02231 1243820
+```
+
+#### reprocess
+
+`dtumcp reprocess [course]` works the saved copies out again with the
+installed version: each PDF's font maps, figures and math, the search text
+and the index pages, from the files already on disk and without asking DTU
+Learn, so an improvement to how it reads PDFs reaches
+courses downloaded before; files new or changed on DTU Learn still need a
+download. Without a course it does every saved one. A course this version's
+processing already made is left out; `-f` or `--force` reprocesses it anyway.
+It starts each PDF from the bytes DTU Learn sent, which the saved file keeps
+ahead of dtumcp's own additions, so nothing an older version added is kept;
+for a course saved before dtumcp marked its additions, download it once more
+to get there.
+
+#### update
+
+`dtumcp update` gets the newest version and then runs `reprocess`. A clone
+is pulled (it refuses one with uncommitted changes) and installed again
+only when `pyproject.toml` or `uv.lock` changed; a dtumcp installed from GitHub
+is installed again from there. Without a branch it stays where it is: a clone
+pulls the branch it has checked out, and a GitHub install keeps the branch it
+was installed from (the default, `main`, if none). `dtumcp update <branch>`
+switches to that branch first, and later updates stay on it until
+`dtumcp update main`. `-fr` or `--force-reprocess` reprocesses every saved
+course, as `reprocess --force`.
+Restart your MCP clients afterwards.
+
+> [!NOTE]
+> Windows replaces no program that is running, so there the install goes on in
+> a new window once `dtumcp update` exits. Close Claude, Cursor and other MCP
+> clients first.
 
 ## Test
 

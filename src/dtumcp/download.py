@@ -320,6 +320,12 @@ def _fetch_course(ou: int, prefix: str, report, force: bool = False) -> tuple:
     return _code(name), _counts(modules, news, files, linked), problems
 
 
+# Which processing made a course's saved copy, kept in its record. Bump it
+# when a change alters what _process or _resave makes of the same files, so
+# dtumcp update reprocesses the courses an older version saved.
+PROCESSING = 1
+
+
 def _process(root, ou: int, name: str, modules, news, files: dict, fetch_linked, pool, say, stamp: dict) -> dict:
     """What a download does with a course's saved files, and a reprocess does
     again: their search text, the marks and rebuilt math of the PDFs, the
@@ -382,7 +388,7 @@ def _process(root, ou: int, name: str, modules, news, files: dict, fetch_linked,
     # whole, so a copy exists only once everything above has been saved.
     key = lambda k: "/".join(map(str, k)) if isinstance(k, tuple) else str(k)
     record = {
-        "ou": ou, "name": name, **stamp,
+        "ou": ou, "name": name, **stamp, "processing": PROCESSING,
         "modules": modules, "news": news,
         "files": {key(k): p.relative_to(root).as_posix() for k, p in files.items()},
         # What each saved PDF's pages hold that their text loses, for

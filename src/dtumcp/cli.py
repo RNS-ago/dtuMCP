@@ -3,8 +3,12 @@
 import inspect
 import json
 import os
+import subprocess
 import sys
+from importlib.metadata import distribution
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import anyio
 import httpx
@@ -14,7 +18,7 @@ from .app import BASE, COOKIE_FILE, DOWNLOADS, RUN, _status_error, mcp
 from .auth import login
 from .courses import _copies, _copy, _stored_marks
 from .files import _blocks, _saved_text
-from .download import _reprocess, _status, _summary
+from .download import PROCESSING, _reprocess, _status, _summary
 from .search import _kind_list, _search, _search_answer
 from .tools import (
     calendar, course_contents, course_tab, download_course, download_term, download_video,
@@ -23,15 +27,17 @@ from .tools import (
 )
 
 
-def reprocess(course: int | str = 0) -> str:
+def reprocess(course: int | str = 0, force: bool = False) -> str:
     """Work saved courses out again with this version, without downloading them.
 
     Each PDF's font maps, figures and math, the search text and the index
     page are worked out again from the files already saved, as a download
     would, so an improvement to how dtumcp reads PDFs reaches courses
     downloaded before it. course is an org unit id or a course number;
-    left out, every saved course. Files new or changed on DTU Learn still
-    need download_course or download_term. Command line only.
+    left out, every saved course. A course this version's processing
+    already made is left out, unless force (-f, --force). Files new or
+    changed on DTU Learn still need download_course or download_term.
+    Command line only.
     """
     saved = {}  # org unit id by course folder, every saved course once
     for record in _copies():
@@ -44,12 +50,96 @@ def reprocess(course: int | str = 0) -> str:
             ou for folder, ou in saved.items() if folder.startswith(f"{number:05d} ")]
         if not units:
             raise RuntimeError(f"No saved course {course}. Download it with download_course first.")
+    if not force:
+        # A record from before PROCESSING was kept has none: made by version 0.
+        units = [ou for ou in units if (_copy(ou) or {}).get("processing", 0) < PROCESSING]
+        if not units:
+            again = " ".join(filter(None, [RUN, "reprocess", str(course) if course else "", "-f"]))
+            return f"Already processed by this version, so nothing was reprocessed. To run the processing again anyway: {again}"
     rows = []
     for i, ou in enumerate(units, 1):
         rows.append(_reprocess(ou, f"[{i}/{len(units)}] " if len(units) > 1 else ""))
     _status(keep=True)  # a blank line between the ✓ lines and the table
     return _summary(rows)
 
+
+def _powershell(command: list) -> str:
+    """A command as PowerShell runs it, each part quoted."""
+    return "& " + " ".join("'" + part.replace("'", "''") + "'" for part in command)
+
+
+def update(branch: str = "", force_reprocess: bool = False) -> str:
+    """Update dtumcp on its current branch, or on <branch>, then reprocess stale courses.
+
+    A clone, installed with uv tool install -e or run with uv run, is
+    pulled, and installed again only if its dependencies changed; a
+    dtumcp installed from GitHub is installed again from there. branch
+    switches to that branch first; left out, the clone stays on its
+    branch and a GitHub install on what it was installed from. Then
+    reprocess runs with the new version, for the courses an older
+    version's processing made; force_reprocess (-fr, --force-reprocess)
+    reprocesses every saved course, as reprocess --force. Command line only.
+    """
+    info = json.loads(distribution("dtumcp").read_text("direct_url.json") or "{}")
+    url = info.get("url", "")
+    tool = RUN == "dtumcp"  # uv tool install put it on PATH, rather than uv run in a clone
+    if info.get("dir_info", {}).get("editable"):
+        clone = Path(url2pathname(urlparse(url).path))
+        git = lambda *a, **kw: subprocess.run(["git", "-C", str(clone), *a], text=True, **kw)
+        if git("status", "--porcelain", "--untracked-files=no", capture_output=True).stdout.strip():
+            raise RuntimeError(f"{clone} has uncommitted changes. Commit or stash them, then update again.")
+        before = git("rev-parse", "HEAD", capture_output=True).stdout.strip()
+        # Fetched first, so a branch only the remote has yet is found, and switched to as its own.
+        if branch and (git("fetch", stdout=sys.stderr).returncode
+                       or git("switch", branch, stdout=sys.stderr).returncode):
+            raise RuntimeError(f"Could not switch {clone} to branch {branch}, so dtumcp is as it was.")
+        if git("pull", "--ff-only", stdout=sys.stderr).returncode:
+            raise RuntimeError(f"git pull failed in {clone}; nothing was installed.")
+        # The pulled code runs already; installing again only brings new dependencies.
+        changed = git("diff", "--quiet", before, "HEAD", "--", "pyproject.toml", "uv.lock").returncode != 0
+        moved = git("rev-parse", "HEAD", capture_output=True).stdout.strip() != before
+        install = ["uv", "tool", "install", "--reinstall", "-e", str(clone)] if changed and tool else None
+    elif "vcs_info" in info:
+        rev = branch or info["vcs_info"].get("requested_revision")
+        clone, changed, moved = None, True, True  # a reinstall cannot tell a new commit from the old
+        install = ["uv", "tool", "install", "--reinstall", f"git+{url}" + (f"@{rev}" if rev else "")]
+    else:
+        raise RuntimeError("This dtumcp was installed neither from GitHub nor from a clone, so update "
+                           "cannot tell where its new version is. Install it again as the README says.")
+    # uv run, in the clone, brings its dependencies itself.
+    then = [*RUN.split(), "reprocess", *(["--force"] if force_reprocess else [])]
+    restart = ("Restart Claude, Cursor and any other MCP client so they start the new version, and run "
+               "learnharness/install.py again if you use the LearnHarness plugin.")
+    if os.name == "nt" and changed:
+        # Windows replaces no file a running program has open, and this process
+        # has dtumcp.exe and its venv open: the install waits for it to exit.
+        steps = [f"Wait-Process -Id {os.getpid()} -ErrorAction SilentlyContinue"]
+        if install:
+            steps.append(f"{_powershell(install)}; if ($LASTEXITCODE -ne 0) {{ Read-Host 'The install failed. "
+                         "Close Claude, Cursor and anything else running dtumcp, then run dtumcp update again. "
+                         "Press Enter to close'; exit 1 }")
+        steps += [_powershell(then), "Read-Host 'Done. Press Enter to close'"]
+        subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "; ".join(steps)],
+                         cwd=clone, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        return f"The update goes on in a new window once this command exits. {restart}"
+    try:
+        if install and subprocess.run(install, stdout=sys.stderr).returncode:
+            raise RuntimeError("uv tool install failed; its message is above.")
+        # The new version in a process of its own: this one has the old code
+        # loaded, and after an install the files it would import next are gone.
+        if subprocess.run(then, cwd=clone).returncode:
+            raise RuntimeError(f"dtumcp is updated, but the reprocess failed; run {' '.join(then)} again.")
+    except FileNotFoundError as e:  # no uv, or no dtumcp on PATH
+        raise RuntimeError(f"Could not run {e.filename}: {e.strerror}")
+    return f"dtumcp is up to date. {restart}" if moved else "dtumcp was up to date already; nothing changed."
+
+
+def _flag(param: str) -> str:
+    """A yes/no argument's flag: force_reprocess is --force-reprocess."""
+    return "--" + param.replace("_", "-")
+
+
+SHORT = {"force": "-f", "force_reprocess": "-fr"}  # the yes/no arguments with a short flag too
 
 COMMANDS = {
     f.__name__: f
@@ -71,53 +161,79 @@ COMMANDS = {
         download_course,
         download_term,
         reprocess,
+        update,
     )
 }
 
 
-def _usage() -> str:
-    """Build the help text from the same docstrings the MCP tools advertise."""
-    lines = [f"Usage: {RUN} [command] [arguments]", "", "Commands:"]
-    for name, fn in COMMANDS.items():
+LEARNHARNESS = {"video_link", "course_tab"}  # commands only the LearnHarness plugin calls
+
+
+def _usage(colour: bool = False) -> str:
+    """Build the help text from the same docstrings the MCP tools advertise,
+    in colour for --help at a terminal."""
+    paint = lambda code, text: f"\033[{code}m{text}\033[0m" if colour and text else text
+    heading = lambda text: ["", paint("1", text)]
+
+    def entry(name: str, args: str, about: str) -> list:
+        return [" ".join(filter(None, [f"  {paint('1;36', name)}", paint("33", args)])), f"      {about}"]
+
+    def command(name: str) -> list:
+        fn = COMMANDS[name]
         takes = inspect.signature(fn).parameters
-        params = " ".join(f"<{p}>" for p in takes if p not in ("ctx", "force"))
-        lines.append(f"  {name} {params}{' [-f|--force]' if 'force' in takes else ''}".rstrip())
-        lines.append(f"      {inspect.getdoc(fn).splitlines()[0]}")
+        flags = [p for p, v in takes.items() if v.default is False]
+        params = " ".join(f"<{p}>" for p in takes if p != "ctx" and p not in flags)
+        options = " ".join(f"[{SHORT[p]}|{_flag(p)}]" if p in SHORT else f"[{_flag(p)}]" for p in flags)
+        return entry(name, " ".join(filter(None, [params, options])), inspect.getdoc(fn).splitlines()[0])
+
+    tools = {t.name for t in anyio.run(mcp.list_tools)}
+    variable = lambda name, about: f"  {paint('36', f'{name:<20}')} {about}"
+    lines = [f"{paint('1', 'Usage:')} {RUN} [command] [arguments]"]
+    lines += heading("MCP tools, which an agent calls too:")
+    for name in COMMANDS:
+        if name in tools:
+            lines += command(name)
+    lines += heading("Command line only:")
+    for name in COMMANDS:
+        if name not in tools and name not in LEARNHARNESS:
+            lines += command(name)
+    lines += entry("file_text", "<path>", "Print a saved file's text, as get_file does a topic's")
+    lines += entry("--json", "<command> [arguments]", "Print a command's result as MCP content blocks, images included")
+    lines += heading("For the LearnHarness plugin:")
+    for name in COMMANDS:
+        if name in LEARNHARNESS:
+            lines += command(name)
+    lines += entry("tools", "", "Print the tools as JSON, for clients that speak no MCP (LearnHarness)")
+    lines += entry("search_serve", "", "Answer JSON search requests a line at a time, for LearnHarness")
+    lines += entry("<command> --args", "'<JSON object>'", "Take the command's arguments by name, as LearnHarness passes them")
     lines += [
-        "  tools",
-        "      Print the tools as JSON, for clients that speak no MCP (LearnHarness)",
-        "  search_serve",
-        "      Answer JSON search requests a line at a time, for LearnHarness",
-        "  file_text <path>",
-        "      Print a saved file's text, as get_file does a topic's",
-        "  --json <command> [arguments]",
-        "      Print a command's result as MCP content blocks, images included",
-        "  <command> --args '<JSON object>'",
-        "      Take the command's arguments by name, as LearnHarness passes them",
         "",
         "With no command, runs as an MCP server on stdin/stdout, which is how",
         "Claude Code, Cursor and other MCP clients start it.",
-        "",
-        "Environment:",
-        f"  DTU_COOKIE           Cookie header to use instead of {COOKIE_FILE}",
-        f"  DTU_COOKIE_FILE      Where the session is stored [{COOKIE_FILE}]",
-        f"  DTU_DOWNLOADS        Where saved courses and files are kept [{DOWNLOADS}]",
-        f"  DTU_BASE             Brightspace instance [{BASE}]",
-        "  DTU_FIREFOX_PROFILE  Profile directory to read cookies from; skips the scan",
-        "  DTU_MCP_PATH         Serve over HTTP at this path instead of stdio.",
-        "                       Needs DTU_ALLOWED_HOST. Exposes your session to",
-        "                       anyone who has the URL, so keep the path secret.",
-        "  DTU_ALLOWED_HOST     Public hostname allowed to reach the HTTP server",
-        f"  DTU_PORT             Port for the HTTP server [{os.environ.get('DTU_PORT', 8000)}]",
-        "",
-        "Examples:",
-        f"  {RUN} login",
-        f"  {RUN} list_courses",
-        f"  {RUN} course_contents 326350",
-        f'  {RUN} download_term "Fall 2026"',
-        f'  {RUN} download_course 326350 --force',
-        f'  {RUN} reprocess 41526',
     ]
+    lines += heading("Environment:")
+    lines += [
+        variable("DTU_COOKIE", f"Cookie header to use instead of {COOKIE_FILE}"),
+        variable("DTU_COOKIE_FILE", f"Where the session is stored [{COOKIE_FILE}]"),
+        variable("DTU_DOWNLOADS", f"Where saved courses and files are kept [{DOWNLOADS}]"),
+        variable("DTU_BASE", f"Brightspace instance [{BASE}]"),
+        variable("DTU_FIREFOX_PROFILE", "Profile directory to read cookies from; skips the scan"),
+        variable("DTU_MCP_PATH", "Serve over HTTP at this path instead of stdio."),
+        "                       Needs DTU_ALLOWED_HOST. " + paint("31", "Exposes your session to"),
+        "                       " + paint("31", "anyone who has the URL, so keep the path secret."),
+        variable("DTU_ALLOWED_HOST", "Public hostname allowed to reach the HTTP server"),
+        variable("DTU_PORT", f"Port for the HTTP server [{os.environ.get('DTU_PORT', 8000)}]"),
+    ]
+    lines += heading("Examples:")
+    lines += [f"  {paint('2', RUN)} {example}" for example in (
+        "login",
+        "list_courses",
+        "course_contents 326350",
+        'download_term "Fall 2026"',
+        "download_course 326350 --force",
+        "reprocess 41526",
+        "update",
+    )]
     return "\n".join(lines)
 
 
@@ -156,7 +272,7 @@ def main() -> None:
     if len(sys.argv) > 1:
         name = sys.argv[1]
         if name in ("-h", "--help", "help"):
-            print(_usage())
+            print(_usage(sys.stdout.isatty() and not os.environ.get("NO_COLOR")))
             raise SystemExit(0)
         if name == "file_text" and len(sys.argv) == 3:
             # A saved file's text, as get_file gives a topic's: for files a
@@ -202,11 +318,14 @@ def main() -> None:
         if name not in COMMANDS:
             raise SystemExit(f"Unknown command {name!r}.\n\n{_usage()}")
         # -f or --force, anywhere after the command, for the downloads: replace
-        # each course's folder with a fresh copy.
-        forced = "force" in inspect.signature(COMMANDS[name]).parameters and bool(
-            {"-f", "--force"} & set(sys.argv[2:]))
-        if forced:
-            sys.argv[2:] = [a for a in sys.argv[2:] if a not in ("-f", "--force")]
+        # each course's folder with a fresh copy. Any other yes/no argument
+        # is --<name> too, as update's --force-reprocess, and some have a short one (SHORT).
+        flags = {_flag(p): p for p, v in inspect.signature(COMMANDS[name]).parameters.items()
+                 if v.default is False}
+        flags |= {SHORT[p]: p for p in list(flags.values()) if p in SHORT}
+        on = {flags[a] for a in sys.argv[2:] if a in flags}
+        sys.argv[2:] = [a for a in sys.argv[2:] if a not in flags]
+        forced = "force" in on
         # Numbers only where the command takes an int: download_term "2026"
         # stays text, and a course number keeps its leading 0.
         params = list(inspect.signature(COMMANDS[name]).parameters.values())
@@ -231,14 +350,13 @@ def main() -> None:
             args, named = [], {
                 k: int(v) if isinstance(v, str) and v.lstrip("-").isdigit() and takes[k].annotation in (int, "int") else v
                 for k, v in named.items() if v is not None and k != "ctx" and k in takes}
-        if forced:
-            named["force"] = True
+        named.update(dict.fromkeys(on, True))
         try:
             # Let inspect report a wrong argument count instead of a traceback.
             inspect.signature(COMMANDS[name]).bind(*args, **named)
         except TypeError as e:
             raise SystemExit(f"{name}: {e}\n\n{_usage()}")
-        if forced and sys.stdin.isatty():
+        if forced and name.startswith("download_") and sys.stdin.isatty():
             # Asked only at a terminal: an MCP client asks before running a tool,
             # and LearnHarness and scripts have no one to answer.
             _confirm_force(name, args)

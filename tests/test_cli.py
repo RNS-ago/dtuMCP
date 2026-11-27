@@ -60,6 +60,18 @@ def test_force_flag():
     assert "download_course <org_unit_id> [-f|--force]" in mod._usage()
 
 
+def test_usage_sections():
+    # --help keeps the MCP tools apart from what only the command line has, and
+    # is in colour only when asked, as at a terminal.
+    plain, coloured = mod._usage(), mod._usage(colour=True)
+    mcp_part, rest = plain.split("Command line only:")
+    cli_part, harness_part = rest.split("For the LearnHarness plugin:")
+    assert "  list_courses" in mcp_part and "  login" not in mcp_part
+    assert "  login" in cli_part and "  update" in cli_part and "  video_link" not in cli_part
+    assert "  video_link" in harness_part and "  search_serve" in harness_part
+    assert "\033[" not in plain and "\033[1;36mupdate\033[0m" in coloured
+
+
 def test_confirm_force(monkeypatch):
     # At a terminal, --force goes on only on a yes; no answer is a no.
     for answer, goes_on in [("y\n", True), ("YES\n", True), ("n\n", False), ("\n", False), ("", False)]:
@@ -78,3 +90,125 @@ def test_confirm_force(monkeypatch):
     monkeypatch.setattr(sys, "stderr", io.StringIO())
     mod._confirm_force("download_course", ["326352"])
     assert "/courses/326352" in sys.stderr.getvalue(), sys.stderr.getvalue()
+
+
+def test_reprocess_flags():
+    # -f and --force reach reprocess as force=True, with no question at a
+    # terminal: nothing is deleted.
+    script = ("import sys; from dtumcp import cli; "
+              "cli.COMMANDS['reprocess'] = lambda course=0, force=False: f'{course} {force}'; "
+              "sys.argv[0] = 'dtumcp'; cli.main()")
+    for argv, says in [([], "0 False"), (["-f"], "0 True"), (["02231", "--force"], "02231 True")]:
+        done = subprocess.run([sys.executable, "-c", script, "reprocess", *argv], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=60)
+        assert done.stdout.strip() == says, (argv, done)
+    assert "reprocess <course> [-f|--force]" in mod._usage()
+    assert "update <branch> [-fr|--force-reprocess]" in mod._usage()
+    # -fr is --force-reprocess, for update.
+    script = script.replace("cli.COMMANDS['reprocess'] = lambda course=0, force=False: f'{course} {force}'",
+                            "cli.COMMANDS['update'] = lambda branch='', force_reprocess=False: "
+                            "f'{branch!r} {force_reprocess}'")
+    for argv, says in [([], "'' False"), (["-fr"], "'' True"), (["dev", "--force-reprocess"], "'dev' True")]:
+        done = subprocess.run([sys.executable, "-c", script, "update", *argv], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=60)
+        assert done.stdout.strip() == says, (argv, done)
+
+
+def test_reprocess_skips_processed(monkeypatch):
+    # reprocess does only the courses an older processing made, unless force; a record
+    # from before PROCESSING was kept counts as made by version 0.
+    from pathlib import Path
+    import dtumcp.cli as cli
+    records = {100001: {"processing": cli.PROCESSING}, 100002: {}, 100003: {"processing": cli.PROCESSING - 1}}
+    monkeypatch.setattr(cli, "_copies", lambda: [Path(f"c{ou}/_course-{ou}.json") for ou in records])
+    monkeypatch.setattr(cli, "_copy", lambda ou: records[ou])
+    done = []
+    monkeypatch.setattr(cli, "_reprocess", lambda ou, prefix: done.append(ou))
+    monkeypatch.setattr(cli, "_status", lambda **kw: None)
+    monkeypatch.setattr(cli, "_summary", lambda rows: "table")
+    cli.reprocess()
+    assert done == [100002, 100003], done
+    done.clear()
+    cli.reprocess(force=True)
+    assert done == [100001, 100002, 100003], done
+    records[100002] = records[100003] = records[100001]
+    done.clear()
+    assert cli.reprocess().startswith("Already processed by this version") and not done
+    assert cli.reprocess(100002).startswith("Already processed by this version") and not done
+    assert cli.reprocess(100002).endswith(f"{cli.RUN} reprocess 100002 -f") and cli.reprocess().endswith("reprocess -f")
+
+
+def test_update(monkeypatch, tmp_path):
+    # A clone is pulled, and installed again only when its dependencies
+    # changed; one with uncommitted changes is left alone. A dtumcp from
+    # GitHub is installed again from there. reprocess runs after,
+    # in a process of its own.
+    import types
+    import pytest
+    import dtumcp.cli as cli
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)  # no signing, pull.rebase or the like from the user's
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    git = lambda where, *a: subprocess.run(["git", "-C", str(where), "-c", "user.name=t", "-c", "user.email=t@t",
+                                            *a], check=True, capture_output=True)
+    upstream, clone = tmp_path / "upstream", tmp_path / "clone"
+    upstream.mkdir()
+    git(upstream, "init", "-q")
+    (upstream / "pyproject.toml").write_text("1")
+    git(upstream, "add", ".")
+    git(upstream, "commit", "-qm", "one")
+    git(tmp_path, "clone", "-q", str(upstream), str(clone))
+
+    def commit(name):
+        (upstream / name).write_text(str(len(list(upstream.iterdir()))))
+        git(upstream, "add", ".")
+        git(upstream, "commit", "-qm", name)
+
+    real, ran = subprocess.run, []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, *a, **kw: real(cmd, *a, **kw) if cmd[0] == "git"
+                        else ran.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    monkeypatch.setattr(cli, "RUN", "dtumcp")
+    info = {"url": clone.as_uri(), "dir_info": {"editable": True}}
+    monkeypatch.setattr(cli, "distribution", lambda name: types.SimpleNamespace(read_text=lambda f: json.dumps(info)))
+    then = ["dtumcp", "reprocess"]
+
+    # Nothing new: no restart to ask for.
+    assert cli.update() == "dtumcp was up to date already; nothing changed." and ran == [then], ran
+    ran.clear()
+    commit("code.py")
+    assert "Restart" in cli.update() and ran == [then], ran
+    assert (clone / "code.py").exists()
+    ran.clear()
+    commit("uv.lock")
+    cli.update()
+    assert ran == [["uv", "tool", "install", "--reinstall", "-e", str(clone)], then], ran
+
+    # A branch is switched to, the remote's own fetched first; -fr reprocesses every course.
+    ran.clear()
+    git(upstream, "switch", "-qc", "dev")
+    commit("dev.py")
+    git(upstream, "switch", "-q", "-")
+    cli.update("dev", force_reprocess=True)
+    assert ran == [["dtumcp", "reprocess", "--force"]], ran
+    assert (clone / "dev.py").exists()
+    with pytest.raises(RuntimeError, match="branch nope"):
+        cli.update("nope")
+    git(clone, "switch", "-q", "-")
+
+    ran.clear()
+    commit("more.py")
+    (clone / "code.py").write_text("an edit")
+    with pytest.raises(RuntimeError, match="uncommitted changes"):
+        cli.update()
+    assert not ran and not (clone / "more.py").exists()
+
+    info = {"url": "https://github.com/RNS-ago/dtuMCP", "vcs_info": {"vcs": "git", "commit_id": "abc"}}
+    cli.update()
+    assert ran == [["uv", "tool", "install", "--reinstall", "git+https://github.com/RNS-ago/dtuMCP"], then], ran
+    # A branch given replaces the one installed from; none keeps it.
+    ran.clear()
+    cli.update("dev")
+    assert ran[0][-1] == "git+https://github.com/RNS-ago/dtuMCP@dev", ran
+    ran.clear()
+    info["vcs_info"]["requested_revision"] = "dev"
+    cli.update()
+    assert ran[0][-1] == "git+https://github.com/RNS-ago/dtuMCP@dev", ran
