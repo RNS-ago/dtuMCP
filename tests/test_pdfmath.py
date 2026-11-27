@@ -142,6 +142,9 @@ def test_tex_maps_and_save():
                    (3, font), (4, b"<< /Length %d >>\nstream\n%s\nendstream" % (len(cmap), cmap)))
     patched = mod._tex_maps(original)
     assert patched.startswith(original) and len(patched) > len(original)
+    # The update starts with a marker, so the bytes as downloaded can be had back.
+    assert patched[len(original):].startswith(mod.OWN_UPDATE) and mod._original(patched) == original
+    assert mod._original(original) == original
     objects = mod._pdf_objects(patched)
     entries = mod._cmap_entries(mod._pdf_stream(objects[4]))
     assert (entries[ord("X")], entries[0x12], entries[0x3C], entries[ord("P")]) == ("∑", "(", "⎨", "∑"), entries

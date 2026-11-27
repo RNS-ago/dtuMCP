@@ -337,6 +337,17 @@ background: the call says it is still running, and calling the same tool
 again waits on it and returns its summary once done. One download runs at a
 time. The command line waits as before.
 
+`dtumcp reprocess [course]`, on the command line only, works the saved copies
+out again with the installed version: each PDF's font maps, figures and math,
+the search text and the index pages, from the files already on disk and
+without asking DTU Learn. Run it after updating dtumcp, so an improvement to
+how it reads PDFs reaches courses downloaded before; files new or changed on
+DTU Learn still need a download. Without a course it does every saved one.
+It starts each PDF from the bytes DTU Learn sent, which the saved file keeps
+ahead of dtumcp's own additions, so nothing an older version added is kept;
+for a course saved before dtumcp marked its additions, download it once more
+to get there.
+
 Each course gets an `index.html` laid out like the course site, with Content
 and Announcements tabs, and the data folder gets a landing page linking every
 saved course. Its search box (`/` focuses it) looks through titles, unit text,
@@ -415,6 +426,7 @@ dtumcp list_courses
 dtumcp course_contents 02231
 dtumcp get_file 12345 67890
 dtumcp download_term "Fall 2026"
+dtumcp reprocess 02231
 dtumcp download_video 02231 1243820
 ```
 

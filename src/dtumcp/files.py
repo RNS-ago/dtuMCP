@@ -291,8 +291,10 @@ def _dedupe_linked(linked: dict, saved: list) -> dict:
     same = {}
     for dest in set(linked.values()):
         size = dest.stat().st_size
-        # Empty files are all alike, and none is the same file as another.
-        match = size and next((p for p in by_size.get(size, ()) if filecmp.cmp(p, dest, shallow=False)), None)
+        # Empty files are all alike, and none is the same file as another. A
+        # link a reprocess finds already pointed at its topic file is no copy of it.
+        match = size and next((p for p in by_size.get(size, ())
+                               if not p.samefile(dest) and filecmp.cmp(p, dest, shallow=False)), None)
         if match:
             dest.unlink()
             same[dest] = match

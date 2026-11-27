@@ -22,7 +22,7 @@ from mcp.server.mcpserver import Context
 from .app import DOWNLOADS, LE
 from .client import _client, _get
 from .courses import _copy
-from .pdfmath import _page_marks
+from .pdfmath import _original, _page_marks, _save, _tex_maps
 from .files import (
     REFERENCE, _course_name, _d2l_file, _dedupe_linked, _file_topics, _relink, _safe,
     _save_attachment, _save_linked, _save_topic,
@@ -246,9 +246,8 @@ def _without_hidden(texts: list, hidden: list) -> None:
             texts[n - 1] = texts[n - 1].replace(" ".join(text.split()), "").strip()
 
 
-def _fetch_course(ou: int, prefix: str, report, force: bool = False) -> tuple:
-    name = _course_name(ou)
-
+def _sayer(name: str, prefix: str, report):
+    """The status line of one course's download or reprocess, as say(what, done, total)."""
     def say(what, done=0, total=0):
         bar, tally = [], f" {done}/{total}" if total else ""
         if total:
@@ -257,7 +256,12 @@ def _fetch_course(ou: int, prefix: str, report, force: bool = False) -> tuple:
         # Counts first: a long course name is what gets cut.
         _status(("2", "    " + prefix), *bar, ("1", what + tally), ("2", " · "), ("", name))
         report(f"{prefix}{what}{tally} · {name}")
+    return say
 
+
+def _fetch_course(ou: int, prefix: str, report, force: bool = False) -> tuple:
+    name = _course_name(ou)
+    say = _sayer(name, prefix, report)
     say("reading the course")
     modules = _get(f"/d2l/api/le/{LE}/{ou}/content/toc").get("Modules")
     news = _get(f"/d2l/api/le/{LE}/{ou}/news/")
@@ -279,61 +283,91 @@ def _fetch_course(ou: int, prefix: str, report, force: bool = False) -> tuple:
         tasks = [partial(_save_topic, c, ou, root, *job, shared[at] > 1) for job, at in zip(jobs, place)]
         tasks += [partial(_save_attachment, c, ou, root, *job) for job in atts]
         results = _each(pool, lambda task: task(), tasks, "files", say)
-
         keys = [t["TopicId"] for _, t in jobs] + [(nid, a["FileId"]) for nid, a in atts]
-        index = {
-            key: quote(p.relative_to(root).as_posix())
-            for key, (p, _) in zip(keys, results) if p
-        }
-        found = _each(pool, lambda r: _search_pages(r[0]) if r[0] else [], results, "search text", say)
-        texts = dict(zip(keys, found))
-        pdfs = [(key, p) for key, (p, _) in zip(keys, results) if p and p.suffix.lower() == ".pdf"]
-        marks = dict(zip((key for key, _ in pdfs),
-                         _each(pool, lambda job: _page_marks(job[1]), pdfs, "figures and math", say)))
-        for key, found in marks.items():  # hidden text is left out of search too (_hidden_text)
-            _without_hidden(texts.get(key), found.get("hidden", ()))
-        html, docs = _index_html(name, ou, modules, news, index, texts)
-        # The index and every saved HTML page can show pictures and link to
-        # files in D2L's file area. Fetch each of those once, then point the
-        # pages at the copies.
-        pages = {root / "index.html": html}
-        for p, _ in results:
-            if p and p.suffix.lower() in (".html", ".htm"):
-                try:
-                    pages[p] = p.read_bytes().decode("utf-8")
-                except UnicodeDecodeError:
-                    pass  # not ours to mangle; it keeps its online links
-        refs = {
-            url for html in pages.values() for m in REFERENCE.finditer(html)
-            if (url := _d2l_file(m.group(2)))
-        }
-        linked = dict(_each(pool, lambda url: _save_linked(c, root, url), refs,
-                            "pictures and linked files", say))
-        saved_files = [p for p, _ in results if p]
-        linked = _dedupe_linked({url: dest for url, dest in linked.items() if dest}, saved_files)
-        # Linked files have no topic, so they are searchable by their file name;
-        # one that is a topic's file is found as that topic already. Two links
-        # may reach one file, which is searched once.
-        topic_files = set(saved_files)
-        own = list(dict.fromkeys(d for d in linked.values() if d not in topic_files))
-        # Linked PDFs get their marks now too, as topic PDFs do, so file_text
-        # does not work them out again on every open (_stored_marks).
-        own_pdfs = [d for d in own if d.suffix.lower() == ".pdf"]
-        linked_marks = dict(zip(own_pdfs, _each(pool, _page_marks, own_pdfs,
-                                                "figures and math of linked files", say)))
+        files = {key: p for key, (p, _) in zip(keys, results) if p}
+        refs = set()
 
-        def linked_text(dest):  # with its hidden text left out, as a topic's is
-            found = _search_pages(dest)
-            _without_hidden(found, (linked_marks.get(dest) or {}).get("hidden", ()))
-            return found
+        def fetch_linked(pages):
+            # The index and every saved HTML page can show pictures and link to
+            # files in D2L's file area. Fetch each of those once.
+            refs.update(url for html in pages.values() for m in REFERENCE.finditer(html)
+                        if (url := _d2l_file(m.group(2))))
+            return dict(_each(pool, lambda url: _save_linked(c, root, url), refs, "pictures and linked files", say))
 
-        docs += [
-            _search_entry(dest.name, quote(dest.relative_to(root).as_posix()),
-                          dest.suffix[1:].upper() or "file", found)
-            for dest, found in zip(own, _each(
-                pool, linked_text, own, "search text of linked files", say))
-            if found
-        ]
+        linked = _process(root, ou, name, modules, news, files, fetch_linked, pool, say,
+                          {"saved": f"{datetime.now():%Y-%m-%d %H:%M}"})
+    if root != final:
+        # The whole new copy takes the old one's place; the old one goes only then.
+        old = root.with_name(f"{ou}.old")
+        shutil.rmtree(old, ignore_errors=True)
+        if final.exists():
+            final.rename(old)
+        try:
+            root.rename(final)
+        except OSError:
+            if old.exists():
+                old.rename(final)  # the old copy back, or the course would have none
+            raise
+        shutil.rmtree(old, ignore_errors=True)
+    _finish(name, prefix, say)
+    problems = []
+    failed = [err for p, err in results if err]
+    if failed:
+        problems.append((f"{len(failed)} files failed", failed))
+    if len(refs) > len(linked):
+        problems.append((f"{len(refs) - len(linked)} pictures or linked files could not be "
+                         "fetched; the pages link to them online", []))
+    return _code(name), _counts(modules, news, files, linked), problems
+
+
+def _process(root, ou: int, name: str, modules, news, files: dict, fetch_linked, pool, say, stamp: dict) -> dict:
+    """What a download does with a course's saved files, and a reprocess does
+    again: their search text, the marks and rebuilt math of the PDFs, the
+    index page, the files the pages link to (fetch_linked(pages) gives them,
+    {url: path}), _search.js, and the record the reading tools answer from,
+    with stamp's keys ({"saved": ...}) in it. files is {topic id or (news
+    id, file id): path}. Returns the linked files, deduplicated."""
+    keys = list(files)
+    found = _each(pool, _search_pages, files.values(), "search text", say)
+    texts = dict(zip(keys, found))
+    pdfs = [(key, p) for key, p in files.items() if p.suffix.lower() == ".pdf"]
+    marks = dict(zip((key for key, _ in pdfs),
+                     _each(pool, lambda job: _page_marks(job[1]), pdfs, "figures and math", say)))
+    for key, found in marks.items():  # hidden text is left out of search too (_hidden_text)
+        _without_hidden(texts.get(key), found.get("hidden", ()))
+    index = {key: quote(p.relative_to(root).as_posix()) for key, p in files.items()}
+    html, docs = _index_html(name, ou, modules, news, index, texts)
+    pages = {root / "index.html": html}
+    for p in files.values():
+        if p.suffix.lower() in (".html", ".htm"):
+            try:
+                pages[p] = p.read_bytes().decode("utf-8")
+            except UnicodeDecodeError:
+                pass  # not ours to mangle; it keeps its online links
+    saved_files = list(files.values())
+    linked = _dedupe_linked({url: dest for url, dest in fetch_linked(pages).items() if dest}, saved_files)
+    # Linked files have no topic, so they are searchable by their file name;
+    # one that is a topic's file is found as that topic already. Two links
+    # may reach one file, which is searched once.
+    topic_files = set(saved_files)
+    own = list(dict.fromkeys(d for d in linked.values() if d not in topic_files))
+    # Linked PDFs get their marks now too, as topic PDFs do, so file_text
+    # does not work them out again on every open (_stored_marks).
+    own_pdfs = [d for d in own if d.suffix.lower() == ".pdf"]
+    linked_marks = dict(zip(own_pdfs, _each(pool, _page_marks, own_pdfs,
+                                            "figures and math of linked files", say)))
+
+    def linked_text(dest):  # with its hidden text left out, as a topic's is
+        found = _search_pages(dest)
+        _without_hidden(found, (linked_marks.get(dest) or {}).get("hidden", ()))
+        return found
+
+    docs += [
+        _search_entry(dest.name, quote(dest.relative_to(root).as_posix()),
+                      dest.suffix[1:].upper() or "file", found)
+        for dest, found in zip(own, _each(pool, linked_text, own, "search text of linked files", say))
+        if found
+    ]
     say("writing the pages")
     for page, html in pages.items():
         page.write_text(_relink(html, page, linked), encoding="utf-8")
@@ -346,19 +380,15 @@ def _fetch_course(ou: int, prefix: str, report, force: bool = False) -> tuple:
     # and announcements as D2L sent them, and where each saved file went,
     # keyed by topic id or by "news id/file id". Written last and swapped in
     # whole, so a copy exists only once everything above has been saved.
+    key = lambda k: "/".join(map(str, k)) if isinstance(k, tuple) else str(k)
     record = {
-        "ou": ou, "name": name, "saved": f"{datetime.now():%Y-%m-%d %H:%M}",
+        "ou": ou, "name": name, **stamp,
         "modules": modules, "news": news,
-        "files": {
-            "/".join(map(str, key)) if isinstance(key, tuple) else str(key):
-                p.relative_to(root).as_posix()
-            for key, (p, _) in zip(keys, results) if p
-        },
+        "files": {key(k): p.relative_to(root).as_posix() for k, p in files.items()},
         # What each saved PDF's pages hold that their text loses, for
         # get_file's page headings: {"images": [3], "drawing": [5], "math": [...]}.
         # A linked PDF's are kept by its path, as "_linked/...": it has no topic.
-        "marks": {"/".join(map(str, key)) if isinstance(key, tuple) else str(key): found
-                  for key, found in marks.items()}
+        "marks": {key(k): found for k, found in marks.items()}
                  | {dest.relative_to(root).as_posix(): found for dest, found in linked_marks.items()},
         # Files the course's pages link to, by the link as the page has it:
         # a /content/ address, or a short link to a course file.
@@ -373,19 +403,12 @@ def _fetch_course(ou: int, prefix: str, report, force: bool = False) -> tuple:
     part = root / f"_course-{ou}.json.part"
     part.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
     part.replace(root / f"_course-{ou}.json")
-    if root != final:
-        # The whole new copy takes the old one's place; the old one goes only then.
-        old = root.with_name(f"{ou}.old")
-        shutil.rmtree(old, ignore_errors=True)
-        if final.exists():
-            final.rename(old)
-        try:
-            root.rename(final)
-        except OSError:
-            if old.exists():
-                old.rename(final)  # the old copy back, or the course would have none
-            raise
-        shutil.rmtree(old, ignore_errors=True)
+    return linked
+
+
+def _finish(name: str, prefix: str, say) -> None:
+    """After a course's copy is written: the landing page, the search index,
+    and the course's status line left behind as one ✓ line."""
     _write_landing()
     # Indexed now rather than on the first search, which would wait for it.
     # A failure here costs nothing: the next search indexes the course.
@@ -395,17 +418,19 @@ def _fetch_course(ou: int, prefix: str, report, force: bool = False) -> tuple:
             _sync_index(db)
     except sqlite3.Error:
         pass
-    # The course's bar collapses into one line that stays.
     _status(("32", "  ✓ "), ("2", prefix), ("", name), keep=True)
 
+
+def _counts(modules, news, files: dict, linked: dict) -> dict:
+    """A course's row of counts for _summary."""
     def topics(modules):
         for m in modules or []:
             yield from m.get("Topics") or []
             yield from topics(m.get("Modules"))
 
     kinds = Counter("broken" if t.get("IsBroken") else t.get("TypeIdentifier") for t in topics(modules))
-    counts = {
-        "files": sum(1 for p, _ in results if p),
+    return {
+        "files": len(files),
         "pictures": len(linked),
         "announcements": len(news),
         # Videos are ContentService topics; any other kind is a link of some sort.
@@ -413,11 +438,41 @@ def _fetch_course(ou: int, prefix: str, report, force: bool = False) -> tuple:
         "broken": kinds["broken"],
         "links": sum(n for kind, n in kinds.items() if kind not in ("File", "ContentService", "broken")),
     }
-    problems = []
-    failed = [err for p, err in results if err]
-    if failed:
-        problems.append((f"{len(failed)} files failed", failed))
-    if len(refs) > len(linked):
-        problems.append((f"{len(refs) - len(linked)} pictures or linked files could not be "
-                         "fetched; the pages link to them online", []))
-    return _code(name), counts, problems
+
+
+def _resave(path) -> None:
+    """A saved PDF put through _save again from its original bytes (_original),
+    so its font maps are what the current _tex_maps makes of them, and none
+    of an earlier version's; one that would come out the same is left untouched."""
+    data = path.read_bytes()
+    original = _original(data)
+    if _tex_maps(original) != data:
+        _save(path, original)
+
+
+def _reprocess(ou: int, prefix: str = "", report=lambda text: None) -> tuple:
+    """Work a saved course's files out again with the current code, as a
+    download would, without asking DTU Learn: the PDFs' font maps (_resave),
+    their marks and rebuilt math, the search text, the index page and the
+    record. For when the processing has improved and the course has not
+    changed; new or changed files on DTU Learn still need download_course.
+    Returns a row for _summary, as _download does."""
+    with _course_locks.setdefault(ou, threading.Lock()):
+        copy = _copy(ou)
+        if copy is None:
+            raise RuntimeError(f"Course {ou} has no saved copy to reprocess. Download it with download_course.")
+        root, name = copy["root"], copy["name"]
+        say = _sayer(name, prefix, report)
+        key = lambda k: tuple(map(int, k.split("/"))) if "/" in k else int(k)
+        files = {key(k): root / rel for k, rel in copy["files"].items() if (root / rel).exists()}
+        linked = {url: root / rel for url, rel in (copy.get("linked") or {}).items() if (root / rel).exists()}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            pdfs = list(dict.fromkeys(p for p in [*files.values(), *linked.values()] if p.suffix.lower() == ".pdf"))
+            _each(pool, _resave, pdfs, "font maps", say)
+            stamp = {"saved": copy.get("saved"), "processed": f"{datetime.now():%Y-%m-%d %H:%M}"}
+            linked = _process(root, ou, name, copy["modules"], copy["news"], files, lambda pages: linked, pool, say, stamp)
+        _finish(name, prefix, say)
+        missing = len(copy["files"]) - len(files)
+        problems = [(f"{missing} saved files are missing from the folder; download_course fetches them again", [])] \
+            if missing else []
+        return _code(name), _counts(copy["modules"], copy["news"], files, linked), problems

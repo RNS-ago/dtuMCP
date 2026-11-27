@@ -272,7 +272,8 @@ def _tex_maps(data: bytes) -> bytes:
     completed from TEX_GLYPHS and PIECES, and Cambria Math's ∏ and ∑ put
     right (OFFICE_NARY), added as an incremental update: the
     new maps go after the file's last byte, under the same object numbers, so
-    nothing drawn changes and the original bytes stay as they were. The PDF
+    nothing drawn changes and the original bytes stay as they were, ahead of
+    OWN_UPDATE, where a later version can cut back to them (_original). The PDF
     unchanged when it has no such map to complete, is encrypted or signed (an
     update would show as tampering), or cannot be read this way. A completed
     PDF comes back unchanged, so a second pass adds nothing."""
@@ -328,7 +329,7 @@ def _tex_maps(data: bytes) -> bytes:
             last += 1
     if not maps:
         return data
-    update, places = bytearray(b"\n"), {}
+    update, places = bytearray(OWN_UPDATE), {}
     for num, cmap in sorted(maps.items()):
         packed = zlib.compress(cmap)
         places[num] = len(data) + len(update)
@@ -422,6 +423,16 @@ def _font_pages(xml: str, families: set) -> set[int]:
     ids = {f.get("id") for f in root.iter("fontspec") if f.get("family") in families}
     return {int(page.get("number")) for page in root.findall("page")
             if any(t.get("font") in ids and "".join(t.itertext()).strip() for t in page.iter("text"))}
+
+
+OWN_UPDATE = b"\n%dtumcp font maps\n"  # a comment that starts _tex_maps's update
+
+
+def _original(data: bytes) -> bytes:
+    """A saved PDF as DTU Learn sent it: its bytes up to _tex_maps's update.
+    One saved before updates were marked comes back as it is."""
+    at = data.find(OWN_UPDATE)
+    return data[:at] if at >= 0 else data
 
 
 def _save(dest: Path, content: bytes) -> None:

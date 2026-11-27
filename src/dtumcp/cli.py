@@ -12,15 +12,43 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from .app import BASE, COOKIE_FILE, DOWNLOADS, RUN, _status_error, mcp
 from .auth import login
-from .courses import _copy, _stored_marks
+from .courses import _copies, _copy, _stored_marks
 from .files import _blocks, _saved_text
-from .download import _status
+from .download import _reprocess, _status, _summary
 from .search import _kind_list, _search, _search_answer
 from .tools import (
     calendar, course_contents, course_tab, download_course, download_term, download_video,
     get_announcement_attachment, get_file, get_pdf_pages, list_announcements, list_assignments,
     list_courses, search_courses, unit_info, video_link,
 )
+
+
+def reprocess(course: int | str = 0) -> str:
+    """Work saved courses out again with this version, without downloading them.
+
+    Each PDF's font maps, figures and math, the search text and the index
+    page are worked out again from the files already saved, as a download
+    would, so an improvement to how dtumcp reads PDFs reaches courses
+    downloaded before it. course is an org unit id or a course number;
+    left out, every saved course. Files new or changed on DTU Learn still
+    need download_course or download_term. Command line only.
+    """
+    saved = {}  # org unit id by course folder, every saved course once
+    for record in _copies():
+        saved[record.parent.name] = int(record.stem.removeprefix("_course-"))
+    if not course:
+        units = sorted(set(saved.values()))
+    else:
+        number = int(str(course).strip())
+        units = [number] if number >= 100000 else [
+            ou for folder, ou in saved.items() if folder.startswith(f"{number:05d} ")]
+        if not units:
+            raise RuntimeError(f"No saved course {course}. Download it with download_course first.")
+    rows = []
+    for i, ou in enumerate(units, 1):
+        rows.append(_reprocess(ou, f"[{i}/{len(units)}] " if len(units) > 1 else ""))
+    _status(keep=True)  # a blank line between the ✓ lines and the table
+    return _summary(rows)
 
 
 COMMANDS = {
@@ -42,6 +70,7 @@ COMMANDS = {
         calendar,
         download_course,
         download_term,
+        reprocess,
     )
 }
 
@@ -87,6 +116,7 @@ def _usage() -> str:
         f"  {RUN} course_contents 326350",
         f'  {RUN} download_term "Fall 2026"',
         f'  {RUN} download_course 326350 --force',
+        f'  {RUN} reprocess 41526',
     ]
     return "\n".join(lines)
 

@@ -190,3 +190,51 @@ def test_force():
         pass
     assert (root / "kept.pdf").exists() and (root / "_course-21.json").exists()
     assert not mod._staging(21).parent.exists()
+
+
+def test_reprocess():
+    # A saved course is worked out again from its record and files, without
+    # DTU Learn: a PDF's font map is completed, its marks recomputed, the
+    # index, search text and record written again, the download time kept.
+    def pdf(*objects):
+        out, places = bytearray(b"%PDF-1.4\n"), {}
+        for num, body in objects:
+            places[num] = len(out)
+            out += b"%d 0 obj\n%s\nendobj\n" % (num, body)
+        xref = len(out)
+        out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+        out += b"".join(b"%010d 00000 n \n" % places[n] for n in sorted(places))
+        out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+        return bytes(out)
+
+    root = mod.DOWNLOADS / "99999 Reprocess test"
+    root.mkdir(parents=True)
+    (root / "notes.txt").write_text("hello", encoding="utf-8")
+    (root / "sheet.pdf").write_bytes(original := pdf(
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>"), (2, b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>"),
+        (3, b"<< /Type /Font /Subtype /Type1 /BaseFont /AB+CMEX10 /FirstChar 80 /LastChar 80 /Widths [1000] >>"),
+        (4, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Resources << /Font << /F1 3 0 R >> >> >>")))
+    record = {"ou": 999999, "name": "99999 Reprocess test", "saved": "2026-01-01 10:00", "modules": [],
+              "news": [], "files": {"11": "notes.txt", "12": "sheet.pdf", "13": "gone.pdf"}, "marks": {},
+              # a link the download already pointed at a topic's file, which must stay
+              "linked": {"https://learn.example/file.pdf": "sheet.pdf"}, "videos": {}}
+    (root / "_course-999999.json").write_text(__import__("json").dumps(record), encoding="utf-8")
+    code, counts, problems = mod._reprocess(999999)
+    assert code == "99999" and counts["files"] == 2 and "missing" in problems[0][0], (counts, problems)
+    after = mod._copy(999999)
+    assert after["saved"] == "2026-01-01 10:00" and after["processed"] and set(after["files"]) == {"11", "12"}, after
+    assert b"/ToUnicode" in (root / "sheet.pdf").read_bytes() and after["linked"] == record["linked"]
+    assert (root / "index.html").exists() and (root / "_search.js").exists()
+    patched = (root / "sheet.pdf").read_bytes()
+    mod._reprocess(999999)
+    assert (root / "sheet.pdf").read_bytes() == patched  # a second pass adds nothing
+    # What an earlier version added after the marker goes: the file is
+    # patched afresh from the bytes as downloaded.
+    (root / "sheet.pdf").write_bytes(original + mod.OWN_UPDATE + b"an older version's maps")
+    mod._reprocess(999999)
+    assert (root / "sheet.pdf").read_bytes() == patched
+    try:
+        mod._reprocess(424242)
+        raise AssertionError("a course with no copy should say so")
+    except RuntimeError as e:
+        assert "download_course" in str(e)
