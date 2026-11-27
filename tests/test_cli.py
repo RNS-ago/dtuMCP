@@ -170,6 +170,8 @@ def test_update(monkeypatch, tmp_path):
     info = {"url": clone.as_uri(), "dir_info": {"editable": True}}
     monkeypatch.setattr(cli, "distribution", lambda name: types.SimpleNamespace(read_text=lambda f: json.dumps(info)))
     then = ["dtumcp", "reprocess"]
+    plugin = tmp_path / "plugins" / "dtu-learn" / "dist"
+    monkeypatch.setattr(cli, "_plugin_dest", lambda plugins="": plugin)
 
     # Nothing new: no restart to ask for.
     assert cli.update() == "dtumcp was up to date already; nothing changed." and ran == [then], ran
@@ -177,6 +179,16 @@ def test_update(monkeypatch, tmp_path):
     commit("code.py")
     assert "Restart" in cli.update() and ran == [then], ran
     assert (clone / "code.py").exists()
+    # A LearnHarness plugin installed already is installed again, but only with a new version.
+    plugin.mkdir(parents=True)
+    ran.clear()
+    cli.update()
+    assert ran == [then], ran
+    commit("plugin.js")
+    ran.clear()
+    cli.update()
+    assert ran == [then, ["dtumcp", "install_learnharness"]], ran
+    plugin.rmdir()
     ran.clear()
     commit("uv.lock")
     cli.update()
@@ -212,3 +224,33 @@ def test_update(monkeypatch, tmp_path):
     info["vcs_info"]["requested_revision"] = "dev"
     cli.update()
     assert ran[0][-1] == "git+https://github.com/RNS-ago/dtuMCP@dev", ran
+
+
+def test_install_learnharness(monkeypatch, tmp_path):
+    # The plugin dtumcp ships and its tool list go into <plugins>/dtu-learn/dist,
+    # replacing what was there whole; the plugin's data/ beside it stays.
+    import shutil
+    import pytest
+    import dtumcp.cli as cli
+    monkeypatch.setattr(shutil, "which", lambda *a, **kw: "/bin/dtumcp")
+    dest = tmp_path / "dtu-learn" / "dist"
+    (tmp_path / "dtu-learn" / "data").mkdir(parents=True)
+    (tmp_path / "dtu-learn" / "data" / "kept").write_text("mine")
+    assert str(dest) in cli.install_learnharness(str(tmp_path))
+    assert {"main.js", "backend.cjs", "manifest.json", "styles.css", "assets", "tools.json"} == {
+        p.name for p in dest.iterdir()}
+    assert "list_courses" in {t["name"] for t in json.loads((dest / "tools.json").read_text())}
+    (dest / "stale.js").write_text("old")
+    cli.install_learnharness(str(tmp_path))
+    assert not (dest / "stale.js").exists() and (tmp_path / "dtu-learn" / "data" / "kept").read_text() == "mine"
+    assert not (tmp_path / "dtu-learn" / "dist.new").exists() and not (tmp_path / "dtu-learn" / "dist.old").exists()
+    # No dtumcp for the plugin to run: nothing is written.
+    monkeypatch.setattr(shutil, "which", lambda *a, **kw: None)
+    with pytest.raises(RuntimeError, match="uv tool install"):
+        cli.install_learnharness(str(tmp_path / "other"))
+    assert not (tmp_path / "other").exists()
+    monkeypatch.setattr(shutil, "which", lambda *a, **kw: "/bin/dtumcp")
+    (tmp_path / "linked" / "dtu-learn").mkdir(parents=True)
+    (tmp_path / "linked" / "dtu-learn" / "dist").symlink_to(dest)
+    with pytest.raises(RuntimeError, match="symlink"):
+        cli.install_learnharness(str(tmp_path / "linked"))

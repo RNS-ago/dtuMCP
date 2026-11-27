@@ -3,6 +3,7 @@
 import inspect
 import json
 import os
+import shutil
 import subprocess
 import sys
 from importlib.metadata import distribution
@@ -106,10 +107,13 @@ def update(branch: str = "", force_reprocess: bool = False) -> str:
     else:
         raise RuntimeError("This dtumcp was installed neither from GitHub nor from a clone, so update "
                            "cannot tell where its new version is. Install it again as the README says.")
-    # uv run, in the clone, brings its dependencies itself.
-    then = [*RUN.split(), "reprocess", *(["--force"] if force_reprocess else [])]
-    restart = ("Restart Claude, Cursor and any other MCP client so they start the new version, and run "
-               "learnharness/install.py again if you use the LearnHarness plugin.")
+    # Each in a process of its own, with the new code. uv run, in the clone,
+    # brings its dependencies itself.
+    after = [[*RUN.split(), "reprocess", *(["--force"] if force_reprocess else [])]]
+    if moved and _plugin_dest().exists():
+        # Only a plugin installed already, and only in the default directory.
+        after.append([*RUN.split(), "install_learnharness"])
+    restart = "Restart Claude, Cursor, LearnHarness and any other MCP client so they start the new version."
     if os.name == "nt" and changed:
         # Windows replaces no file a running program has open, and this process
         # has dtumcp.exe and its venv open: the install waits for it to exit.
@@ -118,7 +122,7 @@ def update(branch: str = "", force_reprocess: bool = False) -> str:
             steps.append(f"{_powershell(install)}; if ($LASTEXITCODE -ne 0) {{ Read-Host 'The install failed. "
                          "Close Claude, Cursor and anything else running dtumcp, then run dtumcp update again. "
                          "Press Enter to close'; exit 1 }")
-        steps += [_powershell(then), "Read-Host 'Done. Press Enter to close'"]
+        steps += [*map(_powershell, after), "Read-Host 'Done. Press Enter to close'"]
         subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "; ".join(steps)],
                          cwd=clone, creationflags=subprocess.CREATE_NEW_CONSOLE)
         return f"The update goes on in a new window once this command exits. {restart}"
@@ -127,11 +131,78 @@ def update(branch: str = "", force_reprocess: bool = False) -> str:
             raise RuntimeError("uv tool install failed; its message is above.")
         # The new version in a process of its own: this one has the old code
         # loaded, and after an install the files it would import next are gone.
-        if subprocess.run(then, cwd=clone).returncode:
-            raise RuntimeError(f"dtumcp is updated, but the reprocess failed; run {' '.join(then)} again.")
+        for command in after:
+            if subprocess.run(command, cwd=clone).returncode:
+                raise RuntimeError(f"dtumcp is updated, but {' '.join(command)} failed; run it again.")
     except FileNotFoundError as e:  # no uv, or no dtumcp on PATH
         raise RuntimeError(f"Could not run {e.filename}: {e.strerror}")
     return f"dtumcp is up to date. {restart}" if moved else "dtumcp was up to date already; nothing changed."
+
+
+PLUGINS = Path(__file__).parent / "plugins"  # the harness plugins dtumcp ships
+
+
+def _plugin_dest(plugins: str = "") -> Path:
+    """Where the LearnHarness plugin goes: dtu-learn/dist in the plugins
+    directory, %APPDATA%'s on Windows and ~/.config's elsewhere by default."""
+    default = os.path.join(os.environ.get("APPDATA", "~/.config"), "LearnHarness", "data", "plugins")
+    return Path(plugins or default).expanduser() / "dtu-learn" / "dist"
+
+
+def _tools_json() -> str:
+    """The tools' names, descriptions and argument schemas as MCP clients see
+    them, so the LearnHarness plugin offers the same tools."""
+    return json.dumps([{"name": t.name, "description": t.description, "parameters": t.input_schema}
+                       for t in anyio.run(mcp.list_tools)], indent=1)
+
+
+def install_learnharness(plugins: str = "") -> str:
+    """Install the DTU Learn plugin into LearnHarness, or update it.
+
+    Copies the plugin dtumcp ships, with this version's tool list, into
+    <plugins>/dtu-learn/dist. plugins is the plugins directory Settings ->
+    Community plugins shows, if not the default; dtumcp update installs a
+    plugin in the default one again. Restart LearnHarness afterwards: it
+    loads plugin code only at start. Command line only.
+    """
+    dest = _plugin_dest(plugins)
+    if dest.is_symlink():
+        raise RuntimeError(f"Refusing to replace {dest}: it is a symlink.")
+    # The plugin runs the dtumcp on PATH or in ~/.local/bin, as backend.cjs
+    # extends PATH, so one must be there before anything is written.
+    if not shutil.which("dtumcp", path=os.pathsep.join([os.environ.get("PATH", ""),
+                                                          os.path.expanduser("~/.local/bin")])):
+        raise RuntimeError("The plugin runs the dtumcp that uv tool install puts on PATH, and there is none. "
+                           "Run uv tool install -e . in the clone first.")
+    # The new dist/ is built beside the old one and swapped in by renames only
+    # once it is complete, so a failed install leaves the working plugin in
+    # place and an update leaves no stale files. The sibling data/ is never touched.
+    new, aside = dest.with_name("dist.new"), dest.with_name("dist.old")
+    shutil.rmtree(new, ignore_errors=True)
+    shutil.copytree(PLUGINS / "learnharness", new, ignore=shutil.ignore_patterns("README.md"))
+    (new / "tools.json").write_text(_tools_json() + "\n", encoding="utf-8")
+    # Swapped by renames, each done whole or not at all, so the plugin folder is
+    # never left half deleted: the old dist/ moves aside, the new one takes its
+    # place, and only then is the old one deleted.
+    shutil.rmtree(aside, ignore_errors=True)  # one an earlier install could not delete
+    if dest.exists():
+        try:
+            dest.rename(aside)
+        except OSError as e:  # on Windows, a file in it is open
+            shutil.rmtree(new, ignore_errors=True)
+            raise RuntimeError(f"Could not move the installed plugin aside ({e}), so it is left as it was. "
+                               "Close LearnHarness and try again.")
+    try:
+        new.rename(dest)
+    except OSError as e:
+        if aside.exists():
+            aside.rename(dest)
+        shutil.rmtree(new, ignore_errors=True)
+        raise RuntimeError(f"Could not put the new plugin in place ({e}), so the old one is back.")
+    shutil.rmtree(aside, ignore_errors=True)
+    left = f" Could not delete the old plugin at {aside}; the next install does." if aside.exists() else ""
+    return (f"Installed into {dest}.{left}\nRestart LearnHarness, which loads plugin code only at start, "
+            "and enable DTU Learn under Settings -> Community plugins if it is new.")
 
 
 def _flag(param: str) -> str:
@@ -162,6 +233,7 @@ COMMANDS = {
         download_term,
         reprocess,
         update,
+        install_learnharness,
     )
 }
 
@@ -307,13 +379,7 @@ def main() -> None:
                     print(json.dumps({"id": asked, "error": str(e) or type(e).__name__}), flush=True)
             raise SystemExit(0)
         if name == "tools":
-            # Names, descriptions and argument schemas as MCP clients see
-            # them, so the LearnHarness plugin offers the same tools.
-            tools = anyio.run(mcp.list_tools)
-            print(json.dumps([
-                {"name": t.name, "description": t.description, "parameters": t.input_schema}
-                for t in tools
-            ], indent=1))
+            print(_tools_json())
             raise SystemExit(0)
         if name not in COMMANDS:
             raise SystemExit(f"Unknown command {name!r}.\n\n{_usage()}")

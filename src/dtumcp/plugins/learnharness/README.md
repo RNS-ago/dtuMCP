@@ -7,26 +7,29 @@ view to the sidebar.
 ## Install
 
 Install dtuMCP with `uv tool install` and run `dtumcp login` first (see the
-[main README](../README.md)). Then, from the repository folder, and again after
-any change to the plugin or to the tools' names, descriptions or arguments:
+[main README](../../../../README.md)). Then:
 
 ```bash
-uv run learnharness/install.py
+dtumcp install_learnharness
 ```
 
-That copies the plugin and the installed `dtumcp`'s tool list into
+That copies the plugin dtumcp ships and its tool list into
 `~/.config/LearnHarness/data/plugins/dtu-learn/dist/`
 (`%APPDATA%\LearnHarness\data\plugins\dtu-learn\dist\` on Windows). If
 **Settings → Community plugins** shows a different plugins directory, pass that
 one as the argument. Restart LearnHarness, which loads plugin code only at
 start, and enable **DTU Learn** under Settings → Community plugins.
 
+`dtumcp update` installs the plugin again when it brings a new version, if the
+plugin is in the default directory; one installed elsewhere needs
+`dtumcp install_learnharness <plugins directory>` again.
+
 The plugin runs the installed `dtumcp`, the same one every other client runs,
 looking for it on `PATH` and in `~/.local/bin` (under `%USERPROFILE%` on
 Windows), since an app started from a desktop entry or the Start menu may not
 get your shell's `PATH`. With `uv tool install -e .` in a clone, a code change
-reaches the plugin at its next call; a changed tool list needs `install.py`
-and a restart.
+reaches the plugin at its next call; a changed plugin or tool list needs
+`dtumcp install_learnharness` and a restart.
 It reads the same session file as every other client.
 
 ## Agents
@@ -137,7 +140,7 @@ sends `X-Frame-Options: DENY`), so DTU Learn links preview from the saved copy:
 ### Search
 
 The box above the tree searches every downloaded course through the MCP's
-index (see [Search](../README.md#search)); `/` focuses it from anywhere in the
+index (see [Search](../../../../README.md#search)); `/` focuses it from anywhere in the
 view. Results replace the tree, words marked in context. A click opens one
 (unless it ends a text selection); Enter opens the first. A result opens with
 its words marked: a PDF at the first match from its best page, text or a unit

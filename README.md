@@ -196,9 +196,10 @@ instructions or resources.
 
 ### LearnHarness
 
-[`learnharness/`](learnharness/README.md) is a LearnHarness plugin: it gives
-the tutor agents these tools with their own instructions, and adds a DTU Learn
-sidebar with a PDF viewer, course pages, search and **Send to tutor**.
+[`src/dtumcp/plugins/learnharness/`](src/dtumcp/plugins/learnharness/README.md)
+is a LearnHarness plugin: it gives the tutor agents these tools with their own
+instructions, and adds a DTU Learn sidebar with a PDF viewer, course pages,
+search and **Send to tutor**. `dtumcp install_learnharness` installs it.
 
 ### claude.ai in the browser
 
@@ -449,10 +450,11 @@ These are not MCP tools, so an agent cannot run them.
 | `update [branch] [-fr\|--force-reprocess]` | Gets the newest dtumcp on the current branch, or on `branch`, then reprocesses the courses an older version saved |
 | `reprocess [course] [-f\|--force]` | Works saved courses out again with the installed version, without downloading them |
 | `download_video <course> <topic>` | Saves a video topic into its course's offline copy, next to its unit's files |
+| `install_learnharness [plugins]` | Installs the LearnHarness plugin, or updates it; `update` does that too for one in the default directory |
 | `file_text <path>` | Prints a saved file's text, as `get_file` gives a topic's, for files a course links to |
 
 `tools`, `search_serve`, `video_link`, `course_tab` and `<command> --args
-'<JSON>'` are for the [LearnHarness plugin](learnharness/README.md).
+'<JSON>'` are for the [LearnHarness plugin](src/dtumcp/plugins/learnharness/README.md).
 
 ```bash
 dtumcp reprocess 02231
@@ -484,8 +486,8 @@ pulls the branch it has checked out, and a GitHub install keeps the branch it
 was installed from (the default, `main`, if none). `dtumcp update <branch>`
 switches to that branch first, and later updates stay on it until
 `dtumcp update main`. `-fr` or `--force-reprocess` reprocesses every saved
-course, as `reprocess --force`.
-Restart your MCP clients afterwards.
+course, as `reprocess --force`. A LearnHarness plugin in the default plugins
+directory is installed again too. Restart your MCP clients afterwards.
 
 > [!NOTE]
 > Windows replaces no program that is running, so there the install goes on in

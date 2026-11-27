@@ -1,6 +1,6 @@
 // Gives LearnHarness's tutors the dtuMCP tools and answers the DTU Learn view.
 // Every call runs the installed dtumcp command line once. tools.json (its tool
-// list) sits beside this file; install.py writes it there.
+// list) sits beside this file; dtumcp install_learnharness writes it there.
 const { execFile, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");

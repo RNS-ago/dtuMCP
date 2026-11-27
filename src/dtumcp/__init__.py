@@ -24,4 +24,7 @@ The modules, each importing only those above it:
   tools       the MCP tools
   auth        login
   cli         the command line and main()
+
+plugins/ holds the harness plugins dtumcp ships, which install_learnharness
+copies out: plugins/learnharness is LearnHarness's.
 """
