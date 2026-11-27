@@ -212,6 +212,15 @@ def test_offline_copies():
     assert mod._decode(b"x", "text/plain; charset=nonsense") == "x"
 
 
+def test_long_text_file():
+    # A text file, such as a Maple worksheet's megabytes of XML, is cut at
+    # TEXT_LIMIT and says where the whole file is.
+    path = Path("/x/sheet.mw")
+    got = mod._file_text(b"a" * (mod.TEXT_LIMIT + 5), "d2l/unknowntype", "sheet.mw", "Sheet", path)
+    assert got.startswith("a" * mod.TEXT_LIMIT + "\n\n[Text cut here") and str(path) in got, got[-200:]
+    assert mod._file_text(b"short", "text/plain", "a.txt", "A", path) == "short"
+
+
 def test_file_text():
     # a PDF with no text says why
     with tempfile.TemporaryDirectory() as tmp:

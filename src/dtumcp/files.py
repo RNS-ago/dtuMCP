@@ -58,6 +58,15 @@ def _saved_text(path: Path, title, marks: dict | None = None, pages: tuple = (1,
     return _file_text(path.read_bytes(), ctype, path.name, title, path, marks, pages, link, first_row, find)
 
 
+def _capped(text: str, path: Path | None) -> str:
+    """A text file's text up to TEXT_LIMIT. A Maple worksheet (.mw) is XML of
+    several megabytes, mostly its plots, which no caller can take whole."""
+    if len(text) <= TEXT_LIMIT:
+        return text
+    where = f" The whole file is at {path}." if path else ""
+    return f"{text[:TEXT_LIMIT]}\n\n[Text cut here, after {TEXT_LIMIT:,} of its {len(text):,} characters.{where}]"
+
+
 def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None = None,
                marks: dict | None = None, pages: tuple = (1, 0), link=None, first_row: int = 1,
                find: str = "") -> str:
@@ -72,12 +81,12 @@ def _file_text(content: bytes, ctype: str, name: str, title, path: Path | None =
     if "html" in ctype:
         return f"[{title}]\n\n{_html_text(_decode(content, ctype), link)}"
     if ctype.startswith("text/") or "json" in ctype:
-        return _decode(content, ctype)
+        return _capped(_decode(content, ctype), path)
     if ctype == "d2l/unknowntype":
         # D2L labels every extension it does not know this way, and many of them
         # are plain text: source code, PRISM models, LaTeX. Let the bytes decide.
         try:
-            return content.decode("utf-8")
+            return _capped(content.decode("utf-8"), path)
         except UnicodeDecodeError:
             pass
 

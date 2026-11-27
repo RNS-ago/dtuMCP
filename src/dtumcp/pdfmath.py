@@ -133,11 +133,53 @@ TEX_GLYPHS = (  # by font name: what its codes stand for
 )
 # Word and PowerPoint's Cambria Math maps tell the same kind of lie about its
 # n-ary products and sums: a displayed ∏ is the Sinhala sign ෑ, an inline one
-# ς, a displayed ∑ ෍ and an inline one σ. _tex_maps swaps them back.
-# shortcut: an upright σ or ς set in Cambria Math reads as ∑ or ∏; Office sets
-# letters in math italic (𝜎), so upright ones were not seen in the downloads.
+# ς, a displayed ∑ ෍ and an inline one σ. _tex_maps swaps them back, by glyph
+# where it knows the font's glyph order (OFFICE_GLYPHS), else by character.
+# shortcut: in a Cambria Math of another glyph order, an upright σ or ς reads
+# as ∑ or ∏; the downloads' Office PDFs all have the known order.
 CAMBRIA = re.compile(r"CambriaMath")
 OFFICE_NARY = {"ෑ": "∏", "ς": "∏", "෍": "∑", "σ": "∑"}
+
+
+def _run(first: int, chars: str) -> dict:
+    return dict(zip(range(first, first + len(chars)), chars))
+
+
+# Cambria Math's glyphs by number, as Word and PowerPoint embed it (code =
+# glyph, Identity-H). Their maps leave out the smaller shapes they set
+# scripts in (OpenType ssty: x_i's i is glyph 3036, not 𝑖's 1861), so
+# pdftotext drops every sub- and superscript. The glyph order is the font's
+# own (6.98 and 6.99): each run checked against the shapes, and against the
+# maps of other downloads where theirs name the glyph. _tex_maps adds what a
+# map leaves out, once the map agrees with this one where both name a glyph.
+ITALIC_CAPS = "".join(chr(0x1D434 + i) for i in range(26))
+ITALIC_SMALL = "".join("ℎ" if i == 7 else chr(0x1D44E + i) for i in range(26))  # Unicode's italic h is ℎ
+# 𝛼 to 𝜌, then 𝜎 before 𝜍, as the font has them, then 𝜏 to 𝜛
+ITALIC_GREEK = "".join(map(chr, [*range(0x1D6FC, 0x1D70D), 0x1D70E, 0x1D70D, *range(0x1D70F, 0x1D71C)]))
+OFFICE_GLYPHS = {
+    **_run(882, "0123456789"), **_run(1827, ITALIC_CAPS), **_run(1853, ITALIC_SMALL), **_run(2009, ITALIC_GREEK),
+    # script size
+    **_run(2868, "0123456789+−="), **_run(2885, CAPITALS), **_run(2911, CAPITALS.lower()),
+    **_run(2937, "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ"), **_run(3002, ITALIC_CAPS), **_run(3028, ITALIC_SMALL),
+    **_run(3080, ITALIC_GREEK),
+    # script-script size
+    **_run(3116, "0123456789+−"), **_run(3250, ITALIC_CAPS), **_run(3276, ITALIC_SMALL),
+    # signs, and brackets, roots and integrals in their larger sizes
+    17: "N", 958: "√", 1436: "⇒", 1499: "∗", 1516: "∫", 2998: "∞", 4593: "′",
+    **_run(3397, "+−±"), **_run(3404, "=≠≈<>≤≥"), 3415: "/", 3417: "/", **_run(3435, "((("), **_run(3439, ")))"),
+    3493: "√", 3495: "√", 3496: "√", 3505: "∫",
+    **_run(4666, "(){}[]()"), 4678: "(", 4679: ")", 4682: "{", 4684: "(", 4685: ")",
+}
+# What Office's maps say wrong, by glyph: the n-ary signs (OFFICE_NARY), and an
+# upright σ an earlier swap by character made a ∑.
+OFFICE_FIXED = {592: "σ", 962: "∏", 963: "∑", 3533: "∑", 3537: "∏"}
+OFFICE_GLYPHS |= OFFICE_FIXED
+# TeX's big delimiters by glyph name, for a CMEX font embedded without a
+# ToUnicode map, whose names (parenleftBigg) pdftotext cannot read.
+CMEX_NAMES = {"parenleft": "(", "parenright": ")", "bracketleft": "[", "bracketright": "]", "braceleft": "{",
+              "braceright": "}", "floorleft": "⌊", "floorright": "⌋", "ceilingleft": "⌈", "ceilingright": "⌉",
+              "angbracketleft": "⟨", "angbracketright": "⟩", "slash": "/", "backslash": "\\", "radical": "√",
+              "summation": "∑", "product": "∏", "integral": "∫"}
 
 
 PDF_OBJECT = re.compile(rb"(?<!\d)(\d+)\s+\d+\s+obj\b")
@@ -242,13 +284,18 @@ def _tex_maps(data: bytes) -> bytes:
     trailer = data[at:end + 2]
     if b"/Encrypt" in trailer or b"/ByteRange" in data or not (size := re.search(rb"/Size\s+(\d+)", trailer)):
         return data
-    objects, kinds = _pdf_objects(data), {}
-    for body in objects.values():
+    objects, kinds, unmapped = _pdf_objects(data), {}, {}
+    for num, body in objects.items():
         name = re.search(rb"/Type\s*/Font.*?/BaseFont\s*/([^\s/<>\[\]()]+)|/BaseFont\s*/([^\s/<>\[\]()]+).*?/Type\s*/Font", body, re.S)
         ref = re.search(rb"/ToUnicode\s+(\d+)\s+\d+\s+R", body)
+        font = (name.group(1) or name.group(2)).decode("latin-1") if name else ""
+        if name and not ref and TEX_EXTENSION.search(font) and re.search(rb"/Subtype\s*/Type1", body):
+            unmapped[num] = body  # a CMEX font with no map at all: _cmex_map
         if name and ref:
-            font = (name.group(1) or name.group(2)).decode("latin-1")
-            for pattern, table in TEX_GLYPHS + ((CAMBRIA, OFFICE_NARY),):
+            # Cambria Math, also when a PDF maker named it plain Cambria; the
+            # glyph table only where code is glyph (Identity-H)
+            office = ((CAMBRIA, OFFICE_NARY), (re.compile("Cambria"), OFFICE_GLYPHS)) if b"/Identity-H" in body else ()
+            for pattern, table in TEX_GLYPHS + office + ((CAMBRIA, OFFICE_NARY),):
                 if pattern.search(font):
                     kinds.setdefault(int(ref.group(1)), set()).add(id(table))
                     break
@@ -258,17 +305,27 @@ def _tex_maps(data: bytes) -> bytes:
         if more or num not in objects or (cmap := _pdf_stream(objects[num])) is None:
             continue  # shared by fonts of different kinds, or unreadable
         entries = _cmap_entries(cmap)
-        if kind == id(OFFICE_NARY):  # by what the map says, not by code
-            done = {code: OFFICE_NARY.get(uni, uni) for code, uni in entries.items()}
+        if kind in (id(OFFICE_NARY), id(OFFICE_GLYPHS)):  # by what the map says, not by code
+            named = [code for code in entries if code in OFFICE_GLYPHS and code not in OFFICE_FIXED]
+            if len(named) >= 3 and all(entries[code] == OFFICE_GLYPHS[code] for code in named):
+                # Cambria Math by its glyph order: what the map leaves out, and what it says wrong
+                done = OFFICE_GLYPHS | entries | OFFICE_FIXED
+            elif kind == id(OFFICE_NARY):
+                done = {code: OFFICE_NARY.get(uni, uni) for code, uni in entries.items()}
+            else:
+                done = entries  # another Cambria, a text face: its σ is a σ
         else:
-            done = dict(entries)
-            for code, symbol in ((ord(c), s) for c, s in tables[kind].items()):
-                if entries.get(code, chr(code)) == chr(code) or entries[code] in PIECES:
-                    done[code] = symbol  # missing, the code's own letter, or a private-use piece
-            done.update([(code, PIECES[uni]) for code, uni in done.items() if uni in PIECES])
+            done = _completed(entries, tables[kind])
         if done != entries:
             space = re.search(rb"begincodespacerange\s*<([0-9A-Fa-f]+)>", cmap)
             maps[num] = _cmap(done, len(space.group(1)) // 2 if space else 1)
+    # A CMEX font with no map gets one, as a new object its font now names.
+    fonts, last = {}, int(size.group(1))
+    for num, body in unmapped.items():
+        if (cmap := _cmex_map(body, objects)):
+            maps[last] = cmap
+            fonts[num] = body.strip().replace(b"<<", b"<</ToUnicode %d 0 R" % last, 1)
+            last += 1
     if not maps:
         return data
     update, places = bytearray(b"\n"), {}
@@ -277,13 +334,59 @@ def _tex_maps(data: bytes) -> bytes:
         places[num] = len(data) + len(update)
         update += b"%d 0 obj\n<< /Length %d /Filter /FlateDecode >>\nstream\n%s\nendstream\nendobj\n" % (
             num, len(packed), packed)
+    for num, body in sorted(fonts.items()):
+        places[num] = len(data) + len(update)
+        update += b"%d 0 obj\n%s\nendobj\n" % (num, body)
     xref = len(data) + len(update)
     update += b"xref\n0 1\n0000000000 65535 f \n"
     update += b"".join(b"%d 1\n%010d 00000 n \n" % (num, place) for num, place in sorted(places.items()))
     keep = b" ".join(m.group(0) for key in (rb"/Root\s+\d+\s+\d+\s+R", rb"/Info\s+\d+\s+\d+\s+R", rb"/ID\s*\[[^\]]*\]")
                      if (m := re.search(key, trailer)))
-    update += b"trailer\n<< /Size %s %s /Prev %d >>\nstartxref\n%d\n%%%%EOF\n" % (size.group(1), keep, at, xref)
+    update += b"trailer\n<< /Size %d %s /Prev %d >>\nstartxref\n%d\n%%%%EOF\n" % (last, keep, at, xref)
     return data + bytes(update)
+
+
+def _completed(entries: dict, table: dict) -> dict:
+    """A TeX font's map with what table says its codes stand for, where the
+    map has a code missing, as its own letter or as a private-use piece."""
+    done = dict(entries)
+    for code, symbol in ((ord(c), s) for c, s in table.items()):
+        if entries.get(code, chr(code)) == chr(code) or entries[code] in PIECES:
+            done[code] = symbol
+    done.update([(code, PIECES[uni]) for code, uni in done.items() if uni in PIECES])
+    return done
+
+
+def _cmex_map(body: bytes, objects: dict) -> bytes | None:
+    """A ToUnicode map for a CMEX font embedded without one: each code it has
+    a glyph for, by the glyph's name where its encoding gives one
+    (parenleftBigg is a big "("), else by TeX's own code (OMX). None when it
+    names none."""
+    first = re.search(rb"/FirstChar\s+(\d+)", body)
+    widths = re.search(rb"/Widths\s*(\[[^\]]*\]|(\d+)\s+\d+\s+R)", body)
+    if not (first and widths):
+        return None
+    listed = objects.get(int(widths.group(2)), b"") if widths.group(2) else widths.group(1)
+    codes = [int(first.group(1)) + i for i, w in enumerate(re.findall(rb"-?\d+(?:\.\d+)?", listed)) if float(w) > 0]
+    encoding = re.search(rb"/Encoding\s*(\d+)\s+\d+\s+R|/Encoding\s*(<<.*?>>|/\w+)", body, re.S)
+    encoding = (objects.get(int(encoding.group(1)), b"") if encoding.group(1) else encoding.group(2)) if encoding else None
+    differences = re.search(rb"/Differences\s*\[(.*?)\]", encoding or b"", re.S)
+    names, code = {}, 0
+    for number, name in re.findall(rb"(\d+)|/([^\s/\[\]<>()]+)", differences.group(1) if differences else b""):
+        if number:
+            code = int(number)
+        else:
+            names[code], code = name.decode("latin-1"), code + 1
+    done = {}
+    for code in codes:
+        if code in names:
+            symbol = CMEX_NAMES.get(re.sub(r"(big|Big|bigg|Bigg)$", "", names[code]))
+        else:  # TeX's own code, unless the encoding moved the font's glyphs elsewhere
+            symbol = OMX.get(chr(code)) if encoding is None else None
+        if symbol:
+            done[code] = symbol
+    # as _tex_maps completes a map it has, so a second pass changes nothing
+    return _cmap(_completed(done, OMX)) if done else None
 
 
 def _unmapped_fonts(data: bytes) -> set[str]:
@@ -359,11 +462,21 @@ TEX_EXTENSION = re.compile(r"CMEX|LMMathExtension")  # TeX's big operators and d
 MATH_FONT = re.compile(r"CMMI|CMSY|CMEX|CMBSY|MSAM|MSBM|EUFM|EUSM|RSFS|Math", re.I)
 
 
+def _math_letters(text: str) -> bool:
+    """Whether a run is mostly Unicode's math letters (𝑥, 𝜎, U+1D400 to
+    U+1D7FF), which only math sets. Word and PowerPoint write their formulas
+    in them, in a font some PDF makers embed as plain Cambria, not Cambria
+    Math, so its name alone misses them."""
+    chars = "".join(text.split())
+    return bool(chars) and 2 * sum(0x1D400 <= ord(c) <= 0x1D7FF for c in chars) >= len(chars)
+
+
 def _math_pages(xml: str) -> tuple[set[int], int]:
     """The pages of pdftohtml's XML that hold math, and how many pages it has.
-    A page holds math when 20 or more of its characters are set in math fonts,
-    or when it has a displayed formula, which _displayed tells. A lone $n$ in a
-    sentence or a list bullet, which LaTeX takes from a math font, is neither."""
+    A page holds math when 20 or more of its characters are set in math fonts
+    or as math letters (_math_letters), or when it has a displayed formula,
+    which _displayed tells. A lone $n$ in a sentence or a list bullet, which
+    LaTeX takes from a math font, is neither."""
     try:
         root = ET.fromstring(xml)
     except ET.ParseError:
@@ -373,21 +486,23 @@ def _math_pages(xml: str) -> tuple[set[int], int]:
     return {
         int(page.get("number")) for page in pages
         if sum(len("".join("".join(t.itertext()).split()))
-               for t in page.iter("text") if t.get("font") in math) >= 20
+               for t in page.iter("text")
+               if t.get("font") in math or _math_letters("".join(t.itertext()))) >= 20
         or _displayed(page, math)
     }, len(pages)
 
 
 def _displayed(page, math: set) -> bool:
     """Whether a pdftohtml page has a displayed formula: a line with text in a
-    math font that starts a tenth of the page's width or more right of the
-    page's left margin, as a centred formula does and body text, a list item
-    or its next line does not. The top and bottom 8% are left out: a slide's
-    running head can name a section in a math font."""
+    math font or math letters that starts a tenth of the page's width or more
+    right of the page's left margin, as a centred formula does and body text,
+    a list item or its next line does not. The top and bottom 8% are left out:
+    a slide's running head can name a section in a math font."""
     try:
         width, height = int(page.get("width")), int(page.get("height"))
         runs = sorted((int(t.get("top")), int(t.get("height")), int(t.get("left")),
-                       t.get("font") in math and bool("".join(t.itertext()).strip()))
+                       (t.get("font") in math and bool("".join(t.itertext()).strip()))
+                       or _math_letters("".join(t.itertext())))
                       for t in page.iter("text"))
     except (TypeError, ValueError):
         return False
@@ -431,21 +546,26 @@ def _nest(runs: list) -> str:
     top = max(r["size"] for r in runs)
     base = [r for r in runs if r["size"] >= 0.85 * top] or runs
     middle = sum(r["mid"] for r in base) / len(base)
-    out, group, kind = "", [], None
+    out, group, kind, roots = "", [], None, []  # roots: where open drawn roots' bars end
     for r in runs + [None]:
-        small = r is not None and r["size"] < 0.85 * top and r["text"].strip() not in PRIMES
+        small = r is not None and r["size"] < 0.85 * top and r["text"].strip() not in PRIMES and not r.get("cover")
         here = ("_" if r["mid"] > middle else "^") if small else None
         if group and (here != kind or not small):
             out += _script(_nest(group), kind)
             group = []
+        while roots and (r is None or not group and not small and r["left"] > roots[-1] - 0.2 * r["size"]):
+            out += ")"
+            roots.pop()
         if r is None:
             break
         if small:
             group.append(r)
             kind = here
         else:
-            out += r["text"]
-    return re.sub(r"\s+", " ", out).strip()
+            out += r["text"] + ("(" if r.get("cover") else "")
+            if r.get("cover"):
+                roots.append(r["cover"])
+    return re.sub(r"√\(([^\s()])\)", r"√\1", re.sub(r"\s+", " ", out).strip())
 
 
 def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list = (), words: list = ()) -> str:
@@ -461,6 +581,9 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
     of pdftohtml's runs. Lines keep their place across the page, as
     pdftotext -layout's do."""
     runs = []
+    # A font that sets math letters anywhere on the page is a math font, its
+    # digits and signs too, as Office's Cambria Math when named plain Cambria.
+    math_fonts = {fonts.get(t.get("font"), (0, ""))[1] for t in page.iter("text") if _math_letters("".join(t.itertext()))}
     for t in page.iter("text"):
         text = "".join(t.itertext())
         try:
@@ -477,7 +600,7 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
                          # CMEX's tall brackets and operators hang well below their short box
                          mid=top + (0.75 * size if TEX_EXTENSION.search(family) and (big or text.strip() in "()[]{}⟨⟩⌊⌋⌈⌉")
                                     else height / 2), size=size, big=big,
-                         math=bool(MATH_FONT.search(family)),
+                         math=bool(MATH_FONT.search(family)) or family in math_fonts,
                          piece=not big and (set(text.strip()) <= DELIMITER_PIECES or bool(TEX_EXTENSION.search(family)))))
     # A / set over a sign strikes it out, as TeX writes ∉: ∈ with / on it.
     for r in [r for r in runs if r["text"].strip() == "/"]:
@@ -523,7 +646,7 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
         # Small beside the page's text, or beside the larger text it follows,
         # overlapping it up or down: a slide's smaller
         # or larger formulas' scripts, an operator's limits set beside it.
-        r["small"] = not r["big"] and (r["size"] < 0.85 * body or any(
+        r["small"] = not r["big"] and not r["piece"] and (r["size"] < 0.85 * body or any(
             r["size"] < 0.85 * b["size"] and -touch <= r["left"] - b["right"] <= touch
             and b["top"] < r["top"] + r["h"] and r["top"] < b["top"] + b["h"] for b in runs))
     # Body text's line height, the most common: a slide's title, twice as
@@ -535,7 +658,7 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
     # one inside a run, which pdftohtml spans across the gap it leaves, goes
     # in between the run's words it falls between (boxes), else at the space
     # nearest where it falls; the rest join the lines as pieces do.
-    for char, x0, y0, x1, y1 in ((c, *(v * scale for v in box)) for c, *box in delimiters):
+    for char, x0, y0, x1, y1, *cover in ((c, *(v * scale for v in box)) for c, *box in delimiters):
         if not y1 - y0 <= 3 * line_h:
             continue
         centre = (x0 + x1) / 2
@@ -554,18 +677,20 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
             else:
                 at = round((centre - inside["left"]) / inside["w"] * len(text))
                 at = min((i for i, c in enumerate(text) if c == " "), key=lambda i: abs(i - at), default=at)
-            if char in "([{":  # an opening bracket hugs what follows
+            if char in "([{√":  # an opening bracket, or a root, hugs what follows
                 at += len(text[at:]) - len(text[at:].lstrip())
             inside["text"] = text[:at] + char + text[at:]
         else:
             # Sized as the text it is next to, it goes where that goes, never as a script.
-            beside = min(beside, key=lambda r: min(abs(r["left"] - x1), abs(r["right"] - x0)))
+            # by the full-size text nearest it, not a limit set small under a lim
+            beside = min([r for r in beside if not r["small"]] or beside,
+                         key=lambda r: min(abs(r["left"] - x1), abs(r["right"] - x0)))
             runs.append(dict(text=char, top=y0, left=x0, right=x1, w=x1 - x0, h=y1 - y0, mid=(y0 + y1) / 2,
                              size=beside["size"], big=False, math=True, piece=not beside["small"],
-                             small=beside["small"], beside=beside, bracket=True))
-    for r in runs:  # smaller text right after a drawn bracket is its script: {0,1}^λ
+                             small=beside["small"], beside=beside, bracket=True, **({"cover": cover[0]} if cover else {})))
+    for r in runs:  # smaller text right after a drawn bracket is its script: {0,1}^λ; after a root, its radicand
         r["small"] = r["small"] or not r["big"] and not r.get("bracket") and any(
-            b.get("bracket") and r["size"] < 0.85 * b["size"] and -touch <= r["left"] - b["right"] <= touch
+            b.get("bracket") and not b.get("cover") and r["size"] < 0.85 * b["size"] and -touch <= r["left"] - b["right"] <= touch
             and b["top"] < r["top"] + r["h"] and r["top"] < b["top"] + b["h"] for b in runs)
 
     # Small text touching full-size text beside it, overlapping it: its script.
@@ -584,8 +709,9 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
                                     for x0, x1, y, *rest in rules
                                     if spans[round(x0), round(x1)] < 3 or (x1 - x0) * scale <= 6 * body),
                                    key=lambda r: r[1] - r[0]):
-        # A bar from where a √ ends is the root's, over what it covers.
-        if any(r["text"].strip() == "√" and abs(r["right"] - x0) <= touch
+        # A bar from where TeX's √ ends is the root's, over what it covers; a
+        # drawn root (_radical) has its bar in its outline.
+        if any(r["text"].strip() == "√" and not r.get("bracket") and abs(r["right"] - x0) <= touch
                and r["top"] - line_h <= y <= r["top"] + r["h"] for r in runs):
             continue
         inside = [r for r in runs if not r.get("taken") and x0 - 3 <= r["left"] <= x1 and r["right"] <= x1 + 0.6 * body]
@@ -607,8 +733,16 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
             continue
         near_above = max(r["top"] + r["h"] for r in above)
         near_below = min(r["top"] for r in below)
-        num = sorted((r for r in above if r["top"] + r["h"] >= near_above - 0.6 * line_h), key=lambda r: r["left"])
-        den = sorted((r for r in below if r["top"] <= near_below + 0.6 * line_h), key=lambda r: r["left"])
+        num = [r for r in above if r["top"] + r["h"] >= near_above - 0.6 * line_h]
+        den = [r for r in below if r["top"] <= near_below + 0.6 * line_h]
+        # and the scripts of what they keep, small, right after it and
+        # overlapping it up or down: the 2 of P_0^2, which its 0 sets further
+        # from the bar than the cut.
+        for part, side in ((num, above), (den, below)):
+            part += [r for r in side if r["small"] and not any(r is p for p in part) and any(
+                -touch <= r["left"] - p["right"] <= touch
+                and p["top"] < r["top"] + r["h"] and r["top"] < p["top"] + p["h"] for p in part)]
+        num, den = (sorted(part, key=lambda r: r["left"]) for part in (num, den))
         # Both parts are centred on the bar: text at one end of a rule, as a
         # sum's total under its last row or a □ ending a proof, is not one.
         centred = lambda part: abs((part[0]["left"] + part[-1]["right"]) / 2 - (x0 + x1) / 2) <= 0.25 * (x1 - x0) + 3
@@ -715,13 +849,21 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
                 and (b.get("kind") or not b["text"].rstrip().endswith(tuple("([{⟨⌊⌈")))
                 # smaller than the text it follows, a caption set small goes on
                 # as text; a fraction's parts in a line are script size already
+                and not b.get("cover")  # a drawn root's radicand is no script of it
                 and (b.get("kind") or b["big"] or b.get("bracket") or b.get("fraction")
                      or r["size"] < 0.85 * b["size"])
                 # and it goes on a script only while smaller than the letter
                 # the script hangs from: x_1 + x̄_2 in a caption, not x_{1+x̄_2}
-                and not (b.get("kind") and root and r["size"] >= 0.85 * root["size"])] if near else []
+                and not (b.get("kind") and root and r["size"] >= 0.85 * root["size"])
+                # an inline fraction's script clears its bar, where cos in 5/4 cos θ/2
+                # sits across it; after one in a script, the script goes on
+                and not (b.get("fraction") and not b.get("kind") and r["top"] < b["mid"] < r["top"] + r["h"])] if near else []
         r["summand"] = any(r["left"] - b["right"] > touch for b in base)
-        if base and not r.get("bracket") and abs(near["mid"] - r["mid"]) <= 1.5 * line_h:
+        # A small fraction whose bar is level with the line's middle is in the
+        # line, A = G/(tρv), not a script; a script's sits half a line or more
+        # higher or lower: e^{−1/2}.
+        inline = bool(r.get("fraction") and near and abs(r["mid"] - near["mid"]) <= 0.2 * line_h)
+        if base and not r.get("bracket") and not inline and abs(near["mid"] - r["mid"]) <= 1.5 * line_h:
             mid = next((b["mid"] for b in base if not b.get("kind") and r["size"] < 0.85 * b["size"]
                         and b["h"] <= 1.2 * b["size"] and abs(r["mid"] - b["mid"]) > 0.15 * b["h"]), near["mid"])
             r["kind"] = "_" if r["mid"] > mid else "^"
@@ -741,7 +883,7 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
     column = body * 0.45  # pixels to a character, near pdftotext -layout's spacing
     out = []
     for line in lines:
-        text, end, group, last = "", None, [], None
+        text, end, group, last, roots = "", None, [], None, []  # roots: where open drawn roots' bars end
         for r in sorted(line["runs"], key=lambda r: (r["left"], r["top"])) + [None]:
             kind = r and (None if r["text"].strip() in PRIMES else r.get("kind"))
             if group and (r is None or kind != group[0]["kind"] or r["left"] - end > 3 and not r.get("summand")):
@@ -750,6 +892,10 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
                     text = f"{text[:-len(last['text'])]}({last['text']})"
                 text += _script(_nest(group), group[0]["kind"])
                 group, last = [], None
+            # a drawn root's bar covers what it applies to: √((a+x)/(a−x)), not √(a+x)/(a−x)
+            while roots and (r is None or not group and r["left"] > roots[-1] - 0.2 * r["size"]):
+                text += ")"
+                roots.pop()
             if r is None:
                 break
             if kind:
@@ -758,9 +904,28 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
                 at = round(r["left"] / column)
                 if not text:
                     text = " " * at
-                elif (r["left"] - end > 0.2 * r["size"] or r.get("spaced")) and r["text"].strip() not in PRIMES:
+                elif (r["left"] - end > 0.2 * r["size"] or r.get("spaced") or r.get("fraction") and text[-1:].isdigit()
+                      and r["text"][:1].isdigit()) and r["text"].strip() not in PRIMES and not text.endswith("√("):
+                    # 135000 6/12, not 1350006/12; a root's bracket hugs what it covers
                     text += " " * max(1, at - len(text)) if r["left"] - end > 2 * column else " "
-                text += r["text"]
+                if roots and r["left"] < roots[-1] < r["right"] - 0.2 * r["size"]:
+                    # a run that goes on past the root's bar, as 2πr = K: the bracket closes
+                    # between its words, where its word boxes put the bar's end, else at the space nearest it
+                    if (found := boxes(r)):
+                        letters, at = sum(len(w[4]) for w in found if (w[0] + w[2]) / 2 < roots[-1]), 0
+                        while letters and at < len(r["text"]):
+                            letters -= not r["text"][at].isspace()
+                            at += 1
+                    else:
+                        at = round((roots[-1] - r["left"]) / r["w"] * len(r["text"]))
+                        at = min((i for i, c in enumerate(r["text"]) if c == " "), key=lambda i: abs(i - at), default=0)
+                    if 0 < at < len(r["text"]):
+                        text += r["text"][:at] + ")"
+                        r = dict(r, text=r["text"][at:])
+                        roots.pop()
+                text += r["text"] + ("(" if r.get("cover") else "")
+                if r.get("cover"):
+                    roots.append(r["cover"])
                 last = r
                 if r["big"] and (r.get("under") or r.get("over")):
                     for side, mark in (("under", "_"), ("over", "^")):
@@ -773,6 +938,7 @@ def _rebuild_page(page, fonts: dict, rules: list, scale: float, delimiters: list
         # TeX's \not is a stroke of its own before = or ∈, so it lands on the
         # space: on the sign it strikes it is ≠ or ∉.
         text = re.sub("̸\\s?(\\S)", lambda m: unicodedata.normalize("NFC", m.group(1) + "̸"), text)
+        text = re.sub(r"√\(([^\s()])\)", r"√\1", text)  # one symbol needs no brackets: √W
         out.append(text.rstrip())
     return "\n".join(out)
 
@@ -868,9 +1034,9 @@ def _figure_shape(path) -> tuple | None:
     return tuple((round(x - box[0]), round(y - box[1])) for x, y in points), box
 
 
-def _rule(path) -> tuple | None:
-    """An SVG path that is a thin level rule, as TeX draws a fraction bar, an
-    overline or a table line: (left, right, y, thickness) in points, or None."""
+def _line(path) -> tuple | None:
+    """An SVG path's extent in points, (left, top, right, bottom), whether it
+    is filled and whether its stroke is thin, or None for no points."""
     m = [float(x) for x in NUMBER.findall(path.get("transform", ""))]
     a, b, c, d, e, f = m if len(m) == 6 else (1, 0, 0, 1, 0, 0)
     xy = [float(v) for v in NUMBER.findall(path.get("d", ""))]
@@ -878,16 +1044,43 @@ def _rule(path) -> tuple | None:
     if not points:
         return None
     xs, ys = [x for x, _ in points], [y for _, y in points]
-    width, height = max(xs) - min(xs), max(ys) - min(ys)
-    filled = path.get("fill", "none") != "none"
     try:
-        stroke = path.get("stroke") and float(path.get("stroke-width") or 1) * max(abs(a), abs(d)) <= 1.5
+        stroke = bool(path.get("stroke")) and float(path.get("stroke-width") or 1) * max(abs(a), abs(d)) <= 1.5
     except ValueError:
         stroke = False
+    return min(xs), min(ys), max(xs), max(ys), path.get("fill", "none") != "none", stroke
+
+
+def _rule(path) -> tuple | None:
+    """An SVG path that is a thin level rule, as TeX draws a fraction bar, an
+    overline or a table line: (left, right, y, thickness) in points, or None."""
+    if not (line := _line(path)):
+        return None
+    left, top, right, bottom, filled, stroke = line
+    width, height = right - left, bottom - top
     # Word and PowerPoint's fraction bars thicken with the type: 1.7 points at 28.
     if width >= 3 and ((filled and (height <= 1.2 or height <= min(3, width / 3))) or (stroke and height <= 0.3)):
-        return min(xs), max(xs), (min(ys) + max(ys)) / 2, height
+        return left, right, (top + bottom) / 2, height
     return None
+
+
+def _upright(path) -> tuple | None:
+    """An SVG path that is a thin upright line, as a box's side: (x, top,
+    bottom) in points, or None."""
+    if not (line := _line(path)):
+        return None
+    left, top, right, bottom, filled, stroke = line
+    if bottom - top >= 3 and ((filled and right - left <= 1.2) or (stroke and right - left <= 0.3)):
+        return (left + right) / 2, top, bottom
+    return None
+
+
+def _boxed(rule: tuple, uprights: list) -> bool:
+    """Whether a rule is a box's top or bottom, as of a boxed answer: an
+    upright line meets it at both ends. A fraction bar has none."""
+    x0, x1, y = rule[:3]
+    return all(any(abs(x - end) <= 1 and top - 1 <= y <= bottom + 1 for x, top, bottom in uprights)
+               for end in (x0, x1))
 
 
 def _delimiters(path) -> list:
@@ -904,11 +1097,39 @@ def _delimiters(path) -> list:
         points = [(a * x + c * y + e, b * x + d * y + f) for x, y in zip(xy[::2], xy[1::2])]
         if len(points) < 2:  # nothing, or a closed path's closing moveto
             continue
+        if not "C" in part and (root := _radical(points)):
+            found.append(root)
+            continue
         if len(points) < 4 or not (char := _delimiter(points, "C" in part)):
             return []
         found.append((char, min(x for x, _ in points), min(y for _, y in points),
                       max(x for x, _ in points), max(y for _, y in points)))
     return found
+
+
+def _radical(points: list) -> tuple | None:
+    """A root sign Word or PowerPoint draws as one straight-edged outline: a
+    bar along its top that runs to its right end, a stroke down from where
+    the bar starts to its lowest point, and a hook on its left at mid-height.
+    As ("√", left, top, right, bottom, end) in points, right where the bar
+    starts, so the sign stands before what the bar covers, and end where the
+    bar ends. None for any other shape."""
+    xs, ys = [x for x, _ in points], [y for _, y in points]
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    w, h = x1 - x0, y1 - y0
+    if len(points) < 6 or h < 6 or w < 0.4 * h:
+        return None
+    near = max(0.6, 0.06 * h)
+    top = [x for x, y in points if y - y0 <= near]
+    bottom = [x for x, y in points if y1 - y <= near]
+    corner = min(top)
+    hook = min(points)  # the leftmost point
+    edges = list(zip(points, points[1:] + points[:1]))
+    ink = abs(sum(a[0] * b[1] - b[0] * a[1] for a, b in edges)) / 2 / (w * h)
+    if (max(top) >= x1 - near and max(top) - corner >= 0.15 * w and x0 + near < min(bottom)
+            and max(bottom) < corner and y0 + 0.3 * h <= hook[1] <= y1 - 0.1 * h and ink < 0.35):
+        return "√", x0, y0, corner, y1, x1
+    return None
 
 
 def _delimiter(points: list, curved: bool) -> str | None:
@@ -951,10 +1172,10 @@ def _drawing_pages(svg: Path) -> tuple[set[int], list, float, list]:
     less any shape that sits on more than half the pages wherever it is (the
     slide template's), spanning 20 points or more. A figure of level and
     upright lines alone, such as a grid or a number line, is not found. Also,
-    for _rebuild_page, each page's thin level rules, the page width and each
-    page's drawn brackets (_delimiter) as (char, left, top, right, bottom), in
-    points. Read as a stream: the SVG of a long deck is as big as the PDF."""
-    pages, rules, delimiters, hidden, width = [], [], [], 0, 0.0
+    for _rebuild_page, each page's thin level rules but a box's (_boxed), the
+    page width and each page's drawn brackets (_delimiter) as (char, left,
+    top, right, bottom), in points. Read as a stream: the SVG of a long deck is as big as the PDF."""
+    pages, rules, delimiters, uprights, hidden, width = [], [], [], [], 0, 0.0
     try:
         for event, el in ET.iterparse(svg, events=("start", "end")):
             if event == "start" and el.tag == SVG + "svg" and not width:
@@ -963,24 +1184,25 @@ def _drawing_pages(svg: Path) -> tuple[set[int], list, float, list]:
             if el.tag in SVG_HIDDEN:
                 hidden += 1 if event == "start" else -1
             elif event == "start" and el.tag == SVG + "page":
-                pages.append([])
-                rules.append([])
-                delimiters.append([])
+                for kept in (pages, rules, delimiters, uprights):
+                    kept.append([])
             elif event == "end" and el.tag == SVG + "path" and not hidden:
                 if not pages:  # a one-page SVG has no <page>
-                    pages.append([])
-                    rules.append([])
-                    delimiters.append([])
+                    for kept in (pages, rules, delimiters, uprights):
+                        kept.append([])
                 if (drawn := _delimiters(el)):
                     delimiters[-1] += drawn
                 elif (shape := _figure_shape(el)):
                     pages[-1].append(shape)
                 elif (rule := _rule(el)):
                     rules[-1].append(rule)
+                elif (side := _upright(el)):
+                    uprights[-1].append(side)
             if event == "end":
                 el.clear()
     except ET.ParseError:
         return set(), [], 0.0, []
+    rules = [[r for r in page if not _boxed(r, sides)] for page, sides in zip(rules, uprights)]
     on = Counter(key for shapes in pages for key in {k for k, _ in shapes})
     found = set()
     for n, shapes in enumerate(pages, 1):

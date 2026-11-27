@@ -108,6 +108,17 @@ def test_page_marks_math():
 </pdf2xml>"""
     assert mod._math_pages(xml) == ({2}, 3), mod._math_pages(xml)
 
+    # Word and PowerPoint's math, in a font a PDF maker named plain Cambria,
+    # still counts by its math letters (𝜀 is U+1D700); upright Cambria text does not.
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<pdf2xml>
+<page number="1"><fontspec id="0" family="FOJPPN+Cambria"/>
+<text font="0">𝜎 𝜀 = ∑ 𝜎 𝜀 = 𝜎 𝜀 + 𝜎 𝜀 + 𝜎 𝜀 + 𝜎 𝜀 + 𝜎 𝜀</text></page>
+<page number="2"><text font="0">Plain Cambria body text, long enough to pass twenty letters.</text></page>
+</pdf2xml>"""
+    assert mod._math_pages(xml) == ({1}, 2), mod._math_pages(xml)
+    assert mod._math_letters("𝑣 𝛿") and not mod._math_letters("x = 𝑣") and not mod._math_letters(" ")
+
 
 def test_tex_maps_and_save():
     # _tex_maps completes the ToUnicode map of a TeX font in an incremental
@@ -162,6 +173,37 @@ def test_tex_maps_and_save():
     fixed = mod._pdf_stream(mod._pdf_objects(mod._tex_maps(office))[4])
     assert mod._cmap_entries(fixed) == {0x101: "∏", 0x102: "∑", 0x103: "𝑖", 0x104: "∑"}, fixed
     assert b"<0000> <FFFF>" in fixed and b"<0101> <220F>" in fixed
+    # Cambria Math by its glyph order, also named plain Cambria as Acrobat
+    # embeds it: a map that agrees with OFFICE_GLYPHS on three letters gets the
+    # script glyphs it leaves out (x_i's i, 3036; a script 1, 2869), and its
+    # inline ∑ (963, which says σ) by glyph, while an upright σ (592) stays σ.
+    cmap = (b"1 begincodespacerange <0000> <FFFF> endcodespacerange 5 beginbfchar <073D> <D835DC4E> "
+            b"<073E> <D835DC4F> <0745> <D835DC56> <03C3> <03C3> <0250> <03C3> endbfchar")
+    cambria = pdf((1, b"<< /Type /Catalog >>"),
+                  (2, b"<< /Type /Font /Subtype /Type0 /BaseFont /ABCDEF+Cambria /Encoding /Identity-H /ToUnicode 3 0 R >>"),
+                  (3, b"<< /Length %d >>\nstream\n%s\nendstream" % (len(cmap), cmap)))
+    patched = mod._tex_maps(cambria)
+    entries = mod._cmap_entries(mod._pdf_stream(mod._pdf_objects(patched)[3]))
+    assert (entries[3036], entries[2869], entries[963], entries[592], entries[0x745]) == ("𝑖", "1", "∑", "σ", "𝑖"), entries
+    assert mod._tex_maps(patched) is patched
+    # A text face named Cambria, whose glyphs are numbered otherwise, is left
+    # as it is, its σ included.
+    text_face = cambria.replace(b"<073E> <D835DC4F>", b"<073E> <0416>")
+    assert mod._tex_maps(text_face) is text_face
+    # A CMEX font with no map gets one, as a new object its font now names: by
+    # the glyph names its encoding gives (parenleftBigg is a big "("), or by
+    # TeX's own codes without one; a second pass adds nothing.
+    for font, extra, want in ((b"/FirstChar 32 /LastChar 33 /Widths [791 791] /Encoding 3 0 R",
+                               b"<< /Type /Encoding /Differences [32 /parenleftBigg /parenrightBigg] >>", {32: "(", 33: ")"}),
+                              (b"/FirstChar 80 /LastChar 80 /Widths [1000]", b"<< >>", {80: "∑"})):
+        tex = pdf((1, b"<< /Type /Catalog >>"),
+                  (2, b"<< /Type /Font /Subtype /Type1 /BaseFont /RBLKIO+CMEX10 %s >>" % font), (3, extra))
+        patched = mod._tex_maps(tex)
+        objects = mod._pdf_objects(patched)
+        assert b"/ToUnicode 4 0 R" in objects[2] and b"/Size 5" in patched[len(tex):], patched[len(tex):]
+        entries = mod._cmap_entries(mod._pdf_stream(objects[4]))
+        assert {code: entries[code] for code in want} == want, entries
+        assert mod._tex_maps(patched) is patched
     # A font whose map names few of the glyphs its widths list, with no encoding
     # to fall back on, as PowerPoint for the Mac embeds Cambria Math, is unreadable;
     # one with an /Encoding or a fuller map is not. Its pages are the ones using it.
@@ -215,6 +257,69 @@ def test_rebuild_page():
     lines = [" ".join(line.split()) for line in mod._rebuild_page(page, fonts, rules, 1.5).splitlines()]
     assert lines == ["x_i + y^2 e^{−1^2}", "z = (a+b)/2", "A B", "1 2", "s = ∑_{i=1}^n x", "exp(−1)"], lines
     assert mod._nest([]) == ""
+
+    # A numerator's script stays in it when another script sets the part
+    # deeper: the 2 of P_0^2 sits higher than the cut from the bar (an exam
+    # solution's (P^2 − P_0^2)/(2EHB) came out as ((P−P_0)/(2EHB))^2).
+    page = mod.ET.fromstring("<page number='1' width='918' height='1188'>" + "".join([
+        run(778, 374, 14, 16, 0, "P"), run(776, 388, 6, 11, 1, "2"), run(777, 399, 14, 17, 0, "−"),
+        run(778, 417, 14, 16, 0, "P"), run(786, 428, 6, 11, 1, "0"), run(776, 431, 6, 11, 1, "2"),
+        run(802, 379, 9, 16, 0, "2"), run(802, 388, 43, 16, 0, "EHB"),
+    ]) + "</page>")
+    lines = [" ".join(line.split()) for line in
+             mod._rebuild_page(page, fonts, [(249.39, 291.81, 531.97)], 1.5).splitlines()]
+    assert lines == ["(P^2−P_0^2)/(2EHB)"], lines
+
+    # A big bracket from TeX's big-symbol font, set smaller than the text, is
+    # a piece of the line, never a script: α(x, not α^(x.
+    page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+        run(100, 100, 10, 16, 0, "α"), run(97, 110, 6, 11, 4, "("), run(100, 118, 10, 16, 0, "x"),
+    ]) + "</page>")
+    lines = [" ".join(line.split()) for line in
+             mod._rebuild_page(page, {**fonts, "4": (12, "AB+CMEX10")}, [], 1.5).splitlines()]
+    assert lines == ["α(x"], lines
+
+    # A small fraction whose bar is level with the line's middle is in the
+    # line, not a superscript, and so is cos set across its bar; one set high
+    # is a script; one right after a number keeps a space from it.
+    page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+        run(100, 100, 33, 16, 0, "A ="), run(96, 135, 8, 11, 1, "G"), run(108, 135, 8, 11, 1, "t"),
+        run(102, 145, 18, 11, 1, "cos"), run(100, 168, 8, 16, 0, "x"),
+        run(140, 200, 8, 16, 0, "e"), run(126, 210, 6, 8, 1, "1"), run(136, 210, 6, 8, 1, "2"),
+        run(200, 100, 60, 16, 0, "V = 135000"), run(196, 162, 6, 11, 1, "6"), run(208, 160, 10, 11, 1, "12"),
+    ]) + "</page>")
+    bars = [(88.67, 96.67, 71.67), (139.33, 144.67, 90), (106.67, 114, 138.33)]
+    lines = [" ".join(line.split()) for line in mod._rebuild_page(page, fonts, bars, 1.5).splitlines()]
+    assert lines == ["A =G/tcos x", "e^{1/2}", "V = 135000 6/12"], lines
+
+    # A root Word and PowerPoint draw as an outline (_radical) stands before
+    # what its bar covers, which goes in brackets, a fraction included; what
+    # follows the bar's end is outside: K = σ√(πa) = 1, √(a/b) + c.
+    root = [(138.4, 194.5), (158.9, 194.5), (158.9, 195.6), (139.0, 195.6), (134.6, 210.4), (133.9, 210.4),
+            (130.6, 203.2), (129.2, 203.8), (128.9, 203.2), (131.6, 202.0), (134.4, 208.3)]
+    assert mod._radical(root) == ("√", 128.9, 194.5, 138.4, 210.4, 158.9), mod._radical(root)
+    d = "M " + " L ".join(f"{x} {y}" for x, y in root) + " Z"
+    assert [c for c, *_ in mod._delimiters(mod.ET.fromstring(f'<path fill="black" d="{d}"/>'))] == ["√"]
+    assert mod._radical([(0, 0), (2, 0), (2, 40), (0, 40), (0, 38), (1, 38), (1, 2), (0, 2)]) is None  # a bar
+    assert mod._radical([(0, 0), (1, 0), (1, 19), (20, 19), (20, 20), (0, 20)]) is None  # an L, an axis
+    page = mod.ET.fromstring("<page number='1' width='900' height='1200'>" + "".join([
+        run(100, 60, 50, 16, 5, "K = 𝜎"), run(100, 121, 18, 16, 5, "𝜋𝑎"), run(100, 145, 20, 16, 5, "= 1"),
+        run(142, 125, 10, 16, 5, "𝑎"), run(162, 125, 10, 16, 5, "𝑏"), run(152, 145, 30, 16, 5, "+ 𝑐"),
+    ]) + "</page>")
+    office = {"5": (18, "AB+CambriaMath")}
+    drawn = [("√", 110, 96, 120, 117, 140), ("√", 110, 140, 120, 180, 140)]
+    lines = [" ".join(line.split()) for line in
+             mod._rebuild_page(page, office, [(122, 138, 160)], 1, drawn).splitlines()]
+    assert lines == ["K = 𝜎√(𝜋𝑎) = 1", "√(𝑎/𝑏) + 𝑐"], lines
+    # Brackets drawn round digits count as a formula's when their font sets
+    # math letters elsewhere on the page, as Office's Cambria Math named plain
+    # Cambria does: x = (1 + 2), its brackets kept.
+    page = mod.ET.fromstring("<page number='1' width='900' height='1200'>"
+                             + run(100, 0, 20, 16, 6, "𝑥 =") + run(100, 110, 40, 16, 6, "1 + 2") + "</page>")
+    drawn = [("(", 100, 96, 108, 118), (")", 150, 96, 158, 118)]
+    lines = [" ".join(line.split()) for line in
+             mod._rebuild_page(page, {"6": (18, "AB+Cambria")}, [], 1, drawn).splitlines()]
+    assert lines == ["𝑥 = (1 + 2)"], lines
 
     # Drawn brackets (in points, here at scale 1) go into the formula beside them:
     # "{" inside the run pdftohtml spans across its gap, at the run's space, "}"
@@ -479,5 +584,15 @@ def test_drawn_brackets_and_svg_figures():
         assert mod._drawing_pages(drawn)[0] == {2, 3}, mod._drawing_pages(drawn)
         assert mod._drawing_pages(drawn)[2] == 454.0
         assert mod._drawing_pages(drawn)[3] == [[], [], [], [("(", 302, 150, 312, 190), (")", 330, 150, 340, 190)]]
+        # A boxed answer's top and bottom, met by an upright line at both
+        # ends, are no fraction bars; a bar on its own, or one upright at a
+        # single end, stays a rule.
+        line = '<path fill="none" stroke="black" stroke-width="0.4" d="M {} {} L {} {}"/>'
+        box = "".join(line.format(*p) for p in ((400, 160, 458, 160), (400, 176, 458, 176),
+                                                (400, 160, 400, 176), (458, 160, 458, 176)))
+        drawn.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="595">{box}'
+                         f'{line.format(100, 168, 140, 168)}{line.format(200, 168, 240, 168)}'
+                         f'{line.format(200, 160, 200, 176)}</svg>', encoding="utf-8")
+        assert mod._drawing_pages(drawn)[1] == [[(100, 140, 168, 0), (200, 240, 168, 0)]], mod._drawing_pages(drawn)[1]
         drawn.write_text("<svg", encoding="utf-8")
         assert mod._drawing_pages(drawn) == (set(), [], 0.0, [])
