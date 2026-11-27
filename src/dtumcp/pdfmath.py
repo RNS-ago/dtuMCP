@@ -74,14 +74,14 @@ def _page_marks(path: Path) -> dict:
 
 
 def _marks(path: Path) -> dict:
-    xml = _poppler("pdftohtml", "-xml", "-i", "-stdout", "-q", path)
+    xml = _poppler("pdftohtml", "-enc", "UTF-8", "-xml", "-i", "-stdout", "-q", path)
     math, pages = _math_pages(xml)
     with tempfile.TemporaryDirectory() as tmp:
         svg = Path(tmp) / "pages.svg"
         _poppler("pdftocairo", "-svg", path, svg)
         drawing, rules, width, delimiters = _drawing_pages(svg) if svg.exists() else (set(), [], 0.0, [])
     images = _picture_pages(_poppler("pdfimages", "-list", path, timeout=60), pages)
-    words = _word_boxes(_poppler("pdftotext", "-bbox", path, "-")) if math else []
+    words = _word_boxes(_poppler("pdftotext", "-enc", "UTF-8", "-bbox", path, "-")) if math else []
     try:
         _write_math_text(path, xml, math, rules, width, delimiters, words)
     except OSError:  # no rebuilt math beside the PDF; its marks still count

@@ -369,9 +369,10 @@ def _pdf_text(path: Path) -> str | None:
     caller can fall back to handing over the file itself."""
     try:
         done = subprocess.run(
-            ["pdftotext", "-layout", "-q", str(path), "-"],
+            # -enc: Windows builds of poppler write Latin-1 unless told
+            ["pdftotext", "-enc", "UTF-8", "-layout", "-q", str(path), "-"],
             capture_output=True,
-            encoding="utf-8",  # what pdftotext writes; text=True would guess cp1252 on Windows
+            encoding="utf-8", errors="replace",  # text=True would guess cp1252 on Windows
             timeout=120,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
