@@ -21,7 +21,20 @@ from .courses import (
 from .files import _file_text, _link_note, _linked_file, _safe, _saved_text
 from .download import _background, _code, _course, _download, _status, _summary
 from .search import _search_answer
+from .skills import TEXT
 from .video import _topic_parents, _video_link, _video_topic
+
+
+@_tool
+def guide() -> str:
+    """How to use these tools: call this once, before any other dtu-learn tool,
+    in every conversation about the user's DTU courses, and follow what it says.
+    It says how to find a course, keep its saved copy current, search before
+    reading, and read PDFs, workbooks and figures. Skip it only if the dtu-learn
+    skill is already loaded, which is the same text."""
+    # The skill's text for clients that pass only tools to the model, as
+    # Claude Desktop does: it drops server instructions and resource reads.
+    return TEXT.split("---\n", 2)[2].lstrip()
 
 
 @_tool

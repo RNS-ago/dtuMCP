@@ -1,3 +1,8 @@
+---
+name: dtu-learn
+description: How to answer questions about the user's DTU courses with the dtu-learn tools. Use it for anything about a DTU course, from its slides, notes, exercises, hand-ins, announcements and schedule to studying or exam preparation from its material.
+---
+
 # DTU courses
 
 My course material lives in two places: DTU Learn, which needs my session and is
@@ -49,10 +54,15 @@ These need no authentication. Fetch them directly.
   `https://kurser.dtu.dk/course/02249`. Description, learning objectives,
   schedule, exam form, credits, prerequisites. Use it for questions about what a
   course *is*, rather than what was handed out in it.
-- Many courses also run their own site, often under `courses.compute.dtu.dk` or
-  a teacher's page, with notes, exercises and slides. `course_contents` prints
-  the address of any such site the teacher linked, as a `(Link)` line ending in
-  an `http` URL.
+- Many courses also run their own site, with notes, exercises and slides.
+  There is no one place for them: each is set up by the course's teachers,
+  often on the subdomain of the department that teaches it (DTU Compute's
+  `courses.compute.dtu.dk/02110`, `www2.compute.dtu.dk/courses/02450` or
+  `02402.compute.dtu.dk`, DTU Health Tech's `teaching.healthtech.dtu.dk/22100`),
+  and otherwise on GitHub (a `github.io` page or a repository) or a teacher's
+  own page. Many courses have none. `course_contents` prints the address of
+  any such site the teacher linked, as a `(Link)` line ending in an `http`
+  URL; start from that rather than guessing an address.
 
 Two cautions. A public course site is often left over from an earlier edition of
 the course, so check which year it covers before trusting a deadline or a
@@ -194,43 +204,6 @@ teachers actually handed me this term.
   `org_unit_id` it covers all my courses this term; pass one for a single
   course. Use it for anything about when something happens, rather than
   reading dates out of a unit's text.
-
-## Studying with my courses
-
-When what I study comes from one of my DTU courses, that course is the
-reference.
-
-- Use its definitions, notation and names for things, as its slides and
-  notes write them. Where yours differ, say once how they map, then keep to
-  the course's, so what we build matches its exercises and exam.
-- Check against it. When the course states a definition, a theorem or a
-  construction, read it there before teaching or quizzing me on it. If the
-  course and your knowledge disagree, say so and show both.
-- Cite the file and page you are drawing on, so I can find it.
-- Say when you are unsure, and when the course material does not cover
-  something, rather than filling the gap from memory without saying so.
-
-## Tutoring
-
-When I ask you to teach me something or to help me prepare for an exam:
-
-- Start from where I am. Before explaining, ask what I already know or what I
-  have tried, unless I have said. Use `calendar` and the course's current
-  unit to see where the course is, and say when something builds on material
-  it has not reached yet.
-- One idea at a time. Keep explanations short and build them on what the
-  course has already covered, naming the lecture or notes it comes from.
-  Offer to go deeper rather than covering everything at once.
-- Show, then let me try. Work through an example, preferably one from the
-  course's own slides or exercise sheets, then give me a similar problem to
-  do myself before moving on.
-- Check that it landed. Instead of "does that make sense?", ask me a short
-  question that needs the idea to answer, or ask me to explain it back.
-- When I get something wrong, point to where my reasoning goes wrong and let
-  me fix it before you give the correction.
-- For exam preparation, use the course's old exams and exercise sheets, quiz
-  me in the exam's format, and mix topics from different weeks rather than
-  drilling one. Bring back what I got wrong earlier in the conversation.
 
 ## Rules
 

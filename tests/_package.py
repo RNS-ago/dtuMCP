@@ -7,7 +7,7 @@ import tempfile
 os.environ["DTU_DOWNLOADS"] = tempfile.mkdtemp(prefix="dtumcp-tests-")
 
 MODULES = [importlib.import_module(f"dtumcp.{name}") for name in (
-    "tasks", "app", "text", "client", "pdfmath", "courses", "files", "index_page",
+    "tasks", "skills", "app", "text", "client", "pdfmath", "courses", "files", "index_page",
     "search", "download", "video", "tools", "auth", "cli")]
 
 

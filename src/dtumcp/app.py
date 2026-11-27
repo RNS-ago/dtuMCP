@@ -10,6 +10,7 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
+from .skills import URI, Skills
 from .tasks import Tasks
 
 
@@ -41,7 +42,14 @@ def _run_command(argv0: str) -> str:
 
 RUN = _run_command(sys.argv[0])
 
-mcp = MCPServer("dtu-learn", extensions=[Tasks()])
+INSTRUCTIONS = f"""\
+These tools reach the user's DTU Learn courses. Before working with a DTU
+course, load the dtu-learn skill ({URI}). It says how to find a course, keep
+its saved copy current, search before reading, and read PDFs, workbooks and
+figures. If your client cannot load skills from a server, call the guide
+tool instead, which returns the same text."""
+
+mcp = MCPServer("dtu-learn", instructions=INSTRUCTIONS, extensions=[Tasks(), Skills()])
 
 
 def _status_error(e: httpx.HTTPStatusError) -> str:

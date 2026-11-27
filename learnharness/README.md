@@ -31,7 +31,7 @@ It reads the same session file as every other client.
 
 ## Agents
 
-The agents get instructions on when to use the tools, so `dtu-learn-prompt.md`
+The agents get instructions on when to use the tools, so the `dtu-learn` skill
 is not needed here. Those instructions make your course the reference when you
 study from it: its definitions and notation, its pages checked before teaching,
 hand-ins and quizzes left for you to do under the course's own rules on

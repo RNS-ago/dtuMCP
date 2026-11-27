@@ -157,17 +157,30 @@ once and keeps running the code it loaded.
 
 Having the tools is not the same as an agent reaching for them. Without
 instructions it answers course questions from memory, invents org unit ids, or
-calls material unreachable because a reply mentioned a file path. Paste
-[`dtu-learn-prompt.md`](dtu-learn-prompt.md) into:
+calls material unreachable because a reply mentioned a file path.
 
-- **Claude Code**: `~/.claude/CLAUDE.md` (`%USERPROFILE%\.claude\CLAUDE.md`),
-  or a project's `CLAUDE.md`.
-- **Cursor**: `~/.cursor/rules/dtu-learn.mdc`
-  (`%USERPROFILE%\.cursor\rules\dtu-learn.mdc`), or Settings → Rules.
-- **Claude Desktop**: a Project's custom instructions.
+The server carries those instructions itself, as the `dtu-learn` skill
+([`src/dtumcp/dtu-learn/SKILL.md`](src/dtumcp/dtu-learn/SKILL.md)), and its
+MCP instructions tell the agent to load it. A client that supports skills
+from MCP servers, such as Claude Code (v2.1.331 or later, interactive
+sessions), lists it as `/dtu-learn:dtu-learn` and loads it when a course comes
+up. It updates with the server, so there is nothing to copy again when it
+changes. It also covers the public course websites, which need no login and
+are fetched with ordinary web tools.
 
-It also covers the public course websites, which need no login and are fetched
-with ordinary web tools.
+To make sure the agent reaches for it, and to say how you want to study,
+paste [`dtu-study-prompt.md`](dtu-study-prompt.md) into
+`~/.claude/CLAUDE.md` (`%USERPROFILE%\.claude\CLAUDE.md`), a Cursor rule or a
+Claude Desktop Project's custom instructions. Its first paragraph sends the
+agent to the skill. The rest, keeping to your course's notation and
+tutoring rather than lecturing, is a matter of taste: change it as you like.
+It stays in your instructions because a rule there outweighs one the agent
+read from a tool, and a long conversation does not lose it.
+
+A client that cannot load skills from a server gets the same text from the
+`guide` tool, whose description asks the agent to call it first. Claude
+Desktop is one: it passes the model the server's tools, but not its
+instructions or resources.
 
 ### LearnHarness
 
