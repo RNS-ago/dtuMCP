@@ -69,7 +69,7 @@ def _powershell(command: list) -> str:
     return "& " + " ".join("'" + part.replace("'", "''") + "'" for part in command)
 
 
-def update(branch: str = "", force_reprocess: bool = False) -> str:
+def update(branch: str = "", force_reprocess: bool = False, force_plugin: bool = False) -> str:
     """Update dtumcp on its current branch, or on <branch>, then reprocess stale courses.
 
     A clone, installed with uv tool install -e or run with uv run, is
@@ -79,7 +79,10 @@ def update(branch: str = "", force_reprocess: bool = False) -> str:
     branch and a GitHub install on what it was installed from. Then
     reprocess runs with the new version, for the courses an older
     version's processing made; force_reprocess (-fr, --force-reprocess)
-    reprocesses every saved course, as reprocess --force. Command line only.
+    reprocesses every saved course, as reprocess --force. A LearnHarness
+    plugin in the default directory is installed again if the new version
+    changed it; force_plugin (-fp, --force-plugin) installs it again
+    anyway, as install_learnharness --force. Command line only.
     """
     info = json.loads(distribution("dtumcp").read_text("direct_url.json") or "{}")
     url = info.get("url", "")
@@ -110,10 +113,11 @@ def update(branch: str = "", force_reprocess: bool = False) -> str:
     # Each in a process of its own, with the new code. uv run, in the clone,
     # brings its dependencies itself.
     after = [[*RUN.split(), "reprocess", *(["--force"] if force_reprocess else [])]]
-    if moved and _plugin_dest().exists():
+    if (moved or force_plugin) and _plugin_dest().exists():
         # Only a plugin installed already, and only in the default directory.
-        after.append([*RUN.split(), "install_learnharness"])
-    restart = "Restart Claude, Cursor, LearnHarness and any other MCP client so they start the new version."
+        after.append([*RUN.split(), "install_learnharness", *(["--force"] if force_plugin else [])])
+    # LearnHarness runs dtumcp afresh for each call; the plugin's install says when it needs a restart.
+    restart = "Restart Claude, Cursor and any other MCP client so they start the new version."
     if os.name == "nt" and changed:
         # Windows replaces no file a running program has open, and this process
         # has dtumcp.exe and its venv open: the install waits for it to exit.
@@ -156,18 +160,26 @@ def _tools_json() -> str:
                        for t in anyio.run(mcp.list_tools)], indent=1)
 
 
-def install_learnharness(plugins: str = "") -> str:
+def install_learnharness(plugins: str = "", force: bool = False) -> str:
     """Install the DTU Learn plugin into LearnHarness, or update it.
 
     Copies the plugin dtumcp ships, with this version's tool list, into
     <plugins>/dtu-learn/dist. plugins is the plugins directory Settings ->
     Community plugins shows, if not the default; dtumcp update installs a
-    plugin in the default one again. Restart LearnHarness afterwards: it
-    loads plugin code only at start. Command line only.
+    plugin in the default one again. A plugin the same as this version's is
+    left alone, unless force (-f, --force). Restart LearnHarness afterwards:
+    it loads plugin code only at start. Command line only.
     """
     dest = _plugin_dest(plugins)
     if dest.is_symlink():
         raise RuntimeError(f"Refusing to replace {dest}: it is a symlink.")
+    source, tools = PLUGINS / "learnharness", _tools_json() + "\n"
+    # What dist/ would hold, by path: the plugin's files but its README, and the tool list.
+    want = {p.relative_to(source): p.read_bytes() for p in source.rglob("*")
+            if p.is_file() and p.name != "README.md"} | {Path("tools.json"): tools.encode()}
+    have = {p.relative_to(dest): p for p in dest.rglob("*") if p.is_file()} if dest.is_dir() else {}
+    if not force and have.keys() == want.keys() and all(have[k].read_bytes() == data for k, data in want.items()):
+        return f"The LearnHarness plugin in {dest} is up to date already; -f or --force installs it again anyway."
     # The plugin runs the dtumcp on PATH or in ~/.local/bin, as backend.cjs
     # extends PATH, so one must be there before anything is written.
     if not shutil.which("dtumcp", path=os.pathsep.join([os.environ.get("PATH", ""),
@@ -179,8 +191,8 @@ def install_learnharness(plugins: str = "") -> str:
     # place and an update leaves no stale files. The sibling data/ is never touched.
     new, aside = dest.with_name("dist.new"), dest.with_name("dist.old")
     shutil.rmtree(new, ignore_errors=True)
-    shutil.copytree(PLUGINS / "learnharness", new, ignore=shutil.ignore_patterns("README.md"))
-    (new / "tools.json").write_text(_tools_json() + "\n", encoding="utf-8")
+    shutil.copytree(source, new, ignore=shutil.ignore_patterns("README.md"))
+    (new / "tools.json").write_text(tools, encoding="utf-8")
     # Swapped by renames, each done whole or not at all, so the plugin folder is
     # never left half deleted: the old dist/ moves aside, the new one takes its
     # place, and only then is the old one deleted.
@@ -210,7 +222,7 @@ def _flag(param: str) -> str:
     return "--" + param.replace("_", "-")
 
 
-SHORT = {"force": "-f", "force_reprocess": "-fr"}  # the yes/no arguments with a short flag too
+SHORT = {"force": "-f", "force_reprocess": "-fr", "force_plugin": "-fp"}  # the yes/no arguments with a short flag too
 
 COMMANDS = {
     f.__name__: f

@@ -447,10 +447,10 @@ These are not MCP tools, so an agent cannot run them.
 | Command | What it does |
 | --- | --- |
 | `login` | Signs in through a browser and saves the session cookies ([Sign in](#4-sign-in)) |
-| `update [branch] [-fr\|--force-reprocess]` | Gets the newest dtumcp on the current branch, or on `branch`, then reprocesses the courses an older version saved |
+| `update [branch] [-fr\|--force-reprocess] [-fp\|--force-plugin]` | Gets the newest dtumcp on the current branch, or on `branch`, then reprocesses the courses an older version saved |
 | `reprocess [course] [-f\|--force]` | Works saved courses out again with the installed version, without downloading them |
 | `download_video <course> <topic>` | Saves a video topic into its course's offline copy, next to its unit's files |
-| `install_learnharness [plugins]` | Installs the LearnHarness plugin, or updates it; `update` does that too for one in the default directory |
+| `install_learnharness [plugins] [-f\|--force]` | Installs the LearnHarness plugin, or updates it if it changed; `update` does that too for one in the default directory |
 | `file_text <path>` | Prints a saved file's text, as `get_file` gives a topic's, for files a course links to |
 
 `tools`, `search_serve`, `video_link`, `course_tab` and `<command> --args
@@ -487,7 +487,9 @@ was installed from (the default, `main`, if none). `dtumcp update <branch>`
 switches to that branch first, and later updates stay on it until
 `dtumcp update main`. `-fr` or `--force-reprocess` reprocesses every saved
 course, as `reprocess --force`. A LearnHarness plugin in the default plugins
-directory is installed again too. Restart your MCP clients afterwards.
+directory is installed again too, if the new version changed it; LearnHarness
+then needs a restart. `-fp` or `--force-plugin` installs it again anyway, as
+`install_learnharness --force`. Restart your other MCP clients afterwards.
 
 > [!NOTE]
 > Windows replaces no program that is running, so there the install goes on in

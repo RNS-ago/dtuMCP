@@ -103,12 +103,14 @@ def test_reprocess_flags():
                               capture_output=True, text=True, timeout=60)
         assert done.stdout.strip() == says, (argv, done)
     assert "reprocess <course> [-f|--force]" in mod._usage()
-    assert "update <branch> [-fr|--force-reprocess]" in mod._usage()
+    assert "update <branch> [-fr|--force-reprocess] [-fp|--force-plugin]" in mod._usage()
+    assert "install_learnharness <plugins> [-f|--force]" in mod._usage()
     # -fr is --force-reprocess, for update.
     script = script.replace("cli.COMMANDS['reprocess'] = lambda course=0, force=False: f'{course} {force}'",
-                            "cli.COMMANDS['update'] = lambda branch='', force_reprocess=False: "
-                            "f'{branch!r} {force_reprocess}'")
-    for argv, says in [([], "'' False"), (["-fr"], "'' True"), (["dev", "--force-reprocess"], "'dev' True")]:
+                            "cli.COMMANDS['update'] = lambda branch='', force_reprocess=False, force_plugin=False: "
+                            "f'{branch!r} {force_reprocess} {force_plugin}'")
+    for argv, says in [([], "'' False False"), (["-fr"], "'' True False"), (["dev", "--force-reprocess"], "'dev' True False"),
+                       (["-fp"], "'' False True"), (["-fr", "--force-plugin"], "'' True True")]:
         done = subprocess.run([sys.executable, "-c", script, "update", *argv], stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=60)
         assert done.stdout.strip() == says, (argv, done)
@@ -188,6 +190,10 @@ def test_update(monkeypatch, tmp_path):
     ran.clear()
     cli.update()
     assert ran == [then, ["dtumcp", "install_learnharness"]], ran
+    # -fp installs it again, --force, even with nothing new.
+    ran.clear()
+    cli.update(force_plugin=True)
+    assert ran == [then, ["dtumcp", "install_learnharness", "--force"]], ran
     plugin.rmdir()
     ran.clear()
     commit("uv.lock")
@@ -240,8 +246,11 @@ def test_install_learnharness(monkeypatch, tmp_path):
     assert {"main.js", "backend.cjs", "manifest.json", "styles.css", "assets", "tools.json"} == {
         p.name for p in dest.iterdir()}
     assert "list_courses" in {t["name"] for t in json.loads((dest / "tools.json").read_text())}
+    # The same plugin again is left alone; any difference installs it whole.
+    assert "up to date already" in cli.install_learnharness(str(tmp_path))
+    assert "Installed into" in cli.install_learnharness(str(tmp_path), force=True)
     (dest / "stale.js").write_text("old")
-    cli.install_learnharness(str(tmp_path))
+    assert "Installed into" in cli.install_learnharness(str(tmp_path))
     assert not (dest / "stale.js").exists() and (tmp_path / "dtu-learn" / "data" / "kept").read_text() == "mine"
     assert not (tmp_path / "dtu-learn" / "dist.new").exists() and not (tmp_path / "dtu-learn" / "dist.old").exists()
     # No dtumcp for the plugin to run: nothing is written.
