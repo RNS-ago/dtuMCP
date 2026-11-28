@@ -174,6 +174,7 @@ def test_update(monkeypatch, tmp_path):
     then = ["dtumcp", "reprocess"]
     plugin = tmp_path / "plugins" / "dtu-learn" / "dist"
     monkeypatch.setattr(cli, "_plugin_dest", lambda plugins="": plugin)
+    monkeypatch.setattr(cli, "_completion_file", lambda shell: tmp_path / f"completion.{shell}")
 
     # Nothing new: no restart to ask for.
     assert cli.update() == "dtumcp was up to date already; nothing changed." and ran == [then], ran
@@ -195,6 +196,16 @@ def test_update(monkeypatch, tmp_path):
     cli.update(force_plugin=True)
     assert ran == [then, ["dtumcp", "install_learnharness", "--force"]], ran
     plugin.rmdir()
+    # A completion script saved already is written again, but only with a new version.
+    (tmp_path / "completion.zsh").write_text("old")
+    ran.clear()
+    cli.update()
+    assert ran == [then], ran
+    commit("completion.py")
+    ran.clear()
+    cli.update()
+    assert ran == [then, ["dtumcp", "install_completions", "zsh"]], ran
+    (tmp_path / "completion.zsh").unlink()
     ran.clear()
     commit("uv.lock")
     cli.update()
@@ -263,3 +274,91 @@ def test_install_learnharness(monkeypatch, tmp_path):
     (tmp_path / "linked" / "dtu-learn" / "dist").symlink_to(dest)
     with pytest.raises(RuntimeError, match="symlink"):
         cli.install_learnharness(str(tmp_path / "linked"))
+
+
+def test_completions(tmp_path):
+    # Each script names every command and flag; bash and zsh, run with what
+    # a Tab gives them, offer the commands, a command's flags, the saved
+    # courses' numbers and a command's own words.
+    import shutil
+    import pytest
+    import dtumcp.cli as cli
+    for shell in ("zsh", "bash", "powershell"):
+        text = cli.completions(shell)
+        for name in [*cli.COMMANDS, "file_text", "--force-plugin", "-fr", "--force"]:
+            assert name in text, (shell, name)
+    with pytest.raises(RuntimeError, match="zsh, bash or powershell"):
+        cli.completions("fish")
+
+    downloads = tmp_path / "courses"
+    (downloads / "02231 Cryptography fundamentals, Fall 2026").mkdir(parents=True)
+    (downloads / "notes").mkdir()
+    (downloads / "12345 a file").write_text("")
+    cases = [  # (words typed, the one being completed, what is offered)
+        (["dtumcp", "download_c"], {"download_course"}),
+        (["dtumcp", "reprocess", "-"], {"-f", "--force", "--args"}),
+        (["dtumcp", "update", "-f"], {"-fr", "-fp"}),
+        (["dtumcp", "course_contents", ""], {"02231"}),
+        (["dtumcp", "--json", "list_c"], {"list_courses"}),
+        (["dtumcp", "completions", "z"], {"zsh"}),
+    ]
+    real = cli.DOWNLOADS
+    try:
+        cli.DOWNLOADS = downloads
+        bash, zsh = cli.completions("bash"), cli.completions("zsh")
+    finally:
+        cli.DOWNLOADS = real
+    (tmp_path / "bash.sh").write_text(bash)
+    (tmp_path / "zsh.zsh").write_text(zsh)
+    for typed, offered in cases:
+        words = " ".join(f"'{w}'" for w in typed)
+        done = subprocess.run(["bash", "-c", f"source {tmp_path}/bash.sh; COMP_WORDS=({words}); "
+                               f"COMP_CWORD={len(typed) - 1}; _dtumcp; printf '%s\\n' \"${{COMPREPLY[@]}}\""],
+                              capture_output=True, text=True, timeout=30)
+        assert set(done.stdout.split()) == offered, ("bash", typed, done)
+    if not shutil.which("zsh"):
+        return
+    # zsh's completion builtins stood in for, printing what they are given;
+    # the stand-ins do not filter by what was typed, as zsh does afterwards.
+    stubs = ("compdef() { :; }; compadd() { [[ $1 == -- ]] && shift; print -l -- \"$@\"; }; "
+             "_describe() { local -a a; a=(\"${(@P)2}\"); print -l -- \"${a[@]%%:*}\"; }; _files() { print FILES; }; ")
+    for typed, offered in [(["dtumcp", "reprocess", "-"], {"-f", "--force", "--args"}),
+                           (["dtumcp", "course_contents", ""], {"02231"}),
+                           (["dtumcp", "completions", ""], {"zsh", "bash", "powershell"}),
+                           (["dtumcp", "file_text", "x"], {"FILES"})]:
+        words = " ".join(f"'{w}'" for w in typed)
+        done = subprocess.run(["zsh", "-fc", f"{stubs} source {tmp_path}/zsh.zsh; words=({words}); "
+                               f"CURRENT={len(typed)}; PREFIX='{typed[-1]}'; _dtumcp"],
+                              capture_output=True, text=True, timeout=30)
+        assert set(done.stdout.split()) == offered, ("zsh", typed, done)
+    done = subprocess.run(["zsh", "-fc", f"{stubs} source {tmp_path}/zsh.zsh; words=(dtumcp ''); CURRENT=2; PREFIX=''; _dtumcp"],
+                          capture_output=True, text=True, timeout=30)
+    assert {"list_courses", "update", "--json", "--help"} <= set(done.stdout.split()), done
+
+
+def test_install_completions(monkeypatch, tmp_path):
+    # The script is saved in ~/.config/dtumcp and loaded by one line at the end
+    # of the shell's rc file, added once; PowerShell's $PROFILE is left to the user.
+    import pytest
+    import dtumcp.cli as cli
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("ZDOTDIR", raising=False)
+    monkeypatch.setenv("SHELL", "/usr/bin/zsh")
+    (tmp_path / ".zshrc").write_text("source $ZSH/oh-my-zsh.sh")  # no newline at the end
+    said = cli.install_completions()
+    saved = tmp_path / ".config" / "dtumcp" / "completion.zsh"
+    assert saved.read_text() == cli.completions("zsh") and "Added a line" in said, said
+    assert (tmp_path / ".zshrc").read_text() == f"source $ZSH/oh-my-zsh.sh\nsource {saved}  # dtumcp completion\n"
+    said = cli.install_completions("zsh")
+    assert "up to date already" in said and "Added" not in said, said
+    assert (tmp_path / ".zshrc").read_text().count("dtumcp completion") == 1
+    saved.write_text("an older script")
+    assert "Saved the zsh completion" in cli.install_completions("zsh")
+    # bash, with no .bashrc yet.
+    assert "Added a line" in cli.install_completions("bash")
+    assert (tmp_path / ".bashrc").read_text() == f"source {tmp_path}/.config/dtumcp/completion.bash  # dtumcp completion\n"
+    said = cli.install_completions("powershell")
+    assert (tmp_path / ".config" / "dtumcp" / "completion.ps1").exists() and "$PROFILE" in said, said
+    monkeypatch.setenv("SHELL", "/usr/bin/fish")
+    with pytest.raises(RuntimeError, match="Name the shell"):
+        cli.install_completions()

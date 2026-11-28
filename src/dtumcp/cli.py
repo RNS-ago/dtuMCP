@@ -3,6 +3,7 @@
 import inspect
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from .app import BASE, COOKIE_FILE, DOWNLOADS, RUN, _status_error, mcp
 from .auth import login
+from .completion import SHELLS, script
 from .courses import _copies, _copy, _stored_marks
 from .files import _blocks, _saved_text
 from .download import PROCESSING, _reprocess, _status, _summary
@@ -79,7 +81,8 @@ def update(branch: str = "", force_reprocess: bool = False, force_plugin: bool =
     branch and a GitHub install on what it was installed from. Then
     reprocess runs with the new version, for the courses an older
     version's processing made; force_reprocess (-fr, --force-reprocess)
-    reprocesses every saved course, as reprocess --force. A LearnHarness
+    reprocesses every saved course, as reprocess --force. Completion
+    scripts saved by install_completions are written again. A LearnHarness
     plugin in the default directory is installed again if the new version
     changed it; force_plugin (-fp, --force-plugin) installs it again
     anyway, as install_learnharness --force. Command line only.
@@ -116,6 +119,9 @@ def update(branch: str = "", force_reprocess: bool = False, force_plugin: bool =
     if (moved or force_plugin) and _plugin_dest().exists():
         # Only a plugin installed already, and only in the default directory.
         after.append([*RUN.split(), "install_learnharness", *(["--force"] if force_plugin else [])])
+    # The shells' completion scripts saved already, written again for the new commands.
+    after += [[*RUN.split(), "install_completions", shell] for shell in SHELLS
+              if moved and _completion_file(shell).exists()]
     # LearnHarness runs dtumcp afresh for each call; the plugin's install says when it needs a restart.
     restart = "Restart Claude, Cursor and any other MCP client so they start the new version."
     if os.name == "nt" and changed:
@@ -217,6 +223,65 @@ def install_learnharness(plugins: str = "", force: bool = False) -> str:
             "and enable DTU Learn under Settings -> Community plugins if it is new.")
 
 
+def completions(shell: str) -> str:
+    """Print a completion script for zsh, bash or powershell.
+
+    It completes the commands, each one's flags and, where a course goes,
+    the numbers of the courses saved. Load it from the shell's startup
+    file, as the script's first lines say. Command line only.
+    """
+    spec = []
+    for name, fn in COMMANDS.items():
+        takes = {p: v for p, v in inspect.signature(fn).parameters.items() if p != "ctx"}
+        flags = [f for p, v in takes.items() if v.default is False for f in (SHORT.get(p), _flag(p)) if f]
+        first = next((p for p, v in takes.items() if v.default is not False), "")
+        arg = ("course" if first in ("org_unit_id", "course") else "file" if first == "plugins"
+               else list(SHELLS) if first == "shell" else "")
+        spec.append((name, inspect.getdoc(fn).splitlines()[0], flags, arg))
+    # The commands main() answers itself, which COMMANDS does not hold.
+    spec += [("file_text", "Print a saved file's text, as get_file does a topic's", [], "file"),
+             ("tools", "Print the tools as JSON, for clients that speak no MCP (LearnHarness)", [], ""),
+             ("search_serve", "Answer JSON search requests a line at a time, for LearnHarness", [], "")]
+    return script(shell, spec, DOWNLOADS)
+
+
+def _completion_file(shell: str) -> Path:
+    """Where install_completions saves a shell's script."""
+    return Path("~/.config/dtumcp").expanduser() / f"completion.{'ps1' if shell == 'powershell' else shell}"
+
+
+def install_completions(shell: str = "") -> str:
+    """Save the completion script for zsh, bash or powershell, loaded by each new shell.
+
+    The script goes in ~/.config/dtumcp/completion.<zsh|bash|ps1>, and a
+    line sourcing it at the end of ~/.zshrc or ~/.bashrc, once; for
+    PowerShell, which keeps $PROFILE where it likes, it says the line to
+    add there. Left out, shell is the one $SHELL names (powershell on
+    Windows). dtumcp update writes saved scripts again. To stop, delete
+    the line and the script. Command line only.
+    """
+    shell = shell or ("powershell" if os.name == "nt" else Path(os.environ.get("SHELL", "")).name)
+    if shell not in SHELLS:
+        raise RuntimeError(f"Name the shell: install_completions {', '.join(SHELLS[:-1])} or {SHELLS[-1]}.")
+    path, text = _completion_file(shell), completions(shell)
+    if path.exists() and path.read_text(encoding="utf-8") == text:
+        said = [f"The {shell} completion in {path} is up to date already."]
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        said = [f"Saved the {shell} completion to {path}."]
+    if shell == "powershell":
+        return "\n".join(said + [f'To load it in each new PowerShell, add this line to $PROFILE: . "{path}"'])
+    rc = Path(os.environ.get("ZDOTDIR", "~") if shell == "zsh" else "~", f".{shell}rc").expanduser()
+    had = rc.read_text(encoding="utf-8") if rc.exists() else ""
+    if str(path) not in had:  # a line of one's own loading it counts too
+        with rc.open("a", encoding="utf-8") as f:
+            f.write(("\n" if had and not had.endswith("\n") else "")
+                    + f"source {shlex.quote(str(path))}  # dtumcp completion\n")
+        said.append(f"Added a line loading it to the end of {rc}; it works in shells opened from now on.")
+    return "\n".join(said)
+
+
 def _flag(param: str) -> str:
     """A yes/no argument's flag: force_reprocess is --force-reprocess."""
     return "--" + param.replace("_", "-")
@@ -246,6 +311,8 @@ COMMANDS = {
         reprocess,
         update,
         install_learnharness,
+        completions,
+        install_completions,
     )
 }
 

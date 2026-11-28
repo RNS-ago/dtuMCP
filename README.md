@@ -451,6 +451,8 @@ These are not MCP tools, so an agent cannot run them.
 | `reprocess [course] [-f\|--force]` | Works saved courses out again with the installed version, without downloading them |
 | `download_video <course> <topic>` | Saves a video topic into its course's offline copy, next to its unit's files |
 | `install_learnharness [plugins] [-f\|--force]` | Installs the LearnHarness plugin, or updates it if it changed; `update` does that too for one in the default directory |
+| `install_completions [shell]` | Sets up tab completion for `zsh`, `bash` or `powershell` ([Shell completion](#shell-completion)) |
+| `completions <shell>` | Prints that completion script instead |
 | `file_text <path>` | Prints a saved file's text, as `get_file` gives a topic's, for files a course links to |
 
 `tools`, `search_serve`, `video_link`, `course_tab` and `<command> --args
@@ -461,6 +463,27 @@ dtumcp reprocess 02231
 dtumcp update
 dtumcp download_video 02231 1243820
 ```
+
+#### Shell completion
+
+```bash
+dtumcp install_completions        # your shell, from $SHELL: zsh or bash
+```
+
+That completes the commands, each command's flags and, where a course goes,
+the numbers of your saved courses. It saves the script as
+`~/.config/dtumcp/completion.zsh` (or `.bash`) and adds one line sourcing it
+to the end of `~/.zshrc` or `~/.bashrc`, once; shells opened after that have
+it. With zsh the line must come after `compinit`, which at the end of the
+file it does, oh-my-zsh included. `dtumcp update` writes saved scripts again,
+so new commands complete too. To stop, delete the line and the script.
+
+On Windows, `dtumcp install_completions` saves
+`%USERPROFILE%\.config\dtumcp\completion.ps1` and prints the line to add to
+your PowerShell `$PROFILE`, which PowerShell keeps in a place of its own.
+
+`dtumcp completions <shell>` prints the script instead, to load it some other
+way.
 
 #### reprocess
 

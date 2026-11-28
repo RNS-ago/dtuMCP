@@ -23,6 +23,7 @@ The modules, each importing only those above it:
   video       finding and fetching videos
   tools       the MCP tools
   auth        login
+  completion  the shells' completion scripts
   cli         the command line and main()
 
 plugins/ holds the harness plugins dtumcp ships, which install_learnharness
