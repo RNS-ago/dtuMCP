@@ -11,6 +11,28 @@ search over offline copies of your courses.
 DTU's Valence OAuth API needs an admin-registered application, so this server
 signs in with your own browser session cookies instead.
 
+## Contents
+
+- [Install](#install)
+  - [1. uv](#1-uv)
+  - [2. poppler](#2-poppler)
+  - [3. dtumcp](#3-dtumcp)
+  - [4. Sign in](#4-sign-in)
+- [Connect a client](#connect-a-client)
+  - [Tell your agent to use it](#tell-your-agent-to-use-it)
+  - [LearnHarness](#learnharness)
+  - [claude.ai in the browser](#claudeai-in-the-browser)
+- [MCP tools](#mcp-tools)
+  - [Offline copies](#offline-copies)
+  - [Search](#search)
+  - [Terms](#terms)
+- [Command line](#command-line)
+  - [Command-line only](#command-line-only)
+    - [Shell completion](#shell-completion)
+    - [reprocess](#reprocess)
+    - [update](#update)
+- [Test](#test)
+
 ## Install
 
 > [!NOTE]
